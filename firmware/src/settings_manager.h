@@ -62,6 +62,12 @@ struct Settings : public JsonSerializable {
     // tm_wday straight out of localtime_r() cleans on the wrong day.
     SchedDay sched[SCHEDULE_DAYS];
 
+    // Daily maintenance automation
+    bool autoRestartEnabled = false;
+    int autoRestartHour = 3;
+    int autoRestartMinute = 0;
+    bool restartBeforeClean = false;
+
     std::vector<Field> toFields() const override;
     bool fromFields(const std::vector<Field>& fields) override;
 };

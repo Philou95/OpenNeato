@@ -113,6 +113,10 @@ const settingsPayload = (state, includeNavMode = true) => {
         "ntfyOnAlert",
         "ntfyOnDocking",
         "scheduleEnabled",
+        "autoRestartEnabled",
+        "autoRestartHour",
+        "autoRestartMinute",
+        "restartBeforeClean",
     ];
     for (const key of keys) settings[key] = state[key];
     for (let day = 0; day < 7; day++) {
