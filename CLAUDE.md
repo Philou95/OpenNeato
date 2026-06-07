@@ -17,7 +17,7 @@ Three independent components plus an HA integration:
 | Component | Path | Language | Toolchain |
 |-----------|------|----------|-----------|
 | Firmware | `firmware/` (source in `firmware/src/`, libs in `firmware/lib/`) | C++ (Arduino) | PlatformIO (`platformio.ini` at root) |
-| Frontend | `frontend/` | TypeScript, Preact | Vite, Biome |
+| Frontend | `frontend/` | TypeScript, Preact | Vite, oxlint + oxfmt |
 | Flash tool | `flash/` | Go | Go build, GoReleaser |
 | HA integration | `custom_components/openneato/` | Python | Home Assistant |
 
@@ -38,9 +38,9 @@ cd frontend
 npm ci                  # Install deps (first time / lockfile changed)
 npm run dev             # Vite dev server with mock API (localhost:5173)
 npm run build           # Lint + typecheck + vite build + generate web_assets.h
-npm run check           # Biome lint/format check only
-npm run fix             # Auto-fix safe lint issues
-npm run fix:unsafe      # Auto-fix including unsafe transforms
+npm run check           # Format + lint + i18n checks only
+npm run fix             # Auto-format and auto-fix lint issues
+npm run i18n:check      # Verify every user-facing string goes through i18n
 ```
 
 ### Firmware
@@ -93,8 +93,12 @@ GitHub Actions (`ci.yml`) runs on push to main and PRs:
 - No exceptions — return-value error handling, early returns
 
 ### Frontend (TypeScript)
-- 4-space indent, double quotes, semicolons, 120-col (enforced by Biome)
+- 4-space indent, double quotes, semicolons, 120-col (enforced by oxfmt)
 - Named `interface`/`type` only — never inline object type literals
+- Every user-facing string goes through i18n: `<T>text</T>` in JSX, `t("text")` in props and
+  attributes. The custom oxlint rule `openneato-i18n` fails the build on literals that don't.
+  Locale files live in `frontend/src/i18n/locales/` and must all carry the same keys in the
+  same order — `npm run check` enforces that too.
 
 ## Key Conventions
 
