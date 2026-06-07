@@ -1,3 +1,15 @@
+// Unit tests for the custom oxlint i18n plugin.
+//
+// These tests call rule visitor callbacks with small AST-shaped fixtures instead of parsing real JSX.
+// That keeps the tests dependency-free and lets us cover the rule logic directly, including edge cases that
+// would be awkward to express as full source files.
+//
+// Covered scenarios:
+// - plain JSX text is rejected unless it is inside <T>, allowed text, ignored markup, punctuation, or units
+// - literal JSX expressions and translatable string attributes are rejected outside the i18n boundary
+// - <T> accepts only static literal source text and no props, so interpolation must use t(...)
+// - locale JSON files are checked pairwise for identical key sets and identical key order
+
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
