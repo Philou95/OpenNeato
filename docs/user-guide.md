@@ -97,7 +97,8 @@ These are the **robot's** RX/TX labels, so you cross-connect to the ESP32:
 | TX        | ESP RX    | Robot sends data to ESP      |
 | GND       | GND       | Common ground                |
 
-The default TX/RX GPIOs depend on the chip (ESP32-C3: GPIO 3/4, ESP32-S3: GPIO 17/18,
+The default TX/RX GPIOs depend on the target (ESP32-C3 DevKit: GPIO 3/4,
+Seeed Studio XIAO ESP32C3: GPIO 21/20, ESP32-S3: GPIO 17/18,
 original ESP32: GPIO 17/16) but are fully configurable from the web UI in
 **Settings -> Device -> UART Pins** — so wire whichever GPIOs are convenient and update the
 setting to match.
