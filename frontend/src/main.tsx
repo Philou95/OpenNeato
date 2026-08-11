@@ -1,6 +1,7 @@
 import { render } from "preact";
 import { App } from "./app";
 import "./style.css";
+import { clearUpdateCache } from "./update";
 
 declare const __DEMO_BUILD__: boolean;
 
@@ -8,6 +9,7 @@ if (__DEMO_BUILD__) {
     const scenario = new URLSearchParams(location.search).get("scenario");
     if (scenario) {
         document.cookie = `openneato_scenario=${encodeURIComponent(scenario)}; Path=/; SameSite=Lax`;
+        if (!scenario.split("|").includes("upd")) clearUpdateCache();
     }
 
     void import("./analytics").then(({ startAnalytics }) => startAnalytics());

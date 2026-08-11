@@ -180,12 +180,6 @@ const handleRequest = async (req, res) => {
 function mockApiPlugin() {
     return {
         name: "mock-api",
-        transformIndexHtml(html) {
-            return html.replace(
-                "</head>",
-                `<script>(()=>{const p=new URLSearchParams(location.search);const s=p.get("scenario");if(s)document.cookie="openneato_scenario="+encodeURIComponent(s)+"; Path=/; SameSite=Lax";const active=s||document.cookie.split("; ").find((v)=>v.startsWith("openneato_scenario="))?.split("=").slice(1).join("=");const scenario=active?decodeURIComponent(active):"ok";if(!scenario.split("|").includes("upd")){localStorage.removeItem("update_latest_version");localStorage.removeItem("update_last_check");}})();</script></head>`,
-            );
-        },
         configureServer(server) {
             viteLogger = server.config.logger;
             server.watcher.on("change", (file) => {
