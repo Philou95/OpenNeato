@@ -28,6 +28,7 @@ import { TimeInput } from "../components/time-input";
 import { useDirtyGuard } from "../hooks/use-dirty-guard";
 import { usePoll } from "../hooks/use-poll";
 import { usePolling } from "../hooks/use-polling";
+import type { DistanceUnit } from "../distance-units";
 import { availableLocales, type LanguagePreference, T, useI18n } from "../i18n";
 import type { FirmwareVersion, SystemData, UserSettingsData } from "../types";
 import { normalizeError } from "../utils";
@@ -54,6 +55,8 @@ interface SettingsViewProps {
     onThemeChange: (t: Theme) => void;
     language: LanguagePreference;
     onLanguageChange: (language: LanguagePreference) => void;
+    distanceUnit: DistanceUnit;
+    onDistanceUnitChange: (unit: DistanceUnit) => void;
     firmware: FirmwareVersion | null;
 }
 
@@ -65,7 +68,15 @@ function languageLabel(locale: string): string {
     }
 }
 
-export function SettingsView({ theme, onThemeChange, language, onLanguageChange, firmware }: SettingsViewProps) {
+export function SettingsView({
+    theme,
+    onThemeChange,
+    language,
+    onLanguageChange,
+    distanceUnit,
+    onDistanceUnitChange,
+    firmware,
+}: SettingsViewProps) {
     const { t, formatDuration, formatBytes } = useI18n();
     const navigate = useNavigate();
     const systemPoll = usePolling<SystemData>(api.getSystem, 10000);
@@ -375,10 +386,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
             <div class="settings-page">
                 <SettingsCategory title={t("Appearance")} icon={paletteSvg} defaultOpen>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Theme</T>
-                        </div>
-                        <div class="settings-theme-row">
+                        <div class="settings-theme-row" role="group" aria-label={t("Theme")}>
                             <button
                                 type="button"
                                 class={`settings-theme-btn${theme === "system" ? " active" : ""}`}
@@ -413,12 +421,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Language</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Language")}
                                 value={language}
                                 onChange={(e) =>
                                     onLanguageChange((e.target as HTMLSelectElement).value as LanguagePreference)
@@ -435,6 +441,24 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                             <T>Choose the interface language. Missing translations fall back to English.</T>
                         </div>
                     </div>
+                    <div class="settings-section">
+                        <div class="settings-tz-select-wrap">
+                            <select
+                                class="settings-tz-select"
+                                aria-label={t("Distance unit")}
+                                value={distanceUnit}
+                                onChange={(e) =>
+                                    onDistanceUnitChange((e.target as HTMLSelectElement).value as DistanceUnit)
+                                }
+                            >
+                                <option value="meters">{t("Meters")}</option>
+                                <option value="feet">{t("Feet")}</option>
+                            </select>
+                        </div>
+                        <div class="settings-robot-time">
+                            <T>Choose the units used for distance and area in cleaning history.</T>
+                        </div>
+                    </div>
                 </SettingsCategory>
 
                 <SettingsCategory title={t("Device")} icon={gearSvg}>
@@ -447,12 +471,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Hostname</T>
-                        </div>
                         <input
                             type="text"
                             class="settings-text-input"
+                            aria-label={t("Hostname")}
                             value={hostname}
                             maxLength={32}
                             onInput={(e) => setHostname((e.target as HTMLInputElement).value)}
@@ -468,12 +490,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         )}
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>WiFi TX Power</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("WiFi TX Power")}
                                 value={wifiTxPower}
                                 onChange={(e) => setWifiTxPower(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
@@ -491,12 +511,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Timezone</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Timezone")}
                                 value={isCustom ? "__custom__" : tz}
                                 onChange={(e) => {
                                     const val = (e.target as HTMLSelectElement).value;
@@ -518,10 +536,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>UART Pins</T>
-                        </div>
-                        <div class="settings-pin-row">
+                        <div class="settings-pin-row" role="group" aria-label={t("UART Pins")}>
                             <label class="settings-pin-label">
                                 <T>TX (ESP → Robot)</T>
                                 <input
@@ -798,12 +813,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
 
                 <SettingsCategory title={t("House Cleaning")} icon={houseSvg} disabled={firmware?.supported === false}>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Navigation</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Navigation")}
                                 value={navMode}
                                 onChange={(e) => setNavMode((e.target as HTMLSelectElement).value)}
                                 disabled={saving}
@@ -826,12 +839,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
 
                 <SettingsCategory title={t("Manual Clean")} icon={manualSvg}>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Brush Speed</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Brush Speed")}
                                 value={brushRpm}
                                 onChange={(e) => setBrushRpm(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
@@ -848,12 +859,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Vacuum Power</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Vacuum Power")}
                                 value={vacuumSpeed}
                                 onChange={(e) => setVacuumSpeed(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
@@ -870,12 +879,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Side Brush Power</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Side Brush Power")}
                                 value={sideBrushPower}
                                 onChange={(e) => setSideBrushPower(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
@@ -892,12 +899,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Stall Detection</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Stall Detection")}
                                 value={stallThreshold}
                                 onChange={(e) => setStallThreshold(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
@@ -917,10 +922,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
 
                 <SettingsCategory title={t("Firmware")} icon={chipSvg}>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Firmware</T>
-                        </div>
-                        <div class="fw-info-row">
+                        <div class="fw-info-row" role="group" aria-label={t("Firmware")}>
                             <div class="fw-info-item">
                                 <Icon svg={tagSvg} />
                                 <span>{firmware?.version ?? "..."}</span>
@@ -931,10 +933,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                             </div>
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Update</T>
-                        </div>
+                    <div class="settings-section" role="group" aria-label={t("Update")}>
                         {fw.status === "idle" && (
                             <>
                                 <label class="fw-file-label">
@@ -1046,12 +1045,10 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
 
                 <SettingsCategory title={t("Diagnostics")} icon={stethoscopeSvg} lazy>
                     <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Log Level</T>
-                        </div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Log Level")}
                                 value={logLevel}
                                 onChange={(e) => setLogLevel(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
@@ -1148,10 +1145,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                 </button>
 
                 <SettingsCategory title={t("Robot")} icon={robotSvg} disabled={firmware?.supported === false}>
-                    <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Sound</T>
-                        </div>
+                    <div class="settings-section" role="group" aria-label={t("Sound")}>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
                                 <span class="settings-toggle-title">
@@ -1204,10 +1198,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                             />
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Cleaning options</T>
-                        </div>
+                    <div class="settings-section" role="group" aria-label={t("Cleaning options")}>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
                                 <span class="settings-toggle-title">
@@ -1279,10 +1270,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                             />
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Power Saving</T>
-                        </div>
+                    <div class="settings-section" role="group" aria-label={t("Power Saving")}>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
                                 <span class="settings-toggle-title">
@@ -1318,10 +1306,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                             />
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">
-                            <T>Power Control</T>
-                        </div>
+                    <div class="settings-section" role="group" aria-label={t("Power Control")}>
                         <button type="button" class="settings-nav-row" onClick={() => setShowRobotRestartConfirm(true)}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={powerSvg} />
@@ -1329,7 +1314,7 @@ export function SettingsView({ theme, onThemeChange, language, onLanguageChange,
                             </div>
                         </button>
                     </div>
-                    <div class="settings-section">
+                    <div class="settings-section" role="group" aria-label={t("Power Control")}>
                         <button
                             type="button"
                             class="settings-nav-row danger"
