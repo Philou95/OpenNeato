@@ -150,6 +150,7 @@ const DEFAULT_STATE = {
     brushChange: 2592000,
     dirtBin: 30,
     scheduleEnabled: true,
+    skipNextClean: false,
     autoRestartEnabled: false,
     autoRestartHour: 3,
     autoRestartMinute: 0,
