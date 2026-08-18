@@ -55,7 +55,7 @@ archives:
 
 release:
   github:
-    owner: Leicas
+    owner: Philou95
     name: OpenNeato
   extra_files:
     - glob: .pio/build/*-release/*-firmware.bin
