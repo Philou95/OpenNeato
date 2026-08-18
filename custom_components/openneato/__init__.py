@@ -78,7 +78,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Reload the entry when its options change (e.g. floorplan background
+    # calibration) so camera entities pick up the new config without a
+    # full HA restart.
+    entry.async_on_unload(entry.add_update_listener(async_reload_options))
+
     return True
+
+
+async def async_reload_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the config entry to apply updated options."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

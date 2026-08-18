@@ -20,12 +20,20 @@ import io
 import json
 import logging
 import math
+import os
 import re
 from typing import Any
 
 from PIL import Image, ImageDraw
 
 from .const import (
+    CONF_FLOORPLAN_IMAGE,
+    CONF_FLOORPLAN_ORIGIN_X,
+    CONF_FLOORPLAN_ORIGIN_Y,
+    CONF_FLOORPLAN_ROTATION,
+    CONF_FLOORPLAN_SCALE,
+    FLOORPLAN_DEFAULT_ROTATION,
+    FLOORPLAN_DEFAULT_SCALE,
     HISTORY_BG_COLOR,
     HISTORY_CELL_SIZE_M,
     HISTORY_COVERAGE_COLOR,
@@ -205,11 +213,164 @@ def _session_bounds(bounds: dict[str, float], image_size: int):
     return to_x, to_y, min_x, max_x, min_y, max_y, scale
 
 
+# ── Floorplan background ────────────────────────────────────────────────────
+
+# Cache the decoded floorplan image + its mtime so we only re-read the
+# file from disk when it actually changed (avoids opening + decoding the
+# PNG on every render frame during the GIF animation).
+_FLOORPLAN_CACHE: dict[str, tuple[float, Image.Image]] = {}
+
+
+class FloorplanConfig:
+    """Calibrated alignment between the robot world frame and a floorplan image.
+
+    The robot's poses are in metres in its own odometry frame (arbitrary
+    origin/orientation). `origin` is the world coordinate (metres) that
+    maps to the top-left pixel of the image, `rotation` rotates the image
+    around that anchor (degrees, clockwise on screen), and `scale` is how
+    many image pixels represent one metre.
+    """
+
+    __slots__ = ("path", "origin_x", "origin_y", "rotation", "scale")
+
+    def __init__(
+        self,
+        path: str,
+        origin_x: float,
+        origin_y: float,
+        rotation: float,
+        scale: float,
+    ) -> None:
+        self.path = path
+        self.origin_x = origin_x
+        self.origin_y = origin_y
+        self.rotation = rotation
+        self.scale = scale  # guarded in _draw_floorplan_background
+
+    @classmethod
+    def from_options(cls, options: dict[str, Any] | None) -> "FloorplanConfig | None":
+        """Build a config from HA entry options, or None if no image set."""
+        if not options:
+            return None
+        path = options.get(CONF_FLOORPLAN_IMAGE)
+        if not path:
+            return None
+        return cls(
+            path=str(path),
+            origin_x=float(options.get(CONF_FLOORPLAN_ORIGIN_X, 0.0)),
+            origin_y=float(options.get(CONF_FLOORPLAN_ORIGIN_Y, 0.0)),
+            rotation=float(options.get(CONF_FLOORPLAN_ROTATION, FLOORPLAN_DEFAULT_ROTATION)),
+            scale=float(options.get(CONF_FLOORPLAN_SCALE, FLOORPLAN_DEFAULT_SCALE)),
+        )
+
+
+def _load_floorplan(path: str) -> Image.Image | None:
+    """Load and cache the floorplan image, keyed by file path + mtime.
+
+    Returns an RGBA image, or None if the file is missing/unreadable (the
+    caller falls back to the solid background so a broken plan never
+    blocks map rendering).
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _LOGGER.warning("Floorplan image not found: %s", path)
+        return None
+
+    cached = _FLOORPLAN_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    try:
+        img = Image.open(path)
+        img.load()
+    except Exception as err:  # noqa: BLE001 — PIL raises a grab-bag of types
+        _LOGGER.warning("Failed to load floorplan image %s: %s", path, err)
+        return None
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    _FLOORPLAN_CACHE[path] = (mtime, img)
+    return img
+
+
+def _draw_floorplan_background(
+    img: Image.Image,
+    fp: FloorplanConfig,
+    to_x,
+    to_y,
+    session_scale: float,
+) -> None:
+    """Paste the floorplan into the map canvas, aligned to robot coords.
+
+    The session viewport maps world metres → canvas pixels via `to_x`/`to_y`
+    at `session_scale` px/m. The floorplan image's own `scale` says how many
+    of its native pixels represent one metre, so we resize it to
+    native_size * (session_scale / floorplan_scale) before pasting so the
+    plan's geometry matches the robot's world coordinates. The image's
+    bottom-left corner is anchored at the canvas pixel for world
+    (origin_x, origin_y) (the image grows upward/rightward in world space);
+    a rotation is then applied around that anchor.
+    """
+    fp_img = _load_floorplan(fp.path)
+    if fp_img is None:
+        return
+
+    canvas_w, canvas_h = img.size
+    # Anchor pixel = where the floorplan origin lands on the canvas.
+    anchor_px = to_x(fp.origin_x)
+    anchor_py = to_y(fp.origin_y)
+
+    # Resize the plan so its physical dimensions match the session scale.
+    # floorplan_scale (px/m in the source image) → session_scale (px/m on
+    # the canvas), so the resize factor is session_scale / floorplan_scale.
+    # Bail out on a non-positive/absurd scale so a misconfigured option can
+    # never trigger a multi-gigapixel resize.
+    if fp.scale <= 0:
+        _LOGGER.warning("Floorplan scale must be positive (got %s); skipping plan", fp.scale)
+        return
+    factor = session_scale / fp.scale
+    new_w = max(1, int(round(fp_img.width * factor)))
+    new_h = max(1, int(round(fp_img.height * factor)))
+    # Cap the resized dimensions at a sane ceiling to protect memory.
+    if new_w > 4096 or new_h > 4096:
+        _LOGGER.warning("Floorplan resize too large (%dx%d); skipping plan", new_w, new_h)
+        return
+    if (new_w, new_h) != fp_img.size:
+        fp_img = fp_img.resize((new_w, new_h), Image.BICUBIC)
+
+    # The image's top-left corner corresponds to the world point
+    # (origin_x, origin_y + image_height_metres): world Y grows upward but
+    # canvas Y grows downward, so the top-left sits above the origin anchor
+    # on the canvas by the resized image height. origin is the bottom-left
+    # corner of the image in world terms.
+    top_left_x = int(round(anchor_px))
+    top_left_y = int(round(anchor_py - fp_img.height))
+
+    layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    layer.paste(fp_img, (top_left_x, top_left_y))
+
+    if abs(fp.rotation) > 0.01:
+        # Rotate around the anchor pixel so the calibration point stays fixed.
+        layer = layer.rotate(
+            -fp.rotation,  # PIL rotates counter-clockwise for positive angles
+            resample=Image.BICUBIC,
+            center=(anchor_px, anchor_py),
+        )
+
+    # Composite the floorplan under the existing canvas content. The canvas
+    # starts as the solid background; alpha-compositing the layer on top of
+    # a copy and then drawing the rest over it keeps the plan as backdrop.
+    composited = Image.alpha_composite(img.convert("RGBA"), layer)
+    img.paste(composited)
+
+
 def _render_frame(
     data: dict[str, Any],
     image_size: int,
     recording: bool,
     upto_time: float | None,
+    floorplan: FloorplanConfig | None = None,
 ) -> Image.Image | None:
     """Render a single frame as a PIL RGB image.
 
@@ -218,6 +379,10 @@ def _render_frame(
     pinned to the most recent visible pose (styled as the recording
     cursor so the viewer sees the robot mid-run). Bounds are always the
     full-session bounds so the viewport doesn't jitter.
+
+    When a `floorplan` is provided, the image is drawn as the background
+    (replacing the solid color) and the metric grid is skipped so the
+    plan reads clearly underneath the coverage/path overlays.
     """
     bounds = data.get("bounds")
     full_path = data.get("path", [])
@@ -230,25 +395,37 @@ def _render_frame(
     to_x, to_y, min_x, max_x, min_y, max_y, scale = transform
 
     img = Image.new("RGBA", (image_size, image_size), HISTORY_BG_COLOR + (255,))
+
+    # ── Floorplan background ─────────────────────────────────────────────────
+    # Draw the user's house plan as the backdrop (replaces the solid color).
+    # Done before creating the ImageDraw context so path/coverage overlays
+    # render on top of the plan.
+    has_floorplan = False
+    if floorplan is not None:
+        _draw_floorplan_background(img, floorplan, to_x, to_y, scale)
+        has_floorplan = True
+
     draw = ImageDraw.Draw(img)
 
     # ── Grid lines ───────────────────────────────────────────────────
-    grid_step = HISTORY_GRID_STEP_M
-    grid_min_x = math.floor(min_x / grid_step) * grid_step
-    grid_min_y = math.floor(min_y / grid_step) * grid_step
+    # Skip the metric grid when a floorplan is shown — the plan provides the
+    # spatial reference, and overlaying a grid on top would clutter it.
+    if not has_floorplan:
+        grid_step = HISTORY_GRID_STEP_M
+        grid_min_x = math.floor(min_x / grid_step) * grid_step
+        grid_min_y = math.floor(min_y / grid_step) * grid_step
 
-    gx = grid_min_x
-    while gx <= max_x:
-        x_px = to_x(gx)
-        draw.line([(x_px, to_y(min_y)), (x_px, to_y(max_y))], fill=HISTORY_GRID_COLOR, width=1)
-        gx += grid_step
+        gx = grid_min_x
+        while gx <= max_x:
+            x_px = to_x(gx)
+            draw.line([(x_px, to_y(min_y)), (x_px, to_y(max_y))], fill=HISTORY_GRID_COLOR, width=1)
+            gx += grid_step
 
-    gy = grid_min_y
-    while gy <= max_y:
-        y_px = to_y(gy)
-        draw.line([(to_x(min_x), y_px), (to_x(max_x), y_px)], fill=HISTORY_GRID_COLOR, width=1)
-        gy += grid_step
-
+        gy = grid_min_y
+        while gy <= max_y:
+            y_px = to_y(gy)
+            draw.line([(to_x(min_x), y_px), (to_x(max_x), y_px)], fill=HISTORY_GRID_COLOR, width=1)
+            gy += grid_step
     # ── Time-filter the session data ─────────────────────────────────
     if upto_time is None:
         path = full_path
@@ -338,9 +515,10 @@ def render_history_map(
     data: dict[str, Any],
     image_size: int = HISTORY_IMAGE_SIZE,
     recording: bool = False,
+    floorplan: FloorplanConfig | None = None,
 ) -> bytes:
     """Render a cleaning session map as a PNG image. Returns PNG bytes."""
-    img = _render_frame(data, image_size, recording, upto_time=None)
+    img = _render_frame(data, image_size, recording, upto_time=None, floorplan=floorplan)
     if img is None:
         from .lidar_renderer import render_idle_image
         return render_idle_image(image_size)
@@ -369,6 +547,7 @@ def render_history_animation(
     total_ms: int = MOTION_TOTAL_MS,
     tail_frames: int = MOTION_TAIL_FRAMES,
     max_path_points: int = MOTION_MAX_PATH_POINTS,
+    floorplan: FloorplanConfig | None = None,
 ) -> bytes | None:
     """Render a time-lapse replay of a cleaning session as an animated GIF.
 
@@ -402,13 +581,13 @@ def render_history_animation(
     for i in range(anim_frames):
         frac = (i + 1) / anim_frames
         t = t0 + duration * frac
-        img = _render_frame(frame_data, image_size, recording=False, upto_time=t)
+        img = _render_frame(frame_data, image_size, recording=False, upto_time=t, floorplan=floorplan)
         if img is None:
             return None
         images.append(img)
 
     # Tail: fully-rendered final map so the dashboard lingers on completion.
-    final = _render_frame(frame_data, image_size, recording=False, upto_time=None)
+    final = _render_frame(frame_data, image_size, recording=False, upto_time=None, floorplan=floorplan)
     if final is None:
         return None
     for _ in range(tail_frames):

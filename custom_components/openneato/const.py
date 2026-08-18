@@ -6,6 +6,25 @@ DOMAIN = "openneato"
 CONF_HOST = "host"
 DEFAULT_POLL_INTERVAL = 5  # seconds
 
+# ── Floorplan background (history map camera) ──────────────────────────────
+# When configured, the history/motion map renders a user-supplied house
+# floorplan image as the background instead of the dark solid color. The
+# robot's world coordinates (metres, robot odometry frame) are mapped onto
+# the image via an origin (x,y metres), a rotation (degrees) and a scale
+# (pixels per metre). All four are calibrated manually once.
+CONF_FLOORPLAN_IMAGE = "floorplan_image"  # absolute path to PNG/JPG
+CONF_FLOORPLAN_ORIGIN_X = "floorplan_origin_x"  # metres, robot frame
+CONF_FLOORPLAN_ORIGIN_Y = "floorplan_origin_y"  # metres, robot frame
+CONF_FLOORPLAN_ROTATION = "floorplan_rotation"  # degrees
+CONF_FLOORPLAN_SCALE = "floorplan_scale"  # pixels per metre
+FLOORPLAN_DEFAULT_ROTATION = 0.0
+FLOORPLAN_DEFAULT_SCALE = 20.0  # px/m — a 5 m room spans 100 px
+FLOORPLAN_ORIGIN_STEP = 0.1  # metres, UI increment
+FLOORPLAN_ROTATION_STEP = 1.0  # degrees
+FLOORPLAN_SCALE_STEP = 1.0  # px/m
+FLOORPLAN_SCALE_MIN = 1.0
+FLOORPLAN_SCALE_MAX = 500.0
+
 # The firmware returns uiState as full enum strings like "UIMGR_STATE_HOUSECLEANINGRUNNING".
 # We match using substrings (via .includes() style) like the frontend does in dashboard.tsx.
 # These substring keys are checked against the raw uiState value.

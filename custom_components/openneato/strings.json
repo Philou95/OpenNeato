@@ -19,93 +19,264 @@
   },
   "entity": {
     "sensor": {
-      "battery_level": { "name": "Battery level" },
-      "battery_voltage": { "name": "Battery voltage" },
-      "battery_temperature": { "name": "Battery temperature" },
-      "discharge_mah": { "name": "Battery discharge" },
-      "charge_mah": { "name": "Battery charge" },
-      "external_voltage": { "name": "External voltage" },
-      "error_code": { "name": "Error code" },
-      "error_message": { "name": "Error message" },
-      "wifi_signal": { "name": "WiFi signal" },
-      "uptime": { "name": "Uptime" },
-      "free_heap": { "name": "Free heap" },
-      "storage_used": { "name": "Storage used" },
-      "brush_rpm": { "name": "Brush RPM" },
-      "vacuum_rpm": { "name": "Vacuum RPM" },
-      "side_brush_current": { "name": "Side brush current" },
-      "lidar_rpm": { "name": "LIDAR RPM" },
-      "last_clean_duration": { "name": "Last clean duration" },
-      "last_clean_area": { "name": "Last clean area" },
-      "last_clean_distance": { "name": "Last clean distance" },
-      "last_clean_battery_used": { "name": "Last clean battery used" },
-      "last_clean_mode": { "name": "Last clean mode" },
-      "last_clean_ended": { "name": "Last clean ended" },
-      "analog_battery_voltage": { "name": "Battery voltage (analog)" },
-      "analog_battery_current": { "name": "Battery current" },
-      "analog_external_voltage": { "name": "External voltage (analog)" },
-      "battery_cycles": { "name": "Battery cycles" },
-      "cumulative_cleaning_time": { "name": "Cumulative cleaning time" }
+      "battery_level": {
+        "name": "Battery level"
+      },
+      "battery_voltage": {
+        "name": "Battery voltage"
+      },
+      "battery_temperature": {
+        "name": "Battery temperature"
+      },
+      "discharge_mah": {
+        "name": "Battery discharge"
+      },
+      "charge_mah": {
+        "name": "Battery charge"
+      },
+      "external_voltage": {
+        "name": "External voltage"
+      },
+      "error_code": {
+        "name": "Error code"
+      },
+      "error_message": {
+        "name": "Error message"
+      },
+      "wifi_signal": {
+        "name": "WiFi signal"
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "free_heap": {
+        "name": "Free heap"
+      },
+      "storage_used": {
+        "name": "Storage used"
+      },
+      "brush_rpm": {
+        "name": "Brush RPM"
+      },
+      "vacuum_rpm": {
+        "name": "Vacuum RPM"
+      },
+      "side_brush_current": {
+        "name": "Side brush current"
+      },
+      "lidar_rpm": {
+        "name": "LIDAR RPM"
+      },
+      "last_clean_duration": {
+        "name": "Last clean duration"
+      },
+      "last_clean_area": {
+        "name": "Last clean area"
+      },
+      "last_clean_distance": {
+        "name": "Last clean distance"
+      },
+      "last_clean_battery_used": {
+        "name": "Last clean battery used"
+      },
+      "last_clean_mode": {
+        "name": "Last clean mode"
+      },
+      "last_clean_ended": {
+        "name": "Last clean ended"
+      },
+      "analog_battery_voltage": {
+        "name": "Battery voltage (analog)"
+      },
+      "analog_battery_current": {
+        "name": "Battery current"
+      },
+      "analog_external_voltage": {
+        "name": "External voltage (analog)"
+      },
+      "battery_cycles": {
+        "name": "Battery cycles"
+      },
+      "cumulative_cleaning_time": {
+        "name": "Cumulative cleaning time"
+      }
     },
     "binary_sensor": {
-      "charging": { "name": "Charging" },
-      "external_power": { "name": "External power" },
-      "battery_over_temp": { "name": "Battery over temperature" },
-      "battery_failure": { "name": "Battery failure" },
-      "empty_fuel": { "name": "Battery empty" },
-      "error": { "name": "Error" },
-      "ntp_synced": { "name": "NTP synced" },
-      "dustbin": { "name": "Dust bin" },
-      "left_wheel_lifted": { "name": "Left wheel lifted" },
-      "right_wheel_lifted": { "name": "Right wheel lifted" },
-      "dock_contact": { "name": "Dock contact" }
+      "charging": {
+        "name": "Charging"
+      },
+      "external_power": {
+        "name": "External power"
+      },
+      "battery_over_temp": {
+        "name": "Battery over temperature"
+      },
+      "battery_failure": {
+        "name": "Battery failure"
+      },
+      "empty_fuel": {
+        "name": "Battery empty"
+      },
+      "error": {
+        "name": "Error"
+      },
+      "ntp_synced": {
+        "name": "NTP synced"
+      },
+      "dustbin": {
+        "name": "Dust bin"
+      },
+      "left_wheel_lifted": {
+        "name": "Left wheel lifted"
+      },
+      "right_wheel_lifted": {
+        "name": "Right wheel lifted"
+      },
+      "dock_contact": {
+        "name": "Dock contact"
+      }
     },
     "switch": {
-      "eco_mode": { "name": "Eco mode" },
-      "intense_clean": { "name": "Intense clean" },
-      "bin_full_detect": { "name": "Bin full detect" },
-      "schedule": { "name": "Schedule" },
-      "wall_follower": { "name": "Wall follower" },
-      "button_click_sounds": { "name": "Button click sounds" },
-      "melody_sounds": { "name": "Melody sounds" },
-      "warning_sounds": { "name": "Warning sounds" },
-      "stealth_led": { "name": "Stealth LED" },
-      "notifications_enabled": { "name": "Notifications" },
-      "notify_on_start": { "name": "Notify on clean start" },
-      "notify_on_done": { "name": "Notify on clean done" },
-      "notify_on_error": { "name": "Notify on error" },
-      "notify_on_alert": { "name": "Notify on alert" },
-      "notify_on_docking": { "name": "Notify on docking" },
-      "ap_fallback_on_disconnect": { "name": "WiFi AP fallback" },
-      "remote_syslog": { "name": "Remote syslog" }
+      "eco_mode": {
+        "name": "Eco mode"
+      },
+      "intense_clean": {
+        "name": "Intense clean"
+      },
+      "bin_full_detect": {
+        "name": "Bin full detect"
+      },
+      "schedule": {
+        "name": "Schedule"
+      },
+      "wall_follower": {
+        "name": "Wall follower"
+      },
+      "button_click_sounds": {
+        "name": "Button click sounds"
+      },
+      "melody_sounds": {
+        "name": "Melody sounds"
+      },
+      "warning_sounds": {
+        "name": "Warning sounds"
+      },
+      "stealth_led": {
+        "name": "Stealth LED"
+      },
+      "notifications_enabled": {
+        "name": "Notifications"
+      },
+      "notify_on_start": {
+        "name": "Notify on clean start"
+      },
+      "notify_on_done": {
+        "name": "Notify on clean done"
+      },
+      "notify_on_error": {
+        "name": "Notify on error"
+      },
+      "notify_on_alert": {
+        "name": "Notify on alert"
+      },
+      "notify_on_docking": {
+        "name": "Notify on docking"
+      },
+      "ap_fallback_on_disconnect": {
+        "name": "WiFi AP fallback"
+      },
+      "remote_syslog": {
+        "name": "Remote syslog"
+      }
     },
     "button": {
-      "restart": { "name": "Restart device" },
-      "format_fs": { "name": "Format filesystem" },
-      "robot_restart": { "name": "Restart robot" },
-      "robot_shutdown": { "name": "Shutdown robot" },
-      "locate": { "name": "Locate robot" },
-      "clear_errors": { "name": "Clear errors" },
-      "new_battery": { "name": "New battery" }
+      "restart": {
+        "name": "Restart device"
+      },
+      "format_fs": {
+        "name": "Format filesystem"
+      },
+      "robot_restart": {
+        "name": "Restart robot"
+      },
+      "robot_shutdown": {
+        "name": "Shutdown robot"
+      },
+      "locate": {
+        "name": "Locate robot"
+      },
+      "clear_errors": {
+        "name": "Clear errors"
+      },
+      "new_battery": {
+        "name": "New battery"
+      }
     },
     "number": {
-      "brush_rpm_setting": { "name": "Brush RPM" },
-      "vacuum_speed_setting": { "name": "Vacuum speed" },
-      "side_brush_power_setting": { "name": "Side brush power" },
-      "stall_threshold_setting": { "name": "Stall threshold" }
+      "brush_rpm_setting": {
+        "name": "Brush RPM"
+      },
+      "vacuum_speed_setting": {
+        "name": "Vacuum speed"
+      },
+      "side_brush_power_setting": {
+        "name": "Side brush power"
+      },
+      "stall_threshold_setting": {
+        "name": "Stall threshold"
+      }
     },
     "camera": {
-      "lidar_map": { "name": "LIDAR map" },
-      "motion_map": { "name": "Cleaning replay" }
+      "lidar_map": {
+        "name": "LIDAR map"
+      },
+      "motion_map": {
+        "name": "Cleaning replay"
+      }
     },
     "select": {
-      "navigation_mode": { "name": "Navigation mode" }
+      "navigation_mode": {
+        "name": "Navigation mode"
+      }
     },
     "text": {
-      "syslog_ip": { "name": "Syslog server IP" },
-      "ntfy_topic": { "name": "Notification topic" },
-      "ntfy_server": { "name": "Notification server" },
-      "ntfy_token": { "name": "Notification token" }
+      "syslog_ip": {
+        "name": "Syslog server IP"
+      },
+      "ntfy_topic": {
+        "name": "Notification topic"
+      },
+      "ntfy_server": {
+        "name": "Notification server"
+      },
+      "ntfy_token": {
+        "name": "Notification token"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Floorplan background",
+        "description": "Optionally show a house floorplan image as the background of the cleaning map. Place a PNG/JPG on the Home Assistant machine and enter its absolute path, then calibrate origin, rotation and scale so the robot's path aligns with the walls.",
+        "data": {
+          "floorplan_image": "Floorplan image path (absolute)",
+          "floorplan_origin_x": "Origin X (metres)",
+          "floorplan_origin_y": "Origin Y (metres)",
+          "floorplan_rotation": "Rotation (degrees)",
+          "floorplan_scale": "Scale (pixels per metre)"
+        },
+        "data_description": {
+          "floorplan_image": "Absolute path to a local PNG/JPG, e.g. /config/floorplan.png. Leave empty to disable the background and use the default dark map.",
+          "floorplan_origin_x": "World X (metres, robot frame) where the floorplan image's top-left corner is anchored.",
+          "floorplan_origin_y": "World Y (metres, robot frame) where the floorplan image's top-left corner is anchored.",
+          "floorplan_rotation": "Rotate the floorplan around its anchor (degrees, clockwise).",
+          "floorplan_scale": "How many floorplan-image pixels represent one metre."
+        }
+      }
+    },
+    "error": {
+      "path_must_be_absolute": "The floorplan image path must be absolute (start with /)."
     }
   }
 }
