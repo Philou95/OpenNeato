@@ -29,6 +29,7 @@ from .api import OpenNeatoApiClient
 from .const import DOMAIN, HISTORY_IMAGE_SIZE, LIDAR_POLL_INTERVAL
 from .entity import OpenNeatoEntity
 from .history_renderer import (
+    FloorplanConfig,
     parse_session_jsonl,
     render_history_animation,
     render_history_map,
@@ -67,6 +68,13 @@ def _rank_session_ts(session: dict[str, Any]) -> float:
         return 0.0
 
 
+def _render_animation(parsed: dict, floorplan) -> bytes | None:
+    """Wrapper so async_add_executor_job can pass floorplan as a kwarg."""
+    from .history_renderer import render_history_animation
+
+    return render_history_animation(parsed, floorplan=floorplan)
+
+
 def latest_completed_session(history: Any) -> dict[str, Any] | None:
     """Return the most recent completed (non-recording) session entry."""
     if not isinstance(history, list):
@@ -100,6 +108,10 @@ async def async_setup_entry(
         "sw_version": data["sw_version"],
         "fw_version": data["fw_version"],
         "host": data["host"],
+        # entry.options carries the floorplan background calibration;
+        # the camera rebuilds a FloorplanConfig from it on each render so
+        # a reload (triggered on options change) is picked up live.
+        "options": dict(entry.options),
     }
     async_add_entities(
         [
@@ -129,6 +141,7 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         sw_version: str | None = None,
         fw_version: str | None = None,
         host: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the LIDAR map camera."""
         OpenNeatoEntity.__init__(
@@ -138,6 +151,8 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         Camera.__init__(self)
         self._api = api
         self._attr_unique_id = f"{serial}_lidar_map"
+        # Floorplan background (None disables it → solid color + grid).
+        self._floorplan = FloorplanConfig.from_options(options)
 
         # LIDAR scan state (manual mode only)
         self._accumulator = ScanAccumulator()
@@ -434,7 +449,7 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
 
         try:
             self._history_image = await self.hass.async_add_executor_job(
-                render_history_map, parsed, HISTORY_IMAGE_SIZE, recording
+                render_history_map, parsed, HISTORY_IMAGE_SIZE, recording, self._floorplan
             )
         except Exception:
             _LOGGER.warning(
@@ -483,6 +498,7 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
         sw_version: str | None = None,
         fw_version: str | None = None,
         host: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> None:
         OpenNeatoEntity.__init__(
             self, coordinator, serial,
@@ -491,6 +507,8 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
         Camera.__init__(self)
         self._api = api
         self._attr_unique_id = f"{serial}_motion_map"
+        # Floorplan background (None disables it → solid color + grid).
+        self._floorplan = FloorplanConfig.from_options(options)
 
         self._gif: bytes | None = None
         self._idle_image: bytes | None = None
@@ -576,7 +594,7 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
                 return
             try:
                 gif = await self.hass.async_add_executor_job(
-                    render_history_animation, parsed, HISTORY_IMAGE_SIZE
+                    _render_animation, parsed, self._floorplan
                 )
             except Exception:
                 _LOGGER.warning(

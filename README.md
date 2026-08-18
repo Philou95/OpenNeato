@@ -152,6 +152,30 @@ sensor states) are tagged so they cluster cleanly under HA's Diagnostic section.
 - **ntfy + custom servers** — point `ntfy_server` at a self-hosted instance and `ntfy_token` at a Bearer
   token for authenticated push. Empty server defaults to `ntfy.sh`; empty token is unauthenticated.
 
+### Floorplan background
+
+The `LIDAR map` and `Cleaning replay` cameras can render a house floorplan image
+as the background instead of the default dark grid.
+
+1. Place a PNG or JPG of your floorplan on the Home Assistant machine (e.g.
+   `/config/floorplan.png`).
+2. **Settings → Devices & Services → OpenNeato → Configure**.
+3. Set **Floorplan image path** to the absolute path of the image.
+4. Calibrate the alignment so the robot's recorded path lines up with the walls:
+   - **Origin X / Y** — world coordinate (metres, robot frame) where the
+     floorplan image's bottom-left corner is anchored.
+   - **Rotation** — rotate the plan around that anchor (degrees, clockwise).
+   - **Scale** — how many floorplan-image pixels represent one metre.
+
+The metric grid is hidden while a floorplan is active. Leave the path empty to
+disable the background and restore the default dark map.
+
+> The robot's odometry origin is set when it builds its persistent map and can
+> drift between sessions if localisation is lost, so a calibration is most
+> stable on a robot that keeps its persistent map. Adjust the calibration any
+> time from the same Configure dialog — changes apply on the next render
+> without restarting Home Assistant.
+
 ### Version history
 
 Full per-version notes live in [`custom_components/openneato/CHANGELOG.md`](custom_components/openneato/CHANGELOG.md).
