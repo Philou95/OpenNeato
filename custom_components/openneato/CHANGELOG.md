@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.20.0
+
+### Changed
+
+* **The wall threshold now follows the map instead of standing still.** A
+fixed `WALL_MIN_HITS = 12` rots as cleanings accumulate, and the plan visibly
+gets noisier run after run. Measured on a real four-session map: 13 066 cells,
+median 4 hits, and **23.7% of cells seen exactly once, 45% seen three times or
+fewer**. Those are strays — someone walking past, a grazing return, a scan
+merged a few centimetres out — and a fixed count keeps admitting them.
+
+  Scaling linearly with the session count was tried first and is wrong: it
+  assumes every cell is re-seen every session, which partial coverage
+  contradicts. At four sessions it demands 48 hits and leaves 1157 cells; the
+  outline breaks apart.
+
+  A quantile is self-calibrating — it keeps a stable *share* of the map
+  however many cleanings pile up, and rises on its own as noise accumulates.
+  `WALL_KEEP_QUANTILE = 0.75` lands on 19 at four sessions, which is where an
+  earlier by-eye sweep had put the threshold after two, so the rule agrees
+  with the judgement it replaces. `WALL_MIN_HITS` stays as the floor, so a
+  young map behaves exactly as before.
+
+  Rendered both ways on the same map: **111 336 wall pixels at the old fixed
+  12, 87 311 at the adaptive 19 — 21.6% less ink**, all of it low-confidence.
+
+### Fixed
+
+* **The card kept showing a stale plan.** The cache-buster was the session
+count alone, so a plan that changed for any other reason — a new threshold, or
+the code behind it — kept its old URL and browsers served the image they
+already had. It is now a `render_signature()` combining the session count, the
+threshold and the number of cells clearing it, so the URL changes exactly when
+the picture does.
+
 ## 1.19.2
 
 ### Fixed

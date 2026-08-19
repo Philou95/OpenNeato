@@ -82,8 +82,10 @@ def _floorplan_payload(hass: HomeAssistant, entry_id: str) -> dict[str, Any] | N
                 entry.options.get(CONF_MAP_ROTATION_OFFSET, MAP_DEFAULT_ROTATION_OFFSET)
             )
             return {
-                # The session count busts the browser cache as the map improves.
-                "url": f"/api/openneato/map/{entry_id}?v={mapper.sessions}",
+                # Busts the browser cache whenever the drawn plan changes --
+                # not just when a cleaning is added, since the wall threshold
+                # now moves with the map's own distribution.
+                "url": f"/api/openneato/map/{entry_id}?v={mapper.render_signature()}",
                 "originX": cal["origin_x"],
                 "originY": cal["origin_y"],
                 "rotation": 0.0,
