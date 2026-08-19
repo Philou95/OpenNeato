@@ -16,6 +16,43 @@ from .const import DEFAULT_POLL_INTERVAL, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
+def _rank_session_ts(session: dict[str, Any]) -> float:
+    """Shared ranking key: prefer summary.time, fall back to filename epoch.
+
+    Firmware directory iteration order isn't guaranteed, so we can't
+    trust the list order. Summary.time is the clean's end timestamp;
+    filenames are epoch seconds at session start.
+    """
+    summary = session.get("summary")
+    if isinstance(summary, dict):
+        raw = summary.get("time", 0)
+        if isinstance(raw, (int, float)) and raw > 0:
+            return float(raw)
+    name = session.get("name") or ""
+    try:
+        return float(name.split(".", 1)[0])
+    except ValueError:
+        return 0.0
+
+
+def latest_completed_session(history: Any) -> dict[str, Any] | None:
+    """Return the most recent completed (non-recording) session entry."""
+    if not isinstance(history, list):
+        return None
+    best: dict[str, Any] | None = None
+    best_key = -1.0
+    for session in history:
+        if not isinstance(session, dict) or session.get("recording"):
+            continue
+        if not session.get("name"):
+            continue
+        key = _rank_session_ts(session)
+        if key > best_key:
+            best_key = key
+            best = session
+    return best
+
+
 class OpenNeatoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Single coordinator for all OpenNeato data."""
 

@@ -124,11 +124,42 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[OpenNeatoBinarySensorEntityDescription, ...] =
     OpenNeatoBinarySensorEntityDescription(
         key="sensors_dc_jack_in",
         translation_key="dock_contact",
-        name="Dock contact",
+        # dcJackIn is the robot's own DC barrel jack, NOT the charging dock:
+        # measured False while docked with 18.9 V of external power present.
+        # "On dock" is extPwrPresent, which drives the External power sensor.
+        name="DC jack",
         section="sensors",
         field="dcJackIn",
         device_class=BinarySensorDeviceClass.PLUG,
         entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    # ── Bumper contacts ─────────────────────────────────────────────────
+    # /api/sensors already carries these six bits on every 5 s poll, so they
+    # cost nothing extra to expose. The firmware itself reads them as bumpers
+    # (manual_clean_manager.cpp: bumperFrontLeft = lFrontBit || lLdsBit), and
+    # a stuck bumper is a common reason a robot refuses to start.
+    #
+    # Off by default: they toggle on every contact during a run, and the
+    # recorder database is already large. Enable the ones you want to watch.
+    *(
+        OpenNeatoBinarySensorEntityDescription(
+            key=f"sensors_{key}",
+            translation_key=key,
+            name=label,
+            section="sensors",
+            field=field,
+            icon="mdi:bumper-car",
+            entity_category=EntityCategory.DIAGNOSTIC,
+            entity_registry_enabled_default=False,
+        )
+        for key, field, label in (
+            ("bumper_front_left", "lFrontBit", "Bumper front left"),
+            ("bumper_front_right", "rFrontBit", "Bumper front right"),
+            ("bumper_side_left", "lSideBit", "Bumper side left"),
+            ("bumper_side_right", "rSideBit", "Bumper side right"),
+            ("bumper_lds_left", "lLdsBit", "Bumper LDS left"),
+            ("bumper_lds_right", "rLdsBit", "Bumper LDS right"),
+        )
     ),
 )
 

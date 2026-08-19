@@ -12,18 +12,10 @@ DEFAULT_POLL_INTERVAL = 5  # seconds
 # robot's world coordinates (metres, robot odometry frame) are mapped onto
 # the image via an origin (x,y metres), a rotation (degrees) and a scale
 # (pixels per metre). All four are calibrated manually once.
-CONF_FLOORPLAN_IMAGE = "floorplan_image"  # absolute path to PNG/JPG
-CONF_FLOORPLAN_ORIGIN_X = "floorplan_origin_x"  # metres, robot frame
-CONF_FLOORPLAN_ORIGIN_Y = "floorplan_origin_y"  # metres, robot frame
-CONF_FLOORPLAN_ROTATION = "floorplan_rotation"  # degrees
-CONF_FLOORPLAN_SCALE = "floorplan_scale"  # pixels per metre
-FLOORPLAN_DEFAULT_ROTATION = 0.0
-FLOORPLAN_DEFAULT_SCALE = 20.0  # px/m — a 5 m room spans 100 px
-FLOORPLAN_ORIGIN_STEP = 0.1  # metres, UI increment
-FLOORPLAN_ROTATION_STEP = 1.0  # degrees
-FLOORPLAN_SCALE_STEP = 1.0  # px/m
-FLOORPLAN_SCALE_MIN = 1.0
-FLOORPLAN_SCALE_MAX = 500.0
+# Below this much overlap between the plan and the cleaned area, the
+# background is effectively invisible (blank image margin is what lands on
+# the canvas). Warn with the numbers needed to fix the calibration rather
+# than rendering a blank-looking map with nothing in the log.
 
 # The firmware returns uiState as full enum strings like "UIMGR_STATE_HOUSECLEANINGRUNNING".
 # We match using substrings (via .includes() style) like the frontend does in dashboard.tsx.
@@ -40,6 +32,14 @@ FAN_SPEEDS = ["eco", "normal", "intense"]
 
 # ── LIDAR map camera ────────────────────────────────────────────────
 LIDAR_POLL_INTERVAL = 2  # seconds, only while robot is active
+
+# ── History (cleaning session) map polling ──────────────────────────
+# Re-rendering the in-progress session means re-downloading the whole
+# growing JSONL each time -- the firmware serves no range/tail API. At
+# the LIDAR cadence a ~1h clean would pull ~80 KB roughly 1800 times
+# over the ESP32's blocking serial bridge, which starves the rest of
+# the API. 30 s still tracks the robot closely enough for a map.
+HISTORY_POLL_INTERVAL = 30  # seconds, only while a clean is running
 LIDAR_IMAGE_SIZE = 480  # pixels (square)
 LIDAR_MAX_RANGE_MM = 5000  # display radius
 LIDAR_MAX_DIST_MM = 6000  # reject readings above this
@@ -97,3 +97,18 @@ SESSION_NAME_PATTERN = r"^\d+\.jsonl(\.hs)?$"
 # 1MB SPIFFS history budget cap below this; a larger payload implies a
 # misbehaving peer and we refuse to load it into HA Core.
 MAX_HISTORY_RESPONSE_BYTES = 2 * 1024 * 1024
+
+# ── Generated LIDAR map ─────────────────────────────────────────────
+# The plan is built from the robot's own LIDAR and stays in the robot's
+# coordinate frame, so it never needs calibrating. Its orientation is derived
+# from the walls rather than the dock, which keeps it upright even when the
+# robot's frame is re-zeroed; this offset is added on top for taste.
+CONF_MAP_ENABLED = "lidar_map_enabled"
+CONF_MAP_ROTATION_OFFSET = "lidar_map_rotation_offset"
+MAP_DEFAULT_ENABLED = True
+MAP_DEFAULT_ROTATION_OFFSET = 0.0
+
+# Smallest world span the session viewport will fit to. A clean that has only
+# just started spans centimetres, and fitting that to the canvas produces an
+# absurd pixels-per-metre figure.
+MIN_SESSION_SPAN_M = 2.0
