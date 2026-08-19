@@ -108,14 +108,6 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
         return VacuumActivity.IDLE
 
     @property
-    def battery_level(self) -> int | None:
-        """Return the battery level."""
-        if not self.coordinator.data:
-            return None
-        fuel = self.coordinator.data.get("charger", {}).get("fuelPercent", -1)
-        return None if fuel == -1 else fuel
-
-    @property
     def fan_speed(self) -> str | None:
         """Return the current fan speed."""
         if not self.coordinator.data:

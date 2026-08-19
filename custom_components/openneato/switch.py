@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .api import OpenNeatoApiClient
 from .const import DOMAIN
 from .entity import OpenNeatoEntity
+from .schedule import SCHED_DAYS, SCHED_SLOTS, slot_fields
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -201,6 +202,23 @@ SWITCH_DESCRIPTIONS: tuple[OpenNeatoSwitchEntityDescription, ...] = (
         icon="mdi:console-network",
         entity_category=EntityCategory.CONFIG,
     ),
+) + tuple(
+    # One enable per schedule slot. Generated from the same table the `time`
+    # entities come from, so a day can never be wired to one and not the
+    # other. The master `schedule` switch above gates the lot: a slot being on
+    # does nothing while scheduleEnabled is false.
+    OpenNeatoSwitchEntityDescription(
+        key=f"schedule_{day_key}_{slot + 1}_enabled",
+        translation_key=f"schedule_{day_key}_{slot + 1}_enabled",
+        name=f"Schedule {day_name} {slot + 1} enabled",
+        section="settings",
+        field=slot_fields(day_index, slot)["on"],
+        settings_field=slot_fields(day_index, slot)["on"],
+        icon="mdi:calendar-check",
+        entity_category=EntityCategory.CONFIG,
+    )
+    for day_index, day_key, day_name in SCHED_DAYS
+    for slot in range(SCHED_SLOTS)
 )
 
 

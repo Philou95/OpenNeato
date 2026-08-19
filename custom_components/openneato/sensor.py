@@ -25,7 +25,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .camera import latest_completed_session
+from .coordinator import latest_completed_session
 from .const import DOMAIN
 from .entity import OpenNeatoEntity
 
@@ -37,6 +37,20 @@ def _latest_summary(history: Any) -> dict[str, Any] | None:
         return None
     summary = session.get("summary")
     return summary if isinstance(summary, dict) else None
+
+
+def _summary_value(history: Any, key: str) -> Any:
+    """Return summary[key] for the latest completed session, or None.
+
+    Spelled out rather than the shorter `(s := _latest_summary(h)) and
+    s.get(key)`: when a session carries an empty summary that idiom
+    evaluates to the empty dict itself, which would then be handed to
+    HA as a duration/distance/timestamp state.
+    """
+    summary = _latest_summary(history)
+    if not summary:
+        return None
+    return summary.get(key)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -99,7 +113,12 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         name="Battery discharge",
         section="charger",
         field="dischargeMAH",
-        native_unit_of_measurement="mAh",
+        # The robot names these *MAH, but they are not milliamp-hours: measured
+        # over three samples the value tracked the instantaneous current and
+        # *decreased* (168 -> 151), which a cumulative charge counter cannot do.
+        # They are the rectified halves of batteryCurrentMA, in milliamps.
+        device_class=SensorDeviceClass.CURRENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
         icon="mdi:battery-arrow-down",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -110,7 +129,9 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         name="Battery charge",
         section="charger",
         field="chargerMAH",
-        native_unit_of_measurement="mAh",
+        # See the note on dischargeMAH above — milliamps, not milliamp-hours.
+        device_class=SensorDeviceClass.CURRENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
         icon="mdi:battery-arrow-up",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -181,6 +202,10 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         name="Error code",
         section="error",
         field="errorCode",
+        # 200 is UI_ALERT_INVALID — the robot's documented "no error" sentinel
+        # (docs/neato-serial-protocol.md). Reporting it verbatim made the
+        # dashboard read "Error code 200" on a perfectly healthy robot.
+        value_fn=lambda v: None if v in (200, "200") else v,
         icon="mdi:alert-circle",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
@@ -290,7 +315,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfTime.SECONDS,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:timer-outline",
-        value_fn=lambda data: (s := _latest_summary(data)) and s.get("duration"),
+        value_fn=lambda data: _summary_value(data, "duration"),
     ),
     OpenNeatoSensorEntityDescription(
         key="last_clean_area",
@@ -301,7 +326,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         native_unit_of_measurement="m\u00b2",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:texture-box",
-        value_fn=lambda data: (s := _latest_summary(data)) and s.get("areaCovered"),
+        value_fn=lambda data: _summary_value(data, "areaCovered"),
     ),
     OpenNeatoSensorEntityDescription(
         key="last_clean_distance",
@@ -313,7 +338,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfLength.METERS,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:map-marker-distance",
-        value_fn=lambda data: (s := _latest_summary(data)) and s.get("distanceTraveled"),
+        value_fn=lambda data: _summary_value(data, "distanceTraveled"),
     ),
     OpenNeatoSensorEntityDescription(
         key="last_clean_battery_used",
@@ -339,7 +364,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         section="history",
         field="",
         icon="mdi:robot-vacuum",
-        value_fn=lambda data: (s := _latest_summary(data)) and s.get("mode"),
+        value_fn=lambda data: _summary_value(data, "mode"),
     ),
     OpenNeatoSensorEntityDescription(
         key="last_clean_ended",

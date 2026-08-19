@@ -118,14 +118,17 @@ A single device with the following entity groups:
 
 - **Vacuum** (`vacuum.openneato_<name>`) — start/stop/pause/dock/locate/spot-clean, battery level, status,
   fan speed presets (Eco/Auto/Intense), error reporting. Works with all the standard vacuum cards.
-- **Cameras** — `LIDAR map` (live 360° scan during cleaning) and `Cleaning replay` (animated GIF time-lapse
-  of the most recent completed session). Both are standard HA camera entities, compatible with
-  picture-entity, picture-glance, and vacuum-card.
+- **Map card** — [`openneato-replay-card`](custom_components/openneato/www/openneato-replay-card.js), a
+  canvas Lovelace card that draws the accumulated LIDAR floorplan and replays a cleaning session over it,
+  with pan, zoom and a timeline scrubber. It reads the `openneato/session` and `openneato/sessions`
+  websocket commands directly, so there is no server-side rendering and no image polling. It replaces the
+  former `LIDAR map` and `Cleaning replay` camera entities, which are gone.
 - **Sensors** — battery level/voltage/current/temperature, battery cycle count, cumulative cleaning time,
   WiFi RSSI, free heap, storage used, uptime, motor RPMs, error code/message, plus "last clean" stats
   (duration, area covered, distance, battery used, mode, end time) pulled from the on-device history.
 - **Binary sensors** — charging, external power, battery over-temp, battery failure, empty fuel, error
-  active, NTP synced, dustbin seated, left/right wheel lifted, dock contact.
+  active, NTP synced, dustbin seated, left/right wheel lifted, DC jack, and the six bumper contacts
+  (front/side/LDS, left and right — disabled by default, since they toggle on every bump).
 - **Switches** — eco mode, intense clean, bin-full detect, wall follower, schedule on/off, button-click
   sounds, melodies, warnings, stealth LED, remote syslog, WiFi AP fallback, and per-event push
   notifications (start/done/error/alert/docking).
@@ -141,46 +144,34 @@ sensor states) are tagged so they cluster cleanly under HA's Diagnostic section.
 
 ### Notes for setup
 
-- **Camera entities and vacuum-card** — the `LIDAR map` camera self-manages a 2 s `/api/lidar` poll only
-  while the robot is actively cleaning, so it doesn't add load to the coordinator's 5 s cycle. When idle,
-  both cameras fall back to the most recent completed cleaning map.
+- **Installing the map card** — copy `www/openneato-replay-card.js` into `/config/www/` and register it
+  under *Settings → Dashboards → Resources* as a JavaScript module, then add a manual card with
+  `type: custom:openneato-replay-card`. The walls come from the integration's own LIDAR mapper, which
+  accumulates an occupancy grid across cleanings — the plan sharpens with each run.
+- **Reading the diagnostics** — two field names are misleading and the integration corrects for them:
+  `errorCode` returns **200** (`UI_ALERT_INVALID`) when nothing is wrong, so the *Error code* sensor
+  reports *unknown* instead; and `chargerMAH` / `dischargeMAH` are **milliamps, not milliamp-hours**
+  (measured decreasing while the robot discharged), so they are exposed with a current device class.
+  `dcJackIn` is the robot's own barrel jack, not the dock — *on dock* is `extPwrPresent`.
 - **Coordinator resilience** — the integration tolerates a single hung endpoint without going into
   "requires attention" state. State / charger / system are critical; anything else (errors, motors,
   history) falls back to the last known value during transient ESP32 serial hangs.
-- **No Pillow declared dependency** — map rendering uses Pillow which already ships with HA Core, so the
-  integration's `manifest.json` keeps `"requirements": []`. Nothing extra to install.
+- **No Pillow declared dependency** — the LIDAR mapper writes its wall grid with Pillow, which already
+  ships with HA Core, so the integration's `manifest.json` keeps `"requirements": []`. Nothing extra to
+  install.
 - **ntfy + custom servers** — point `ntfy_server` at a self-hosted instance and `ntfy_token` at a Bearer
   token for authenticated push. Empty server defaults to `ntfy.sh`; empty token is unauthenticated.
-
-### Floorplan background
-
-The `LIDAR map` and `Cleaning replay` cameras can render a house floorplan image
-as the background instead of the default dark grid.
-
-1. Place a PNG or JPG of your floorplan on the Home Assistant machine (e.g.
-   `/config/floorplan.png`).
-2. **Settings → Devices & Services → OpenNeato → Configure**.
-3. Set **Floorplan image path** to the absolute path of the image.
-4. Calibrate the alignment so the robot's recorded path lines up with the walls:
-   - **Origin X / Y** — world coordinate (metres, robot frame) where the
-     floorplan image's bottom-left corner is anchored.
-   - **Rotation** — rotate the plan around that anchor (degrees, clockwise).
-   - **Scale** — how many floorplan-image pixels represent one metre.
-
-The metric grid is hidden while a floorplan is active. Leave the path empty to
-disable the background and restore the default dark map.
-
-> The robot's odometry origin is set when it builds its persistent map and can
-> drift between sessions if localisation is lost, so a calibration is most
-> stable on a robot that keeps its persistent map. Adjust the calibration any
-> time from the same Configure dialog — changes apply on the next render
-> without restarting Home Assistant.
 
 ### Version history
 
 Full per-version notes live in [`custom_components/openneato/CHANGELOG.md`](custom_components/openneato/CHANGELOG.md).
 Highlights:
 
+- **1.12** — the `openneato-replay-card` canvas card replaces the `LIDAR map` and `Cleaning replay`
+  cameras (`Platform.CAMERA` dropped); self-calibrating LIDAR floorplan with per-session alignment;
+  HA-settable 7-day schedule (14 `time` entities + 14 slot switches); six bumper binary sensors, off by
+  default; `chargerMAH` / `dischargeMAH` corrected from mAh to mA; the `errorCode` 200 sentinel no longer
+  reported as an error; `Dock contact` renamed `DC jack`; static floorplan-background option removed.
 - **1.11** — added `notify_on_start` and `ap_fallback_on_disconnect` switches; ntfy topic/server/token text
   entities for full HA-side push config.
 - **1.10** — battery diagnostics (current, voltage, cycles, cumulative cleaning time) on top of firmware
