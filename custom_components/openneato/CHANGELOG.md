@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.19.1
+
+### Fixed
+
+* **"Return to base" did nothing on a stopped robot.** `dock` sends
+`UIMGR_EVENT_SMARTAPP_SEND_TO_BASE`, which the robot only acts on while a
+clean is running or paused. After Stop the run is over, the event lands on a
+robot with nothing to return from, and it just sits there — the button looked
+broken. It now detects that case and briefly restarts cleaning so the state
+machine has a run to end, then sends the robot home. Already docked is a
+no-op; running or paused sends the event straight through as before.
+  * ⚠ The recovery is not free. Per `docs/neato-serial-protocol.md`, a bare
+    `Clean` also resets the robot's position, so the restart discards
+    localisation just as Stop did. There is no lossless way home once a run
+    has been stopped — a robot that comes back beats a preserved frame, and
+    the mapper realigns the next session anyway.
+  * **To keep localisation, pause rather than stop**, then return to base:
+    from paused, no restart happens. Stopping mid-clean now logs this.
+
 ## 1.19.0
 
 ### Added

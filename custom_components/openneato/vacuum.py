@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -19,6 +20,12 @@ from .const import DOMAIN, FAN_SPEEDS, UISTATE_SUBSTRINGS
 from .entity import OpenNeatoEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+# Seconds to let the robot reach a running state before asking it to go home.
+# Measured on a Botvac D6: the UI state machine moves through
+# STARTHOUSECLEANING into HOUSECLEANINGRUNNING in well under two seconds, and
+# SEND_TO_BASE issued before that is dropped.
+RETURN_HOME_RESTART_DELAY = 3.0
 
 SUPPORTED_FEATURES = (
     VacuumEntityFeature.START
@@ -148,7 +155,19 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_stop(self, **kwargs: Any) -> None:
-        """Stop cleaning."""
+        """Stop cleaning.
+
+        Stop ends the run outright. The robot keeps no way back to where it
+        started, and the next clean begins a fresh exploration from a new
+        origin -- which the LIDAR mapper then has to realign onto the
+        accumulated floorplan. If the intent is "come back now", pause and
+        return to base instead: that route keeps localisation.
+        """
+        if self.activity == VacuumActivity.CLEANING:
+            _LOGGER.info(
+                "Stopping mid-clean discards the robot's localisation; pause "
+                "then return to base if you want it home with its frame intact"
+            )
         await self._api.clean("stop")
         await self.coordinator.async_request_refresh()
 
@@ -158,7 +177,46 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
-        """Return to dock."""
+        """Return to dock, from a stopped robot as well as a running one.
+
+        `dock` sends UIMGR_EVENT_SMARTAPP_SEND_TO_BASE, which the robot only
+        acts on while a clean is in progress or paused. After Stop the run is
+        over, so the event lands on a robot with nothing to return from and it
+        simply sits there -- with, per docs/neato-serial-protocol.md, its
+        localisation already discarded and its origin re-zeroed wherever it
+        happened to be. Pressing "return to base" then looks broken.
+
+        So when the robot is idle and off the dock, briefly restart cleaning
+        to give the state machine a run to end, then send it home. The brush
+        spins for a second or two on the way; that is the cost of the button
+        doing what it says from any state.
+
+        That recovery is not free: the protocol notes say a bare `Clean` also
+        resets the robot's position, so the restart discards localisation just
+        as Stop did. There is no lossless way home once a run has been
+        stopped -- a robot that comes back beats a preserved frame, and the
+        LIDAR mapper realigns the next session anyway. To keep localisation,
+        **pause** instead of stopping, then return to base: from PAUSED this
+        method sends the event straight through with no restart.
+        """
+        if self.activity == VacuumActivity.DOCKED:
+            _LOGGER.debug("Return to base ignored: already docked")
+            return
+
+        if self.activity in (VacuumActivity.CLEANING, VacuumActivity.PAUSED):
+            await self._api.clean("dock")
+            await self.coordinator.async_request_refresh()
+            return
+
+        _LOGGER.info(
+            "Robot is %s and off the dock; restarting a clean so it has a run "
+            "to return from, then sending it to base",
+            self.activity,
+        )
+        await self._api.clean("house")
+        # The state machine needs to actually reach a running state before it
+        # will accept the event; sending both back to back is ignored.
+        await asyncio.sleep(RETURN_HOME_RESTART_DELAY)
         await self._api.clean("dock")
         await self.coordinator.async_request_refresh()
 
