@@ -26,6 +26,15 @@ const GRID_GUTTER_RATIO = 0.28;
 const FILL_MIN_HEIGHT = 220;
 // Cell size to fall back on before a session has loaded. The robot maps at
 // 5 cm and so does lidar_mapper.CELL_M.
+// How often the card re-pulls a session the robot is still writing.
+// Matched to the firmware's watched-mode flush. Poses are taken every 2 s
+// but buffered in RAM, and normally only reach the file every 30 s -- that
+// buffering, not this interval, was what made the live map look laggy. While
+// something reads the active session the firmware flushes every 3 s instead,
+// so polling faster than that would fetch the same bytes twice. Measured
+// round trip on a live 38 KB session: ~380 ms.
+const LIVE_REFRESH_MS = 3000;
+
 const DEFAULT_CELL_M = 0.05;
 // Cleaned floor. Opaque and flat: a square is cleaned or it is not, and a
 // translucent wash would put a fourth colour on the map wherever it overlapped
@@ -299,6 +308,9 @@ class OpenNeatoReplayCard extends HTMLElement {
 
     disconnectedCallback() {
         this._stopLoop();
+        // Otherwise the live refresh keeps polling for a card that is no
+        // longer on screen, and keeps a reference to it alive with it.
+        clearTimeout(this._liveTimer);
         if (this._resizeObserver) this._resizeObserver.disconnect();
     }
 
@@ -673,22 +685,67 @@ class OpenNeatoReplayCard extends HTMLElement {
                 ...(this._config.entry_id ? { entry_id: this._config.entry_id } : {}),
             });
             this._entryId = res.entry_id;
-            // Only completed sessions are replayable end to end.
-            this._sessions = (res.sessions || []).filter((s) => !s.recording);
+            // The run in progress is included, so the map can be watched as it
+            // is drawn rather than only after the robot finishes. The backend
+            // already handled a growing session -- it just declines to cache
+            // one -- so this only ever needed the filter lifting.
+            this._sessions = res.sessions || [];
             if (this._sessions.length === 0) {
-                this._fail("No completed cleaning sessions yet");
+                this._fail("No cleaning sessions yet");
                 return;
             }
             this._renderPicker();
-            this._delBtn.disabled = false;
+
+            const live = this._sessions.find((s) => s.recording);
+            // Follow the robot by default while it is cleaning, but never yank
+            // the view away from a session the user chose themselves.
             const wanted =
                 this._selectedName && this._sessions.some((s) => s.name === this._selectedName)
                     ? this._selectedName
-                    : this._sessions[0].name;
+                    : (live || this._sessions[0]).name;
+            // A session the robot is still writing to cannot be deleted -- the
+            // firmware would be appending to a file we just unlinked, and the
+            // websocket command refuses it anyway.
+            this._delBtn.disabled = Boolean(live && wanted === live.name);
             await this._selectSession(wanted);
+            this._scheduleLiveRefresh();
         } catch (err) {
             this._fail(`Could not list sessions: ${err.message || err}`);
         }
+    }
+
+    /* While the selected session is the one the robot is still writing, pull
+       it again on a timer so the map fills in as the robot works. Stops on its
+       own the moment the session is no longer recording, so a finished run
+       costs nothing. */
+    _scheduleLiveRefresh() {
+        clearTimeout(this._liveTimer);
+        const current = this._sessions.find((s) => s.name === this._selectedName);
+        if (!current || !current.recording) return;
+        this._liveTimer = setTimeout(() => this._refreshLive(), LIVE_REFRESH_MS);
+    }
+
+    async _refreshLive() {
+        if (!this._hass || this._loading) {
+            this._scheduleLiveRefresh();
+            return;
+        }
+        try {
+            const res = await this._hass.callWS({
+                type: "openneato/sessions",
+                ...(this._entryId ? { entry_id: this._entryId } : {}),
+            });
+            this._sessions = res.sessions || [];
+            this._renderPicker();
+            this._picker.value = this._selectedName;
+            // Keep the viewer's pan, zoom and scrub position: this is a
+            // background refresh, not a fresh selection.
+            await this._selectSession(this._selectedName, { keepView: true });
+        } catch (_err) {
+            // A refresh that fails is not worth surfacing -- the next tick
+            // will try again, and the map on screen is still valid.
+        }
+        this._scheduleLiveRefresh();
     }
 
     async _deleteSelected() {
@@ -732,6 +789,13 @@ class OpenNeatoReplayCard extends HTMLElement {
         const sum = s.summary || {};
         const start = info.time || Number(String(s.name).split(".")[0]);
 
+        // A run in progress has no summary yet, so say so plainly rather than
+        // showing a line with every figure missing.
+        if (s.recording) {
+            const nav = info.nav ? ` · ${info.nav}` : "";
+            return `${formatDate(start)} — ${modeLabel(info.mode)}${nav} · in progress`;
+        }
+
         const bits = [modeLabel(info.mode)];
         // Navigation mode, recorded per session by the firmware since the
         // header gained "nav". Sessions taped before that simply omit it.
@@ -752,14 +816,19 @@ class OpenNeatoReplayCard extends HTMLElement {
             .join("");
     }
 
-    async _selectSession(name) {
+    // `keepView` is set by the live refresh: it re-fetches the same growing
+    // session every few seconds, and resetting the view or flashing an overlay
+    // each time would make the map unwatchable.
+    async _selectSession(name, { keepView = false } = {}) {
         if (!name || this._loading) return;
         this._selectedName = name;
         this._picker.value = name;
         this._loading = true;
-        this._pause();
-        this._session = null;
-        this._setOverlay("Loading session…");
+        if (!keepView) {
+            this._pause();
+            this._session = null;
+            this._setOverlay("Loading session…");
+        }
 
         try {
             const raw = await this._hass.callWS({
@@ -768,7 +837,7 @@ class OpenNeatoReplayCard extends HTMLElement {
                 ...(this._entryId ? { entry_id: this._entryId } : {}),
             });
             this._session = new Session(raw);
-            this._tf = { panX: 0, panY: 0, zoom: 1 };
+            if (!keepView) this._tf = { panX: 0, panY: 0, zoom: 1 };
             this._cov.sig = "";
             await this._loadFloorplan(raw.floorplan);
             this._renderStats();

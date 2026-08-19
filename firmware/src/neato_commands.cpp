@@ -227,6 +227,9 @@ std::vector<Field> BatteryAnalogData::toFields() const {
             {"batteryCurrentMA", String(batteryCurrentMA), FIELD_INT},
             {"batteryTemperatureC", String(batteryTemperatureC, 2), FIELD_FLOAT},
             {"externalVoltageV", String(externalVoltageV, 3), FIELD_FLOAT},
+            {"wallSensorMM", String(wallSensorMM), FIELD_INT},
+            {"dropSensorLeftMM", String(dropSensorLeftMM), FIELD_INT},
+            {"dropSensorRightMM", String(dropSensorRightMM), FIELD_INT},
     };
 }
 
@@ -448,6 +451,19 @@ bool parseBatteryAnalogData(const String& raw, BatteryAnalogData& out) {
     }
     if (findCsvValue(raw, "ExternalVoltage", val)) {
         out.externalVoltageV = csvLastField(val).toFloat() / 1000.0f;
+        found = true;
+    }
+    // Already millimetres in the robot's own output, so no conversion.
+    if (findCsvValue(raw, "WallSensor", val)) {
+        out.wallSensorMM = csvLastField(val).toInt();
+        found = true;
+    }
+    if (findCsvValue(raw, "DropSensorLeft", val)) {
+        out.dropSensorLeftMM = csvLastField(val).toInt();
+        found = true;
+    }
+    if (findCsvValue(raw, "DropSensorRight", val)) {
+        out.dropSensorRightMM = csvLastField(val).toInt();
         found = true;
     }
     return found;
