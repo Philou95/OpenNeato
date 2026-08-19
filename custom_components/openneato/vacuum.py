@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import OpenNeatoApiClient
-from .const import DOMAIN, FAN_SPEEDS, UISTATE_SUBSTRINGS
+from .const import DOMAIN, FAN_SPEEDS, UISTATE_SUBSTRINGS, is_real_error
 from .entity import OpenNeatoEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,16 +97,29 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
         charger_data = self.coordinator.data.get("charger", {})
         error_data = self.coordinator.data.get("error", {})
 
-        # Error takes priority
-        if error_data.get("hasError"):
-            return VacuumActivity.ERROR
-
         ui_state = state_data.get("uiState", "")
 
-        # Match using substrings, same as the firmware frontend
+        # What the robot is *doing* outranks what it is *complaining about*.
+        #
+        # GetErr latches: it keeps reporting the last fault until something
+        # clears it. A robot that failed to undock (282
+        # UI_ERROR_NAVIGATION_UndockingFailed), then cleaned anyway, then set
+        # off home, still reports 282 the whole way -- so checking the error
+        # first painted a perfectly healthy return to base as ERROR on every
+        # run. The robot's own state machine had already moved on.
+        #
+        # A genuine failure still shows: when the robot really is stuck it
+        # leaves the running/docking states, no substring matches, and the
+        # error check below takes over. The message stays available as the
+        # error_message attribute either way.
+        #
+        # Match using substrings, same as the firmware frontend.
         for substring, activity in UISTATE_SUBSTRINGS:
             if substring in ui_state:
                 return activity
+
+        if is_real_error(error_data):
+            return VacuumActivity.ERROR
 
         # For unmapped states, use charger to distinguish docked vs idle
         if charger_data.get("chargingActive") or charger_data.get("extPwrPresent"):
@@ -141,9 +154,15 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
         if ui_state := state_data.get("uiState"):
             attrs["ui_state"] = ui_state
 
-        if error_data.get("hasError"):
+        # Keep the two apart: "Returning to base" and "Cleaning complete" are
+        # worth surfacing, but calling them errors is what made a normal dock
+        # look like a failure.
+        if is_real_error(error_data):
             attrs["error_message"] = error_data.get("displayMessage", "Unknown error")
             attrs["error_code"] = error_data.get("errorCode")
+        elif error_data.get("hasError"):
+            attrs["alert_message"] = error_data.get("displayMessage", "")
+            attrs["alert_code"] = error_data.get("errorCode")
 
         return attrs
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from homeassistant.components.binary_sensor import (
@@ -15,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import DOMAIN, is_real_error
 from .entity import OpenNeatoEntity
 
 
@@ -25,6 +26,10 @@ class OpenNeatoBinarySensorEntityDescription(BinarySensorEntityDescription):
 
     section: str = ""
     field: str = ""
+    # Given the whole section, return the on/off value. Lets an entity depend
+    # on more than one field — the error sensor needs `kind` as well as
+    # `hasError`. Mirrors the same hook in sensor.py.
+    section_fn: Callable[[dict], bool | None] | None = None
 
 
 BINARY_SENSOR_DESCRIPTIONS: tuple[OpenNeatoBinarySensorEntityDescription, ...] = (
@@ -79,6 +84,9 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[OpenNeatoBinarySensorEntityDescription, ...] =
         name="Error",
         section="error",
         field="hasError",
+        # PROBLEM means "something is wrong". Returning to base is not, and
+        # `hasError` alone tripped this sensor on every end-of-cycle dock.
+        section_fn=is_real_error,
         device_class=BinarySensorDeviceClass.PROBLEM,
     ),
     # ── System ──────────────────────────────────────────────────────────
@@ -199,6 +207,8 @@ class OpenNeatoBinarySensor(OpenNeatoEntity, BinarySensorEntity):
         section_data = self.coordinator.data.get(
             self.entity_description.section, {}
         )
+        if self.entity_description.section_fn is not None:
+            return self.entity_description.section_fn(section_data)
         value = section_data.get(self.entity_description.field)
         if value is None:
             return None

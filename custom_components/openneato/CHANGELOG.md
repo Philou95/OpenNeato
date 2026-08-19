@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.19.2
+
+### Fixed
+
+* **Returning to base showed up as an error.** `GetErr` latches: it keeps
+reporting the last fault until something clears it. A robot that failed to
+undock (282 `UI_ERROR_NAVIGATION_UndockingFailed`), cleaned anyway, then set
+off home, still reported 282 the whole way — and the vacuum entity checked the
+error *before* the robot's own state, so a perfectly healthy return to base
+read as `error` on every run.
+
+  The state now wins. `DOCKINGRUNNING` shows `returning`, `...CLEANINGRUNNING`
+  shows `cleaning`, and the error check only applies when no active state
+  matches — which is exactly when the robot really is stuck. Verified against
+  a live robot mid-dock with 282 latched: `error` before, **`returning`**
+  after, with the message kept as the `error_message` attribute and the
+  dedicated Error binary sensor still `on`. The vacuum says what the robot is
+  *doing*; the error sensor says there is a fault to acknowledge.
+
+* **Informational alerts no longer count as problems.** The firmware groups
+codes 201-242 as `UI_ALERT_*` — "informational" in its own comment — and tags
+them `kind: "warning"`. That family includes 201 `UI_ALERT_RETURN_TO_BASE`,
+`Cleaning complete`, `Dust bin full` and `Recovering location`. Reading
+`hasError` alone tripped the Error sensor's `problem` device class on all of
+them. A shared `is_real_error()` in `const.py` now decides for both platforms,
+so they cannot drift apart. Real faults are untouched: 252
+`UI_ERROR_UNABLE_TO_RETURN_TO_BASE` sits outside the alert range and still
+reports. Firmware predating the `kind` field keeps the old behaviour rather
+than silently swallowing faults.
+
+* Alerts are surfaced as `alert_message` / `alert_code` attributes instead of
+being labelled errors.
+
 ## 1.19.1
 
 ### Fixed
