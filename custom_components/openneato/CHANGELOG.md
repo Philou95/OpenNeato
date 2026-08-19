@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.21.0
+
+### Added
+
+* **The navigation mode is recorded with each session.** `SetNavigationMode`
+existed and `clean()` applied it, but nothing wrote it down, so a replay could
+never say whether a run had been Normal, Gentle, Deep or Quick. The firmware
+now stamps `nav` into the session header, taken from the same getter `clean()`
+uses — so it is the mode the run *actually* used, not whatever the setting
+happens to be when the replay is watched later. Sessions recorded before this
+simply omit it.
+
+### Changed
+
+* **Everything about a session now lives in the picker's own option text**:
+date, clean type, navigation mode, area, distance, duration, battery and
+recharges. The separate stats row beside it is gone — it described only the
+selected run, and described it twice. Putting the figures in the option text
+describes *every* run, so they can be compared without selecting each in turn.
+The picker takes the width the row used to occupy. Set `show_picker: false`
+and the row comes back carrying everything instead.
+
+### Fixed
+
+* **README told you to install the card by hand.** It said to copy the script
+into `/config/www/` and register a Lovelace resource; the integration has been
+serving it and registering the script tag itself all along
+(`async_register_static_paths` + `add_extra_js_url`). The cache is keyed on the
+integration version, so the card refreshes on upgrade.
+
 ## 1.20.0
 
 ### Changed

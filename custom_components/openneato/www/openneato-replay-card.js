@@ -349,9 +349,11 @@ class OpenNeatoReplayCard extends HTMLElement {
                     border-radius: 6px;
                     padding: 4px 8px;
                     font-size: 0.85rem;
-                    flex: 0 1 auto;
+                    /* Takes the room the stats row used to occupy: the option
+                       text now carries the whole session description, so it
+                       needs the width more than an empty neighbour does. */
+                    flex: 1 1 auto;
                     min-width: 0;
-                    max-width: 55%;
                 }
                 .stats {
                     display: flex;
@@ -720,16 +722,33 @@ class OpenNeatoReplayCard extends HTMLElement {
         await this._loadSessions();
     }
 
+    /* Everything about a session on one line, for the picker's own option
+       text. Keeping the figures here rather than in a row beside the picker
+       means the selected run is described in one place instead of two, and
+       every *other* run is described too -- you can compare them without
+       selecting each in turn. */
+    _sessionLabel(s) {
+        const info = s.session || {};
+        const sum = s.summary || {};
+        const start = info.time || Number(String(s.name).split(".")[0]);
+
+        const bits = [modeLabel(info.mode)];
+        // Navigation mode, recorded per session by the firmware since the
+        // header gained "nav". Sessions taped before that simply omit it.
+        if (info.nav) bits.push(info.nav);
+        if (sum.areaCovered) bits.push(`${sum.areaCovered} m²`);
+        if (sum.distanceTraveled) bits.push(`${sum.distanceTraveled} m`);
+        if (sum.duration) bits.push(formatClock(sum.duration));
+        if (sum.batteryStart !== undefined && sum.batteryEnd !== undefined) {
+            bits.push(`${sum.batteryStart}→${sum.batteryEnd}%`);
+        }
+        if (sum.recharges) bits.push(`${sum.recharges}⚡`);
+        return `${formatDate(start)} — ${bits.join(" · ")}`;
+    }
+
     _renderPicker() {
         this._picker.innerHTML = this._sessions
-            .map((s) => {
-                const start = (s.session && s.session.time) || Number(String(s.name).split(".")[0]);
-                const area = s.summary && s.summary.areaCovered;
-                const label = `${formatDate(start)} — ${modeLabel(s.session && s.session.mode)}${
-                    area ? ` · ${area} m²` : ""
-                }`;
-                return `<option value="${s.name}">${label}</option>`;
-            })
+            .map((s) => `<option value="${s.name}">${this._sessionLabel(s)}</option>`)
             .join("");
     }
 
@@ -806,16 +825,21 @@ class OpenNeatoReplayCard extends HTMLElement {
         if (!this._config.show_stats || !this._session) return;
         const s = this._session.summary || {};
         const info = this._session.session || {};
-        const bits = [];
-        // Date, mode and area are all in the picker's own label
-        // ("19/08 11:32 — House Clean · 27.25 m²"), so repeating them beside
-        // it just spends the row saying the same thing twice. They come back
-        // when the picker is hidden and nothing else would show them.
-        if (!this._config.show_picker) {
-            if (info.time) bits.push(`<span><b>${formatDate(info.time)}</b></span>`);
-            bits.push(`<span>${modeLabel(info.mode)}</span>`);
-            if (s.areaCovered) bits.push(`<span>Area <b>${s.areaCovered} m²</b></span>`);
+        // The picker's own option text already carries the whole story --
+        // date, clean type, navigation mode, area, distance, duration,
+        // battery -- so a row repeating it beside the picker would say
+        // everything twice. This row only earns its place when the picker is
+        // hidden and nothing else would show any of it.
+        if (this._config.show_picker) {
+            this._statsEl.innerHTML = "";
+            return;
         }
+
+        const bits = [];
+        if (info.time) bits.push(`<span><b>${formatDate(info.time)}</b></span>`);
+        bits.push(`<span>${modeLabel(info.mode)}</span>`);
+        if (info.nav) bits.push(`<span>Navigation <b>${info.nav}</b></span>`);
+        if (s.areaCovered) bits.push(`<span>Area <b>${s.areaCovered} m²</b></span>`);
         if (s.distanceTraveled) bits.push(`<span>Distance <b>${s.distanceTraveled} m</b></span>`);
         if (s.duration) bits.push(`<span>Duration <b>${formatClock(s.duration)}</b></span>`);
         if (s.batteryStart !== undefined && s.batteryEnd !== undefined) {

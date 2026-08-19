@@ -144,10 +144,12 @@ sensor states) are tagged so they cluster cleanly under HA's Diagnostic section.
 
 ### Notes for setup
 
-- **Installing the map card** — copy `www/openneato-replay-card.js` into `/config/www/` and register it
-  under *Settings → Dashboards → Resources* as a JavaScript module, then add a manual card with
-  `type: custom:openneato-replay-card`. The walls come from the integration's own LIDAR mapper, which
-  accumulates an occupancy grid across cleanings — the plan sharpens with each run.
+- **The map card needs no installation** — the integration serves
+  `www/openneato-replay-card.js` itself and registers the script tag, so there is nothing to copy into
+  `/config/www/` and no Lovelace resource to add. Just add a manual card with
+  `type: custom:openneato-replay-card`. The browser cache is keyed on the integration version, so the
+  card refreshes on upgrade rather than needing a hard reload. The walls come from the integration's own
+  LIDAR mapper, which accumulates an occupancy grid across cleanings — the plan sharpens with each run.
 - **Reading the diagnostics** — two field names are misleading and the integration corrects for them:
   `errorCode` returns **200** (`UI_ALERT_INVALID`) when nothing is wrong, so the *Error code* sensor
   reports *unknown* instead; and `chargerMAH` / `dischargeMAH` are **milliamps, not milliamp-hours**
