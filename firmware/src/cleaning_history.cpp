@@ -1059,7 +1059,7 @@ std::vector<HistorySessionInfo> CleaningHistory::listSessions() {
             } else {
                 String firstLine, lastLine;
                 readFirstLastLines(fullPath, info.compressed, firstLine, lastLine);
-                if (isValidMetaLine(firstLine, "\"type\":\"session\"")) {
+                if (isValidMetaLine(firstLine, R"("type":"session")")) {
                     info.session = firstLine;
                 }
                 if (isValidMetaLine(lastLine, "\"type\":\"summary\"")) {
