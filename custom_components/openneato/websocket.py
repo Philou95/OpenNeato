@@ -38,6 +38,7 @@ def async_register(hass: HomeAssistant) -> None:
     """Register the replay WebSocket commands (idempotent)."""
     websocket_api.async_register_command(hass, ws_list_sessions)
     websocket_api.async_register_command(hass, ws_get_session)
+    websocket_api.async_register_command(hass, ws_delete_session)
 
 
 def _resolve_entry(hass: HomeAssistant, entry_id: str | None) -> tuple[str, dict[str, Any]] | None:
@@ -220,6 +221,64 @@ async def ws_get_session(
         cache[(entry_id, name)] = parsed
 
     connection.send_result(msg["id"], {**parsed, "floorplan": _floorplan_payload(hass, entry_id)})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openneato/delete_session",
+        vol.Required("name"): str,
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_delete_session(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Delete one recorded session from the robot.
+
+    For a run that went wrong -- the robot was picked up, the LIDAR was
+    blocked, the map came out half-drawn -- so the bad replay stops cluttering
+    the picker.
+
+    Note this does NOT unpick the session's contribution to the accumulated
+    wall map: `LidarMap` merges hit counts, and once merged a session's cells
+    are indistinguishable from every other session's. Deleting a bad session
+    stops it being replayed; it does not un-draw its walls.
+    """
+    resolved = _resolve_entry(hass, msg.get("entry_id"))
+    if resolved is None:
+        connection.send_error(msg["id"], "not_found", "No OpenNeato config entry found")
+        return
+    entry_id, data = resolved
+    name = msg["name"]
+
+    # Refuse while the robot is still writing to it: the firmware would be
+    # appending to a file we just unlinked.
+    if _is_recording(data["coordinator"], name):
+        connection.send_error(
+            msg["id"], "recording", "That session is still being recorded"
+        )
+        return
+
+    try:
+        await data["api"].delete_history_session(name)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Replay: failed to delete session %s: %s", name, err)
+        connection.send_error(msg["id"], "delete_failed", str(err))
+        return
+
+    # Drop it from the parsed-session cache so a later request cannot serve
+    # a session the robot no longer has.
+    cache = hass.data.setdefault(DOMAIN, {}).setdefault(CACHE_KEY, {})
+    cache.pop((entry_id, name), None)
+
+    # Refresh so the picker's next listing no longer offers it.
+    await data["coordinator"].async_request_refresh()
+
+    _LOGGER.info("Replay: deleted session %s", name)
+    connection.send_result(msg["id"], {"deleted": name})
 
 
 def _is_recording(coordinator: Any, name: str) -> bool:
