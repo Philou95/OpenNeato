@@ -824,7 +824,23 @@ void CleaningHistory::collectSnapshot() {
                     return;
                 }
 
-                writeSnapshot(x, y, theta, time);
+                // Brush speed rides along with the pose.
+                //
+                // A snapshot says where the robot was, never whether it was
+                // actually cleaning there. It moves with the brush stopped
+                // more often than it looks: picked up, recovering from an
+                // error, repositioning. Measured on this robot, the brush
+                // turns at ~1400 rpm while following a boundary and sits at
+                // exactly 0 in ST_F5_PickedUp and ST_F6_CleaningErrRecovery,
+                // both of which occur mid-session. Without this the replay
+                // paints those stretches as cleaned floor.
+                //
+                // The raw rpm is recorded rather than a cleaned/not flag, so
+                // the threshold can be revisited without reflashing, and so
+                // states nobody has observed yet still come out right.
+                neato.getMotors([this, x, y, theta, time](bool motorsOk, const MotorData& motors) {
+                    writeSnapshot(x, y, theta, time, motorsOk ? motors.brushRPM : -1);
+                });
             });
         });
     });
@@ -868,7 +884,7 @@ void CleaningHistory::updateAccumulators(float x, float y, float theta) {
     visitedCells.insert(cellKey);
 }
 
-void CleaningHistory::writeSnapshot(float x, float y, float theta, float time) {
+void CleaningHistory::writeSnapshot(float x, float y, float theta, float time, int brushRPM) {
     // Localization resets to origin right before session ends — drop if the
     // robot was far from origin (genuine return-to-base passes through gradually)
     if (hasPrevPose && fabsf(x) < 0.001f && fabsf(y) < 0.001f && fabsf(theta) < 0.1f) {
@@ -878,8 +894,13 @@ void CleaningHistory::writeSnapshot(float x, float y, float theta, float time) {
         }
     }
 
+    // `b` is omitted when the motor read failed, so a consumer can tell "brush
+    // stopped" from "brush unknown" and keep old sessions readable.
     String line = "{\"x\":" + String(x, 3) + ",\"y\":" + String(y, 3) + ",\"t\":" + String(theta, 1) +
-                  ",\"ts\":" + String(time, 1) + "}";
+                  ",\"ts\":" + String(time, 1);
+    if (brushRPM >= 0)
+        line += ",\"b\":" + String(brushRPM);
+    line += "}";
 
     updateAccumulators(x, y, theta);
     bufferLine(line);

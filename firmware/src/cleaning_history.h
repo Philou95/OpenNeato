@@ -152,7 +152,7 @@ private:
     unsigned long lastFlushMs = 0;
     void writeSessionHeader();
     void writeSessionSummary(int batteryEnd);
-    void writeSnapshot(float x, float y, float theta, float time);
+    void writeSnapshot(float x, float y, float theta, float time, int brushRPM);
     void updateAccumulators(float x, float y, float theta);
     void resetSession();
     bool replayLine(const String& line);
