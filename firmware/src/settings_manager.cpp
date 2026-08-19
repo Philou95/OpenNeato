@@ -142,26 +142,50 @@ const Settings& SettingsManager::get() {
 
 // -- Partial update ----------------------------------------------------------
 
+// Non-empty, max 32 chars, alphanumeric + hyphens only.
+static bool isValidHostname(const String& h) {
+    if (h.length() == 0 || h.length() > 32)
+        return false;
+    for (unsigned int i = 0; i < h.length(); i++) {
+        char c = h.charAt(i);
+        if (!isalnum(c) && c != '-')
+            return false;
+    }
+    return true;
+}
+
 ApplyResult SettingsManager::apply(const String& json) {
     Settings incoming = current; // start from current values
     if (!incoming.fromJson(json))
         return APPLY_INVALID;
 
+    // Validate everything that can be rejected before touching anything.
+    //
+    // The rest of this function mutates `current` field by field, so a value
+    // rejected halfway through used to leave every field before it already
+    // applied while the caller was told the whole request had failed. That was
+    // survivable when a schedule was a curiosity; now that Home Assistant
+    // exposes all fourteen slots, one bad hour in a request would quietly
+    // commit whatever came before it.
+    if (!isValidHostname(incoming.hostname))
+        return APPLY_INVALID;
+    if (incoming.uartTxPin == incoming.uartRxPin &&
+        (incoming.uartTxPin != current.uartTxPin || incoming.uartRxPin != current.uartRxPin)) {
+        LOG("SETTINGS", "Rejected: TX and RX cannot be the same pin (GPIO%d)", incoming.uartTxPin);
+        return APPLY_INVALID;
+    }
+    for (const SchedDay& day: incoming.sched) {
+        for (const SchedSlot& slot: day.slots) {
+            if (slot.hour < 0 || slot.hour > 23 || slot.minute < 0 || slot.minute > 59)
+                return APPLY_INVALID;
+        }
+    }
+
     bool changed = false;
     bool needReboot = false;
 
     if (incoming.hostname != current.hostname) {
-        // Validate: non-empty, max 32 chars, alphanumeric + hyphens only
-        String h = incoming.hostname;
-        bool valid = h.length() > 0 && h.length() <= 32;
-        for (unsigned int i = 0; valid && i < h.length(); i++) {
-            char c = h.charAt(i);
-            if (!isalnum(c) && c != '-')
-                valid = false;
-        }
-        if (!valid)
-            return APPLY_INVALID;
-        current.hostname = h;
+        current.hostname = incoming.hostname;
         changed = true;
         needReboot = true;
         LOG("SETTINGS", "Hostname -> %s (reboot required)", current.hostname.c_str());
@@ -202,15 +226,6 @@ ApplyResult SettingsManager::apply(const String& json) {
     }
 
     // UART pin changes require reboot — hardware UART can't be reconfigured at runtime
-    int newTx = incoming.uartTxPin != current.uartTxPin ? incoming.uartTxPin : current.uartTxPin;
-    int newRx = incoming.uartRxPin != current.uartRxPin ? incoming.uartRxPin : current.uartRxPin;
-
-    // Reject if TX and RX would be the same pin
-    if (newTx == newRx && (incoming.uartTxPin != current.uartTxPin || incoming.uartRxPin != current.uartRxPin)) {
-        LOG("SETTINGS", "Rejected: TX and RX cannot be the same pin (GPIO%d)", newTx);
-        return APPLY_INVALID;
-    }
-
     if (incoming.uartTxPin != current.uartTxPin && incoming.uartTxPin >= 0 && incoming.uartTxPin <= MAX_GPIO_PIN) {
         current.uartTxPin = incoming.uartTxPin;
         changed = true;
@@ -335,9 +350,7 @@ ApplyResult SettingsManager::apply(const String& json) {
             SchedSlot& cur = current.sched[d].slots[s];
             const SchedSlot& inc = incoming.sched[d].slots[s];
             if (inc.hour != cur.hour || inc.minute != cur.minute || inc.on != cur.on) {
-                // Validate hour/minute ranges
-                if (inc.hour < 0 || inc.hour > 23 || inc.minute < 0 || inc.minute > 59)
-                    return APPLY_INVALID;
+                // Ranges were checked up front, before anything was mutated.
                 cur.hour = inc.hour;
                 cur.minute = inc.minute;
                 cur.on = inc.on;
