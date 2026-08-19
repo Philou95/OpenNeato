@@ -26,10 +26,15 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .api import OpenNeatoApiClient
-from .const import DOMAIN, HISTORY_IMAGE_SIZE, LIDAR_POLL_INTERVAL
+from .const import (
+    DOMAIN,
+    HISTORY_IMAGE_SIZE,
+    HISTORY_POLL_INTERVAL,
+    LIDAR_POLL_INTERVAL,
+)
+from .coordinator import latest_completed_session
 from .entity import OpenNeatoEntity
 from .history_renderer import (
-    FloorplanConfig,
     parse_session_jsonl,
     render_history_animation,
     render_history_map,
@@ -49,50 +54,6 @@ _CLEANING_SUBSTRINGS = {"CLEANINGRUNNING", "CLEANINGPAUSED", "CLEANINGSUSPENDED"
 _MANUAL_SUBSTRINGS = {"MANUALCLEANING"}
 
 
-def _rank_session_ts(session: dict[str, Any]) -> float:
-    """Shared ranking key: prefer summary.time, fall back to filename epoch.
-
-    Firmware directory iteration order isn't guaranteed, so we can't
-    trust the list order. Summary.time is the clean's end timestamp;
-    filenames are epoch seconds at session start.
-    """
-    summary = session.get("summary")
-    if isinstance(summary, dict):
-        raw = summary.get("time", 0)
-        if isinstance(raw, (int, float)) and raw > 0:
-            return float(raw)
-    name = session.get("name") or ""
-    try:
-        return float(name.split(".", 1)[0])
-    except ValueError:
-        return 0.0
-
-
-def _render_animation(parsed: dict, floorplan) -> bytes | None:
-    """Wrapper so async_add_executor_job can pass floorplan as a kwarg."""
-    from .history_renderer import render_history_animation
-
-    return render_history_animation(parsed, floorplan=floorplan)
-
-
-def latest_completed_session(history: Any) -> dict[str, Any] | None:
-    """Return the most recent completed (non-recording) session entry."""
-    if not isinstance(history, list):
-        return None
-    best: dict[str, Any] | None = None
-    best_key = -1.0
-    for session in history:
-        if not isinstance(session, dict) or session.get("recording"):
-            continue
-        if not session.get("name"):
-            continue
-        key = _rank_session_ts(session)
-        if key > best_key:
-            best_key = key
-            best = session
-    return best
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -108,8 +69,6 @@ async def async_setup_entry(
         "sw_version": data["sw_version"],
         "fw_version": data["fw_version"],
         "host": data["host"],
-        # entry.options carries the floorplan background calibration;
-        # the camera rebuilds a FloorplanConfig from it on each render so
         # a reload (triggered on options change) is picked up live.
         "options": dict(entry.options),
     }
@@ -152,7 +111,6 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         self._api = api
         self._attr_unique_id = f"{serial}_lidar_map"
         # Floorplan background (None disables it → solid color + grid).
-        self._floorplan = FloorplanConfig.from_options(options)
 
         # LIDAR scan state (manual mode only)
         self._accumulator = ScanAccumulator()
@@ -165,6 +123,19 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         self._history_session_name: str | None = None  # track which session is cached
         self._history_poll_unsub: CALLBACK_TYPE | None = None
         self._history_polling_active = False
+        # Guards against two concurrent fetches of the same session (e.g.
+        # async_added_to_hass and the first coordinator update both firing
+        # _check_polling_state before the first fetch finishes). The ESP32
+        # bridge reads history off a blocking serial link to the robot, and
+        # a second concurrent request for the same file can stall it
+        # indefinitely rather than erroring — so this must be prevented
+        # client-side rather than relying on the server to reject it.
+        self._history_fetch_in_progress = False
+        # Name of a completed session we already tried and could not turn
+        # into a map (download, parse or render failed, or it carried no
+        # pose data). Without this every coordinator tick would re-download
+        # the whole JSONL for the same doomed session, forever.
+        self._history_failed_session: str | None = None
 
         # Idle placeholder
         self._idle_image: bytes | None = None
@@ -299,12 +270,17 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         if not cleaning and not manual:
             if was_cleaning or was_manual:
                 self._history_session_name = None  # force re-fetch
+                self._history_failed_session = None  # and give it one retry
             self._map_source = "history"
             latest = latest_completed_session(
                 self.coordinator.data.get("history") if self.coordinator.data else None
             )
             latest_name = latest.get("name") if latest else None
-            if latest_name and latest_name != self._history_session_name:
+            if (
+                latest_name
+                and latest_name != self._history_session_name
+                and latest_name != self._history_failed_session
+            ):
                 self.hass.async_create_task(
                     self._async_update_history_map(allow_recording=False)
                 )
@@ -340,7 +316,7 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         self._history_poll_unsub = async_track_time_interval(
             self.hass,
             self._async_poll_history,
-            timedelta(seconds=LIDAR_POLL_INTERVAL),
+            timedelta(seconds=HISTORY_POLL_INTERVAL),
         )
         self.hass.async_create_task(self._async_poll_history())
 
@@ -404,6 +380,12 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
         When allow_recording is True, prefer the in-progress recording session.
         When False, only show completed sessions (idle mode).
         """
+        if self._history_fetch_in_progress:
+            _LOGGER.debug(
+                "History map fetch already in progress, skipping overlapping call"
+            )
+            return
+
         session_info = self._get_latest_session(allow_recording=allow_recording)
         if not session_info:
             if not self._lidar_polling_active and not self._history_polling_active:
@@ -426,48 +408,60 @@ class OpenNeatoLidarCamera(OpenNeatoEntity, Camera):
                 self.async_write_ha_state()
             return
 
-        _LOGGER.debug("Fetching history session %s for map rendering", session_name)
+        self._history_fetch_in_progress = True
+        succeeded = False
         try:
-            raw_jsonl = await self._api.get_history_session(session_name)
-        except Exception:
-            _LOGGER.warning(
-                "LIDAR map: failed to fetch session %s", session_name, exc_info=True
-            )
-            return
+            _LOGGER.debug("Fetching history session %s for map rendering", session_name)
+            try:
+                raw_jsonl = await self._api.get_history_session(session_name)
+            except Exception:
+                _LOGGER.warning(
+                    "LIDAR map: failed to fetch session %s", session_name, exc_info=True
+                )
+                return
 
-        try:
-            parsed = await self.hass.async_add_executor_job(parse_session_jsonl, raw_jsonl)
-        except Exception:
-            _LOGGER.warning(
-                "LIDAR map: failed to parse session %s", session_name, exc_info=True
-            )
-            return
+            try:
+                parsed = await self.hass.async_add_executor_job(parse_session_jsonl, raw_jsonl)
+            except Exception:
+                _LOGGER.warning(
+                    "LIDAR map: failed to parse session %s", session_name, exc_info=True
+                )
+                return
 
-        if not parsed.get("path"):
-            _LOGGER.debug("Session %s has no path data", session_name)
-            return
+            if not parsed.get("path"):
+                _LOGGER.debug("Session %s has no path data", session_name)
+                return
 
-        try:
-            self._history_image = await self.hass.async_add_executor_job(
-                render_history_map, parsed, HISTORY_IMAGE_SIZE, recording, self._floorplan
-            )
-        except Exception:
-            _LOGGER.warning(
-                "LIDAR map: failed to render session %s", session_name, exc_info=True
-            )
-            return
+            try:
+                self._history_image = await self.hass.async_add_executor_job(
+                    render_history_map, parsed, HISTORY_IMAGE_SIZE, recording
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "LIDAR map: failed to render session %s", session_name, exc_info=True
+                )
+                return
 
-        # Cache session identity and extract metadata
-        self._history_session_name = session_name
-        summary = session_info.get("summary") or parsed.get("summary") or {}
-        session_meta = session_info.get("session") or parsed.get("session") or {}
-        self._session_mode = session_meta.get("mode") or summary.get("mode")
-        self._session_duration = summary.get("duration")
-        self._session_area = summary.get("areaCovered")
+            # Cache session identity and extract metadata
+            self._history_session_name = session_name
+            summary = session_info.get("summary") or parsed.get("summary") or {}
+            session_meta = session_info.get("session") or parsed.get("session") or {}
+            self._session_mode = session_meta.get("mode") or summary.get("mode")
+            self._session_duration = summary.get("duration")
+            self._session_area = summary.get("areaCovered")
 
-        if not self._lidar_polling_active:
-            self._map_source = "history"
-        self.async_write_ha_state()
+            if not self._lidar_polling_active:
+                self._map_source = "history"
+            self.async_write_ha_state()
+            succeeded = True
+        finally:
+            self._history_fetch_in_progress = False
+            # A completed session that failed to render looks identical on
+            # the next coordinator tick, so remember it instead of pulling
+            # the same JSONL off the robot every few seconds forever. A
+            # recording session keeps growing, so it stays retryable.
+            if not succeeded and not recording:
+                self._history_failed_session = session_name
 
 
 class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
@@ -508,11 +502,14 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
         self._api = api
         self._attr_unique_id = f"{serial}_motion_map"
         # Floorplan background (None disables it → solid color + grid).
-        self._floorplan = FloorplanConfig.from_options(options)
 
         self._gif: bytes | None = None
         self._idle_image: bytes | None = None
         self._cached_session_name: str | None = None
+        # Completed session we already tried and couldn't animate (fetch,
+        # parse or render failed, or it was too short for a GIF). Retrying
+        # it on every coordinator tick would re-download the whole session.
+        self._failed_session: str | None = None
         self._rendering = False
         self._session_mode: str | None = None
         self._session_duration: int | None = None
@@ -567,8 +564,11 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
         session_name = session_info["name"]
         if session_name == self._cached_session_name and self._gif is not None:
             return
+        if session_name == self._failed_session:
+            return
 
         self._rendering = True
+        succeeded = False
         try:
             try:
                 raw_jsonl = await self._api.get_history_session(session_name)
@@ -594,7 +594,7 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
                 return
             try:
                 gif = await self.hass.async_add_executor_job(
-                    _render_animation, parsed, self._floorplan
+                    render_history_animation, parsed
                 )
             except Exception:
                 _LOGGER.warning(
@@ -615,8 +615,13 @@ class OpenNeatoMotionCamera(OpenNeatoEntity, Camera):
             self._session_duration = summary.get("duration")
             self._session_area = summary.get("areaCovered")
             self.async_write_ha_state()
+            succeeded = True
         finally:
             self._rendering = False
+            # Same reasoning as the LIDAR camera: don't re-download a
+            # session that already proved unrenderable.
+            if not succeeded:
+                self._failed_session = session_name
 
     @callback
     def _handle_coordinator_update(self) -> None:
