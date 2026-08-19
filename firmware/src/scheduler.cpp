@@ -56,12 +56,26 @@ void Scheduler::tick() {
         // Build common log fields for this slot
         String slotStr = String(schedMins / 60) + ":" + (schedMins % 60 < 10 ? "0" : "") + String(schedMins % 60);
 
+        // Claim the slot before going async, not after.
+        //
+        // getState only answers immediately on a cache hit; the state cache
+        // lives 2s, so a miss enqueues a serial command behind whatever else
+        // is pending. During a run the LIDAR mapper keeps that queue busy,
+        // and tick() comes round every 30s inside a 5-minute window — so a
+        // reply that takes longer than a tick used to let the next tick find
+        // the guard still unset and issue a second Clean House.
+        //
+        // Claiming up front closes that. The failure path below hands the
+        // slot back so a transient serial error still retries.
+        firedSlots[si] = schedMins;
+
         // Check robot state before triggering (uses cached state — no extra serial command)
         serial.getState([this, si, day, schedMins, slotStr](bool ok, const RobotState& state) {
             if (!ok) {
                 LOG("SCHED", "GetState failed, cannot check robot state for slot %s", slotStr.c_str());
                 dataLogger.logGenericEvent("scheduler_state_error",
                                            {{"day", String(day), FIELD_INT}, {"slot", slotStr, FIELD_STRING}});
+                firedSlots[si] = -1;
                 return;
             }
 
@@ -72,7 +86,6 @@ void Scheduler::tick() {
                                                                  {"slot", slotStr, FIELD_STRING},
                                                                  {"reason", "busy", FIELD_STRING},
                                                                  {"state", state.uiState, FIELD_STRING}});
-                firedSlots[si] = schedMins;
                 return;
             }
 
@@ -87,8 +100,6 @@ void Scheduler::tick() {
                                                {{"day", String(day), FIELD_INT}, {"slot", slotStr, FIELD_STRING}});
                 }
             });
-
-            firedSlots[si] = schedMins;
         });
 
         // Only trigger one slot per tick — let the next tick handle the second slot
