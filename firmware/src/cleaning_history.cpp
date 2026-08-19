@@ -381,6 +381,14 @@ void CleaningHistory::writeSessionHeader() {
         fields.push_back({"time", String(static_cast<long>(sessionStartTime)), FIELD_INT});
     if (batteryStart >= 0)
         fields.push_back({"battery", String(batteryStart), FIELD_INT});
+    // Navigation mode, so a replay can say how the robot was actually
+    // navigating. "mode" above is the clean type (house/spot); this is
+    // Normal/Gentle/Deep/Quick, and it is the same value clean() sends as
+    // SetNavigationMode, so it is what the run really used rather than
+    // whatever the setting happens to be when the replay is watched.
+    String nav = neato.currentNavMode();
+    if (nav.length() > 0)
+        fields.push_back({"nav", nav, FIELD_STRING});
     String json = fieldsToJson(fields);
     pendingSessionJson = json;
     writeLine(json);

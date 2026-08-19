@@ -122,6 +122,12 @@ public:
     // Returns the stored nav mode string (e.g. "Normal", "Gentle").
     void setNavModeGetter(std::function<String()> getter) { navModeGetter = getter; }
 
+    // The mode a clean started now would actually run with -- the same value
+    // clean() sends as SetNavigationMode. CleaningHistory stamps it into the
+    // session header so a replay can say how the robot was navigating, which
+    // the summary alone never recorded. Empty if no getter is wired.
+    String currentNavMode() const { return navModeGetter ? navModeGetter() : String(); }
+
     // -- Status --------------------------------------------------------------
 
     bool isBusy() const { return state != QUEUE_IDLE || !queue.empty(); }
