@@ -30,6 +30,10 @@ _LOGGER = logging.getLogger(__name__)
 # back and forth in the session picker is instant instead of re-downloading
 # from the robot every time.
 CACHE_KEY = "replay_cache"
+# Last session list seen from the robot, so the card still has something
+# to show when the bridge is unreachable. A replay is history: it does
+# not need the robot awake.
+LAST_SESSIONS_KEY = "replay_last_sessions"
 _CACHE_MAX = 4
 
 
@@ -122,24 +126,38 @@ async def ws_list_sessions(
 
     coordinator = data["coordinator"]
     history = (coordinator.data or {}).get("history")
-    if not isinstance(history, list):
-        connection.send_error(msg["id"], "unavailable", "No cleaning history available")
-        return
+    store = hass.data.setdefault(DOMAIN, {}).setdefault(LAST_SESSIONS_KEY, {})
 
-    sessions = [
-        {
-            "name": item.get("name"),
-            "size": item.get("size"),
-            "recording": bool(item.get("recording")),
-            "session": item.get("session"),
-            "summary": item.get("summary"),
-        }
-        for item in history
-        if isinstance(item, dict) and item.get("name")
-    ]
-    # The firmware returns files in directory order; sort by session start so
-    # the picker reads chronologically regardless of filesystem layout.
-    sessions.sort(key=lambda s: _session_start(s), reverse=True)
+    if isinstance(history, list):
+        sessions = [
+            {
+                "name": item.get("name"),
+                "size": item.get("size"),
+                "recording": bool(item.get("recording")),
+                "session": item.get("session"),
+                "summary": item.get("summary"),
+            }
+            for item in history
+            if isinstance(item, dict) and item.get("name")
+        ]
+        # The firmware returns files in directory order; sort by session start
+        # so the picker reads chronologically regardless of filesystem layout.
+        sessions.sort(key=lambda s: _session_start(s), reverse=True)
+        store[entry_id] = sessions
+    else:
+        # The robot is unreachable. A replay is history, though -- the parsed
+        # sessions are cached here and the floor plan lives in Home Assistant's
+        # own storage -- so serve the last list we saw rather than blanking the
+        # card. Nothing here needs the robot to be awake.
+        sessions = store.get(entry_id)
+        if not sessions:
+            connection.send_error(
+                msg["id"], "unavailable", "No cleaning history available"
+            )
+            return
+        _LOGGER.debug("Replay: robot unreachable, serving %d cached sessions", len(sessions))
+        # Whatever was recording is not any more, as far as we can tell.
+        sessions = [{**s, "recording": False} for s in sessions]
 
     connection.send_result(
         msg["id"],

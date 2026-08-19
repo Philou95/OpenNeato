@@ -28,6 +28,8 @@ from .const import DOMAIN
 from .lidar_mapper import (
     plan_calibration,
     AccumulatedMap,
+    MAX_MOVE_DURING_SCAN_M,
+    MAX_TURN_DURING_SCAN_DEG,
     build_session_grids,
     parse_pose,
     render_plan,
@@ -44,9 +46,6 @@ POLL_INTERVAL = 4.0          # seconds between captures
 # this fraction of it was taken while the LDS was spinning up, stalling or
 # coasting, and its 360 "angles" were never swept in one revolution.
 MIN_ROTATION_FRACTION = 0.6
-# Movement tolerated between the poses bracketing a scan.
-MAX_MOVE_DURING_SCAN_M = 0.12
-MAX_TURN_DURING_SCAN_DEG = 25.0
 MIN_CAPTURES = 60            # below this a run is too thin to be worth merging
 BYTES_PER_POSE = 48          # firmware writes ~48 bytes per snapshot, every 2 s
 MAX_INTERVAL = 12.0
@@ -175,6 +174,7 @@ class LidarMapRunner:
             pose_after = parse_pose(str(raw_after))
             if pose and points:
                 x, y, theta, _ts = pose
+                moved = turned = 0.0
                 if pose_after:
                     x2, y2, theta2, _ts2 = pose_after
                     moved = math.hypot(x2 - x, y2 - y)
@@ -195,7 +195,19 @@ class LidarMapRunner:
                     # theta2 instead of between the two.
                     theta = theta + ((theta2 - theta + 180.0) % 360.0 - 180.0) / 2.0
                 self._captures.append(
-                    (x, y, theta, points, float(payload.get("rotationSpeed") or 0.0))
+                    (
+                        x,
+                        y,
+                        theta,
+                        points,
+                        float(payload.get("rotationSpeed") or 0.0),
+                        # Carried so the grid builder can weigh this scan by how
+                        # still the robot actually was, instead of treating a
+                        # scan taken mid-turn as being worth as much as one
+                        # taken standing still.
+                        moved,
+                        turned,
+                    )
                 )
         except Exception as err:  # noqa: BLE001 -- one bad read must never end a run
             _LOGGER.debug("LIDAR mapping: sample failed (%s)", err)
@@ -273,7 +285,10 @@ class LidarMapRunner:
             return
 
         walls, floor = await self.hass.async_add_executor_job(
-            build_session_grids, [c[:4] for c in captures]
+            # Whole captures now, not c[:4]: the builder weighs each scan by
+            # the movement measured during it, which lives in the trailing
+            # fields the truncation used to throw away.
+            build_session_grids, captures
         )
         report = await self.hass.async_add_executor_job(
             self._map.merge_session, walls, floor, self._session_name

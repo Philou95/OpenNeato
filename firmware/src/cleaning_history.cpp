@@ -85,8 +85,11 @@ void CleaningHistory::tick() {
         return;
 
     if (collecting) {
-        // Periodically flush buffered pose snapshots to disk
-        if (!writeBuffer.empty() && millis() - lastFlushMs >= HISTORY_FLUSH_INTERVAL_MS) {
+        // Periodically flush buffered pose snapshots to disk. Faster while a
+        // reader is following the session live, so what it fetches is close to
+        // what the robot has actually done.
+        unsigned long flushEvery = isWatched() ? HISTORY_FLUSH_INTERVAL_WATCHED_MS : HISTORY_FLUSH_INTERVAL_MS;
+        if (!writeBuffer.empty() && millis() - lastFlushMs >= flushEvery) {
             flushWriteBuffer();
         }
         collectSnapshot();
@@ -1131,8 +1134,20 @@ std::vector<HistorySessionInfo> CleaningHistory::listSessions() {
     return result;
 }
 
+bool CleaningHistory::isWatched() const {
+    return lastWatchedMs != 0 && millis() - lastWatchedMs < HISTORY_WATCHER_TIMEOUT_MS;
+}
+
 std::shared_ptr<LogReader> CleaningHistory::readSession(const String& filename) {
     String path = String(HISTORY_DIR) + "/" + filename;
+
+    // Someone is following the run in progress. Note the time so the loop
+    // flushes more often from now on -- the flush itself stays in the loop
+    // task, since this runs on the async web server's thread and SPIFFS
+    // writes from two contexts would race.
+    if (collecting && path == activeFilePath) {
+        lastWatchedMs = millis();
+    }
 
     // Refuse to serve files involved in compression (partial .hs is corrupt)
     if (compressing && (path == compressSrcPath || path == compressDstPath))

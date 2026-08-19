@@ -150,6 +150,13 @@ private:
     void flushWriteBuffer(); // Flush buffered lines to disk
     std::vector<String> writeBuffer;
     unsigned long lastFlushMs = 0;
+    // When something last read the session still being written. Poses are
+    // buffered in RAM and normally only reach the file every 30s, which is
+    // what a live viewer sees as lag. While a reader keeps asking, the flush
+    // interval drops; when it stops, buffering goes back to normal on its own
+    // so an unwatched clean costs no extra flash writes.
+    unsigned long lastWatchedMs = 0;
+    bool isWatched() const;
     void writeSessionHeader();
     void writeSessionSummary(int batteryEnd);
     void writeSnapshot(float x, float y, float theta, float time, int brushRPM);

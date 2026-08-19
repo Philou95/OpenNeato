@@ -80,6 +80,15 @@ def wall_threshold(walls: dict[Any, int]) -> int:
     counts = sorted(walls.values())
     idx = min(len(counts) - 1, int(len(counts) * WALL_KEEP_QUANTILE))
     return max(WALL_MIN_HITS, counts[idx])
+
+
+# Movement tolerated between the poses bracketing a scan. Past these the scan
+# is dropped outright; below them scan_weight() grades it. They live here
+# rather than in the runner because the weighting is what gives them meaning,
+# and the runner already imports from this module.
+MAX_MOVE_DURING_SCAN_M = 0.12
+MAX_TURN_DURING_SCAN_DEG = 25.0
+
 ROBOT_RADIUS_M = 0.165       # Botvac D6, for stamping visited floor
 RENDER_PX_PER_M = 100
 RENDER_PAD_M = 0.3
@@ -486,18 +495,58 @@ def _key(raw: str) -> tuple[int, int]:
 # ── runtime ─────────────────────────────────────────────────────────
 
 
+def scan_weight(moved_m: float, turned_deg: float) -> float:
+    """How much one scan's returns are worth, from how still the robot was.
+
+    A scan is not instantaneous -- it takes 0.6 to 1.7 s while the robot keeps
+    driving -- so the returns are smeared along whatever the robot did during
+    it. Rotation dominates, because the smear is the *arc*: 3.5 deg of turn
+    displaces a wall point 2 m away by 12 cm, while 3.5 cm of travel displaces
+    it by 3.5 cm.
+
+    Measured on a real object with known dimensions: a 50 x 29 cm box came out
+    75 x 55 cm on the map, a uniform ~12.5 cm margin on every side. The margin
+    did not grow with distance from the map centre (density 20.4 at 0-1 m
+    against 19.5 at 3-4 m), which rules out a rotation error *between*
+    sessions and points at motion *within* each scan.
+
+    The old filter was binary: keep everything under 12 cm / 25 deg, drop the
+    rest. So a scan taken mid-turn counted exactly as much as one taken
+    standing still, and since typical rotation sits far below 25 deg almost
+    nothing was ever rejected. This grades it instead -- still 1.0 for a
+    motionless scan, falling linearly to 0 at the limits, so the accumulated
+    map stays on the same scale as everything merged before it.
+    """
+    if MAX_MOVE_DURING_SCAN_M <= 0 or MAX_TURN_DURING_SCAN_DEG <= 0:
+        return 1.0
+    move_w = 1.0 - min(1.0, abs(moved_m) / MAX_MOVE_DURING_SCAN_M)
+    turn_w = 1.0 - min(1.0, abs(turned_deg) / MAX_TURN_DURING_SCAN_DEG)
+    # The worse of the two, not the product: a scan ruined by rotation is not
+    # rescued by having barely translated.
+    return min(move_w, turn_w)
+
+
 def build_session_grids(
-    captures: list[tuple[float, float, float, list[tuple[int, int]]]]
-) -> tuple[dict[tuple[int, int], int], set[tuple[int, int]]]:
+    captures: list[tuple[float, ...]],
+) -> tuple[dict[tuple[int, int], float], set[tuple[int, int]]]:
     """Turn a run's captures into wall hit counts and traversed floor.
+
+    Captures may carry the movement measured during the scan as two extra
+    fields; when they do, each scan contributes its weight rather than a flat
+    1. Older callers passing only (x, y, theta, points) keep the old
+    behaviour.
 
     CPU-bound; call it from the executor.
     """
-    walls: dict[tuple[int, int], int] = {}
+    walls: dict[tuple[int, int], float] = {}
     floor: set[tuple[int, int]] = set()
-    for x, y, theta, points in captures:
+    for capture in captures:
+        x, y, theta, points = capture[:4]
+        weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
+        if weight <= 0:
+            continue
         for cell in project_scan(x, y, theta, points):
-            walls[cell] = walls.get(cell, 0) + 1
+            walls[cell] = walls.get(cell, 0.0) + weight
         floor.update(stamp_floor(x, y))
     return walls, floor
 

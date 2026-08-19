@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.23.0
+
+### Added
+
+* **The map can be watched while the robot is still cleaning.** The session in
+progress now appears in the picker, labelled *in progress*, is selected by
+default while a clean runs, and refreshes every 3 s without disturbing pan,
+zoom or scrub position. The backend already handled a growing session; the
+card was filtering it out with a single line.
+  * The firmware buffers poses in RAM and normally only writes them every 30 s,
+    which is what a live viewer saw as lag. While something is reading the
+    active session it flushes every 3 s instead, and goes back to 30 s on its
+    own once the reader stops — so an unwatched clean costs no extra flash
+    writes.
+
+* **Scans are weighted by how still the robot was while taking them.** A scan
+takes 0.6–1.7 s and the robot keeps driving, so the returns smear along
+whatever it did. Rotation dominates: 3.5° of turn displaces a wall point 2 m
+away by 12 cm, where 3.5 cm of travel displaces it by 3.5 cm.
+
+  Measured against a real object of known size — a 50 × 29 cm box came out
+  75 × 55 cm, a uniform ~12.5 cm margin on every side. The margin did **not**
+  grow with distance from the map centre (local density 20.4 at 0–1 m against
+  19.5 at 3–4 m), which rules out rotation error *between* sessions and points
+  at motion *within* each scan.
+
+  The old filter was binary — keep under 12 cm / 25°, drop the rest — so a scan
+  taken mid-turn counted exactly as much as one taken standing still, and since
+  typical rotation sits far below 25° almost nothing was ever rejected. Now a
+  motionless scan still contributes 1.0 and the weight falls linearly to 0 at
+  the limits, so the accumulated map stays on the same scale as everything
+  merged before it.
+
+### Fixed
+
+* **The card went blank when the robot was unreachable.** A replay is history:
+the parsed sessions are cached and the floor plan lives in Home Assistant's own
+storage, so neither needs the robot awake. The last session list seen is now
+served when the bridge does not answer. (It is held in memory, so a Home
+Assistant restart while the robot is down still leaves the card empty.)
+
 ## 1.22.0
 
 ### Added
