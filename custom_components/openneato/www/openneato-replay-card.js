@@ -27,10 +27,6 @@ const FILL_MIN_HEIGHT = 220;
 // Cell size to fall back on before a session has loaded. The robot maps at
 // 5 cm and so does lidar_mapper.CELL_M.
 const DEFAULT_CELL_M = 0.05;
-// Sum of R+G+B under which a plan pixel counts as wall rather than as cleaned
-// floor. The plan ships exactly three states — black wall, blue floor, nothing
-// — so anything near black is a wall and the margin here is enormous.
-const WALL_LUMA_SUM = 200;
 // Cleaned floor. Opaque and flat: a square is cleaned or it is not, and a
 // translucent wash would put a fourth colour on the map wherever it overlapped
 // something.
@@ -1348,28 +1344,26 @@ class OpenNeatoReplayCard extends HTMLElement {
 
         for (let y0 = 0; y0 < height; y0 += period) {
             for (let x0 = 0; x0 < width; x0 += period) {
-                // Resolve the square: any wall pixel makes it wall, otherwise
-                // the last opaque pixel seen, otherwise it stays empty.
-                let r = 0;
-                let g = 0;
-                let b = 0;
-                let seen = false;
-                let wall = false;
-                for (let y = y0; y < y0 + size && y < height && !wall; y++) {
-                    for (let x = x0; x < x0 + size && x < width; x++) {
-                        const o = (y * width + x) * 4;
-                        if (s[o + 3] < 128) continue;
-                        seen = true;
-                        r = s[o];
-                        g = s[o + 1];
-                        b = s[o + 2];
-                        if (r + g + b <= WALL_LUMA_SUM) {
-                            wall = true;
-                            break;
-                        }
-                    }
-                }
-                if (!seen) continue;
+                // Sample the square's centre — the same rule the coverage
+                // layer uses in _resolveToLattice().
+                //
+                // This used to light the square if *any* pixel in it was
+                // wall. That made sense while the plan carried a floor tint
+                // the walls had to win against, but the plan is walls-only
+                // now, so all it did was dilate every wall by up to a square
+                // while the coverage, sampled at its centre, eroded by half
+                // of one. Along every wall face that read as five to eight
+                // centimetres of the cleaned area disappearing under the
+                // wall — the two layers drawn to different rules, not a
+                // misalignment in the data underneath.
+                const mid = size >> 1;
+                const sy = Math.min(y0 + mid, height - 1);
+                const sx = Math.min(x0 + mid, width - 1);
+                const o = (sy * width + sx) * 4;
+                if (s[o + 3] < 128) continue;
+                const r = s[o];
+                const g = s[o + 1];
+                const b = s[o + 2];
                 for (let y = y0; y < y0 + size && y < height; y++) {
                     const row = y * width;
                     for (let x = x0; x < x0 + size && x < width; x++) {

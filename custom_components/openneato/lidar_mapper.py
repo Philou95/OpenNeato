@@ -45,6 +45,15 @@ _LOGGER = logging.getLogger(__name__)
 CELL_M = 0.05                # grid resolution
 MAX_RANGE_M = 3.5            # returns beyond this are noisy and grazing
 WALL_MIN_HITS = 12           # independent returns before a cell counts as wall.
+                             # ⚠ Fixed on purpose, but it does NOT hold as
+                             # cleanings accumulate: measured here, one session
+                             # gave 2349 confident cells and two gave 3273, and
+                             # the plan visibly coarsened. Scaling it linearly
+                             # with the session count was tried and is wrong --
+                             # it assumes every cell is re-seen every session,
+                             # which partial coverage contradicts, and it
+                             # collapses the map to 198 cells by five sessions.
+                             # Re-tune from data once several sessions exist.
                              # Swept over the stored map: at 5 a wall is a
                              # 3571-cell smear, at 20 it thins until it breaks
                              # into pieces. 12 is where the outline is still
@@ -337,6 +346,19 @@ class AccumulatedMap:
         # Quarter turn that puts the reference map the right way up, kept so
         # the orientation cannot flip between renders.
         self.quarter_lock: int = int(data.get("quarter_lock", 0))
+        # Correction applied to each merged session, keyed by its file name.
+        #
+        # A session arrives in whatever frame the robot's localisation happened
+        # to be in; align_to_reference() fits it onto the accumulated map
+        # before merging. That correction used to be computed, used and thrown
+        # away -- so the map held straightened walls while the card was still
+        # served the session's raw path and coverage. After a localisation
+        # loss the two came out a quarter turn apart, which is exactly what a
+        # user sees as "the cleaned area does not line up with the walls".
+        # Keeping it lets the replay be served in the same frame as the map.
+        self.alignments: dict[str, tuple[int, int, int]] = {
+            k: tuple(v) for k, v in (data.get("alignments") or {}).items()
+        }
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -344,10 +366,14 @@ class AccumulatedMap:
             "floor": [f"{cx},{cy}" for cx, cy in self.floor],
             "sessions": self.sessions,
             "quarter_lock": self.quarter_lock,
+            "alignments": {k: list(v) for k, v in self.alignments.items()},
         }
 
     def merge_session(
-        self, walls: dict[tuple[int, int], int], floor: set[tuple[int, int]]
+        self,
+        walls: dict[tuple[int, int], int],
+        floor: set[tuple[int, int]],
+        session_name: str | None = None,
     ) -> dict[str, Any]:
         """Fold one cleaning into the accumulated map, re-aligning it first."""
         report: dict[str, Any] = {"session_walls": len(walls), "realigned": False}
@@ -378,6 +404,9 @@ class AccumulatedMap:
             floor = {
                 (cx + dx, cy + dy) for cx, cy in _rotate_cells(floor, quarter)
             }
+
+        if session_name:
+            self.alignments[session_name] = (quarter, dx, dy) if self.walls else (0, 0, 0)
 
         for cell, n in walls.items():
             self.walls[cell] = self.walls.get(cell, 0) + n

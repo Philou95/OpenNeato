@@ -195,9 +195,15 @@ async def ws_get_session(
         connection.send_error(msg["id"], "fetch_failed", str(err))
         return
 
+    # Serve the run in the map's frame, not the robot's frame of the day.
+    runner = data.get("mapper")
+    align = runner.alignment(name) if runner is not None else None
+
     # Coverage-grid construction is CPU-bound; keep it off the event loop.
     try:
-        parsed = await hass.async_add_executor_job(build_replay_session, raw, name)
+        parsed = await hass.async_add_executor_job(
+            build_replay_session, raw, name, align
+        )
     except Exception as err:  # noqa: BLE001
         _LOGGER.exception("Replay: failed to parse session %s", name)
         connection.send_error(msg["id"], "parse_failed", str(err))

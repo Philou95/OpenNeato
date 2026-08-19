@@ -30,6 +30,12 @@ from .history_renderer import _try_repair_pose
 
 _LOGGER = logging.getLogger(__name__)
 
+# Brush speed above which the robot counts as cleaning. Measured on a Botvac
+# D6: ~1400 rpm running, exactly 0 stopped, so anything in between is a
+# spin-up. Kept as a threshold rather than "> 0" so a coasting brush does not
+# register as a cleaned stripe.
+BRUSH_RUNNING_RPM = 200
+
 # Firmware samples poses every ~2s; anything past 15x that is a real pause
 # (docking, charging) rather than jitter between snapshots.
 POSE_INTERVAL_S = 2.0
@@ -41,7 +47,9 @@ def _r(value: float, digits: int = 3) -> float:
     return round(float(value), digits)
 
 
-def build_replay_session(raw: str, name: str = "") -> dict[str, Any]:
+def build_replay_session(
+    raw: str, name: str = "", align: tuple[int, int, int] | None = None
+) -> dict[str, Any]:
     """Parse raw session JSONL into the payload the replay card consumes."""
     lines = [l for l in raw.strip().split("\n") if l.strip()]
 
@@ -106,9 +114,27 @@ def build_replay_session(raw: str, name: str = "") -> dict[str, Any]:
         )
         for p in poses
     ]
+    # Put the run in the same frame as the accumulated map.
+    #
+    # A session is recorded in whatever frame the robot's localisation was in
+    # at the time, and that frame moves: after losing its position the robot
+    # re-zeroes, and the next run comes back a quarter turn round. The map
+    # corrects for this when merging, but the replay used to be served raw —
+    # so the walls were straight and the cleaned area was rotated against
+    # them. Measured on one such session: the wall envelope was 107x143 cells
+    # and the coverage 136x101, and turning it a quarter took containment
+    # from 86.8% to 99.9%.
+    #
+    # Applied here, before bounds, coverage and recharges are derived, so all
+    # of them come out in the corrected frame without each needing to know.
+    if align and any(align):
+        norm = _apply_alignment(norm, align)
 
     recharges = _pair_recharges(raw_recharges, norm, t_origin)
-    coverage = _coverage_cells(norm)
+    # `b` is the brush speed the firmware records with each pose; absent on
+    # sessions from before it did, in which case every pose counts as cleaning.
+    brush = [p.get("b") for p in poses]
+    coverage = _coverage_cells(norm, brush)
 
     pad = HISTORY_ROBOT_DIAMETER_M / 2 + 0.1
     xs = [p[0] for p in norm]
@@ -201,7 +227,34 @@ def _pair_recharges(
     return out
 
 
-def _coverage_cells(norm: list[tuple[float, float, float, float]]) -> list[float]:
+def _apply_alignment(
+    norm: list[tuple[float, float, float, float]], align: tuple[int, int, int]
+) -> list[tuple[float, float, float, float]]:
+    """Rotate and shift a run onto the accumulated map's frame.
+
+    `align` is (quarter, dx, dy) exactly as align_to_reference() returned it:
+    quarter turns counter-clockwise, then a shift in *cells*.
+    """
+    quarter, dx, dy = align
+    quarter %= 4
+    shift_x = dx * HISTORY_CELL_SIZE_M
+    shift_y = dy * HISTORY_CELL_SIZE_M
+    out = []
+    for x, y, t, ts in norm:
+        if quarter == 1:
+            x, y = -y, x
+        elif quarter == 2:
+            x, y = -x, -y
+        elif quarter == 3:
+            x, y = y, -x
+        out.append((x + shift_x, y + shift_y, (t + quarter * 90.0) % 360.0, ts))
+    return out
+
+
+def _coverage_cells(
+    norm: list[tuple[float, float, float, float]],
+    brush: list[Any] | None = None,
+) -> list[float]:
     """Stamp the robot footprint at each pose, keeping the earliest touch ts.
 
     Returned flat as [cx, cy, ts, cx, cy, ts, ...] so the payload stays small.
@@ -217,11 +270,51 @@ def _coverage_cells(norm: list[tuple[float, float, float, float]]) -> list[float
     ]
 
     first_ts: dict[tuple[int, int], float] = {}
-    for x, y, _t, ts in norm:
+
+    def stamp(x: float, y: float, ts: float) -> None:
         cx = round(x / cell)
         cy = round(y / cell)
         for dx, dy in disc:
             first_ts.setdefault((cx + dx, cy + dy), ts)
+
+    # Walk the path, not just the poses on it.
+    #
+    # Stamping only where a pose was logged leaves a hole whenever the robot
+    # covered more ground between two of them than its own footprint spans.
+    # Measured over a real session: the poses are 9 cm apart at the median and
+    # that is fine, but 42 of 1768 intervals exceed the 33 cm footprint and one
+    # reaches 166 cm. Those are the beads of cleaned floor with bare gaps
+    # between them -- the robot did pass, the record just did not say so.
+    # Filling the segment costs a few extra stamps only where the gap is real.
+    # Only stamp where the brush was actually turning.
+    #
+    # A pose says where the robot was, not that it cleaned there. Measured on
+    # this robot: ~1400 rpm while following a boundary, and exactly 0 in
+    # ST_F5_PickedUp and ST_F6_CleaningErrRecovery — both of which happen
+    # mid-session. Painting those stretches as cleaned floor overstates what
+    # the robot did. A missing value means an older session that never recorded
+    # the brush, and those keep their old behaviour rather than losing their
+    # coverage entirely.
+    step = HISTORY_ROBOT_DIAMETER_M / 4
+    prev: tuple[float, float, float] | None = None
+    for i, (x, y, _t, ts) in enumerate(norm):
+        b = brush[i] if brush is not None and i < len(brush) else None
+        if b is not None and float(b) < BRUSH_RUNNING_RPM:
+            # Not cleaning here: keep the path continuous for the next
+            # segment, but lay nothing down.
+            prev = (x, y, ts)
+            continue
+        if prev is not None:
+            px, py, pts = prev
+            gap = math.hypot(x - px, y - py)
+            if gap > step:
+                for k in range(1, int(gap / step) + 1):
+                    f = k * step / gap
+                    if f >= 1.0:
+                        break
+                    stamp(px + (x - px) * f, py + (y - py) * f, pts + (ts - pts) * f)
+        stamp(x, y, ts)
+        prev = (x, y, ts)
 
     flat: list[float] = []
     for (cx, cy), ts in first_ts.items():

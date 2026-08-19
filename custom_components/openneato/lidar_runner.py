@@ -90,6 +90,7 @@ class LidarMapRunner:
         self._last_health = 0.0
         self._health_start = 0.0
         self._health_ref: dict[str, Any] | None = None
+        self._session_name: str | None = None
         self.last_report: dict[str, Any] = {}
 
     async def async_load(self) -> None:
@@ -128,6 +129,11 @@ class LidarMapRunner:
         self._last_health = time.monotonic()
         self._health_start = time.monotonic()
         self._health_ref = self._recording_session()
+        # Remember which file this run is writing to, so the alignment worked
+        # out at merge time can be stored against it and replayed in the same
+        # frame as the map. Captured at the start because by the time the run
+        # ends the robot has stopped reporting it as recording.
+        self._session_name = (self._health_ref or {}).get("name")
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -270,7 +276,7 @@ class LidarMapRunner:
             build_session_grids, [c[:4] for c in captures]
         )
         report = await self.hass.async_add_executor_job(
-            self._map.merge_session, walls, floor
+            self._map.merge_session, walls, floor, self._session_name
         )
         self.last_report = report
         if report.get("rejected"):
@@ -321,6 +327,17 @@ class LidarMapRunner:
         if not self._map or not self._map.walls:
             return None
         return plan_calibration(self._map.walls, self._map.floor)
+
+    def alignment(self, session_name: str) -> tuple[int, int, int] | None:
+        """How this session was corrected onto the map, if it was merged.
+
+        The card needs it to draw the run in the same frame as the walls;
+        without it a session recorded after a localisation loss shows its
+        cleaned area a quarter turn off.
+        """
+        if not self._map:
+            return None
+        return self._map.alignments.get(session_name)
 
     def view_rotation(self, user_offset: float = 0.0) -> float:
         """Rotation that stands the map upright, plus the user's offset."""
