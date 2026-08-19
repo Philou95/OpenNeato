@@ -343,6 +343,10 @@ class LidarMapRunner:
         """Rotation that stands the map upright, plus the user's offset."""
         return self._map.view_rotation(user_offset) if self._map else user_offset
 
+    def render_signature(self) -> str:
+        """Identifier that changes whenever the drawn plan would change."""
+        return self._map.render_signature() if self._map else "0"
+
     @property
     def sessions(self) -> int:
         return self._map.sessions if self._map else 0
