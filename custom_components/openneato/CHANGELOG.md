@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.21.1
+
+### Fixed
+
+* **Touching the session picker froze Home Assistant.** 1.20.0 made the wall
+threshold adaptive, but the call landed *inside* the comprehensions that
+filter cells — so `wall_threshold()`, which sorts every hit count, ran **once
+per cell**. On a 13 432-cell map that is O(n² log n): a single plan render took
+**131 seconds** and pinned the executor thread. Every `openneato/session`
+request renders the plan, so selecting a session in the card made Home
+Assistant stop answering long enough to look like it was restarting in a loop.
+
+  The call is hoisted in all three places. Same map, same output: **131 s →
+  0.05 s**, a factor of 2600. Measured after the fix, live: `openneato/sessions`
+  236 ms, and five sessions loaded back to back in 247–504 ms each with Home
+  Assistant staying up throughout.
+
 ## 1.21.0
 
 ### Added

@@ -271,7 +271,12 @@ def render_plan(
     cal = plan_calibration(walls, floor, px_per_m)
     if cal is None:
         return None
-    wall_cells = {c for c, n in walls.items() if n >= wall_threshold(walls)}
+    # Hoisted deliberately. wall_threshold() sorts every count, so calling it
+    # from inside the comprehension runs one sort per cell -- O(n^2 log n),
+    # which on a 13k-cell map took 131 seconds and pinned the executor thread
+    # hard enough to make Home Assistant look like it was restarting.
+    threshold = wall_threshold(walls)
+    wall_cells = {c for c, n in walls.items() if n >= threshold}
     min_x, min_y = cal["origin_x"], cal["origin_y"]
     width, height = cal["width"], cal["height"]
     max_y = min_y + height / px_per_m
@@ -324,7 +329,8 @@ def plan_calibration(
     without paying for a render. Exact rather than fitted: the image is laid
     out in world coordinates, so its bottom-left corner *is* the origin.
     """
-    wall_cells = {c for c, n in walls.items() if n >= wall_threshold(walls)}
+    threshold = wall_threshold(walls)  # hoisted: one sort, not one per cell
+    wall_cells = {c for c, n in walls.items() if n >= threshold}
     if not wall_cells:
         return None
 
@@ -466,7 +472,8 @@ class AccumulatedMap:
         path and coverage live in -- so straightening is a property of the
         view, not of the image.
         """
-        wall_cells = [c for c, n in self.walls.items() if n >= wall_threshold(self.walls)]
+        threshold = wall_threshold(self.walls)  # hoisted: one sort, not one per cell
+        wall_cells = [c for c, n in self.walls.items() if n >= threshold]
         skew = manhattan_angle(wall_cells)
         return round((-skew) + self.quarter_lock * 90 + user_offset, 2) % 360
 
