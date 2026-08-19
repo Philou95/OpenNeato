@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.19.0
+
+### Added
+
+* **Delete button on the replay card.** A run that went wrong — the robot was
+lifted, the LIDAR was blocked, the map came out half-drawn — left a bad replay
+in the picker with no way to clear it. The bin icon next to the picker deletes
+the selected session after a confirmation, then falls back to the newest one
+that remains. New `openneato/delete_session` websocket command and
+`OpenNeatoApiClient.delete_history_session`, on top of the
+`DELETE /api/history/<name>` the firmware already exposed.
+  * The filename is validated against the same strict pattern the download
+    path uses, so a rogue peer cannot aim the delete at another endpoint —
+    `../../settings` is refused before any request leaves Home Assistant.
+  * Deleting is refused while the robot is still recording that session.
+  * ⚠ **This does not un-draw the session's walls.** The LIDAR mapper merges
+    hit counts, and once merged a session's cells are indistinguishable from
+    every other session's. Deleting stops a bad run being replayed; it does
+    not remove its contribution to the accumulated floorplan.
+
+### Changed
+
+* **The card header is one row**, with the session picker first, then the
+stats. The stats scroll inside their own box instead of wrapping, so the
+header stays a single line at any width, and an empty `title` collapses so the
+picker really is first. **Date, mode and area were dropped from the stats** —
+the picker's own label is already `19/08 11:32 — House Clean · 27.25 m²`, so
+repeating them beside it spent the row saying the same thing twice. What
+remains is what the picker does *not* show: distance, duration, battery and
+recharges. Set `show_picker: false` and the three come back, since nothing
+else would show them.
+
 ## 1.18.0
 
 ### Added

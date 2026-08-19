@@ -316,19 +316,31 @@ class OpenNeatoReplayCard extends HTMLElement {
                     flex-direction: column;
                     overflow: hidden;
                 }
+                /* One row: title (only if configured), then the session
+                   picker, then the stats. The stats scroll inside their own
+                   box rather than wrapping, so the header stays one line at
+                   any width. */
                 .head {
                     display: flex;
                     align-items: center;
                     gap: 12px;
-                    padding: 12px 16px 4px;
-                    flex-wrap: wrap;
+                    padding: 12px 16px 8px;
+                    flex-wrap: nowrap;
                 }
                 .title {
                     font-size: 1.1rem;
                     font-weight: 500;
                     color: var(--primary-text-color);
-                    flex: 1;
+                    flex: 0 1 auto;
                     min-width: 0;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+                /* An empty title is the common config — collapse it so the
+                   picker really is the first thing on the row. */
+                .title:empty {
+                    display: none;
                 }
                 select {
                     background: var(--secondary-background-color);
@@ -337,15 +349,52 @@ class OpenNeatoReplayCard extends HTMLElement {
                     border-radius: 6px;
                     padding: 4px 8px;
                     font-size: 0.85rem;
-                    max-width: 60%;
+                    flex: 0 1 auto;
+                    min-width: 0;
+                    max-width: 55%;
                 }
                 .stats {
                     display: flex;
-                    flex-wrap: wrap;
-                    gap: 4px 16px;
-                    padding: 0 16px 8px;
+                    flex-wrap: nowrap;
+                    gap: 16px;
                     font-size: 0.8rem;
                     color: var(--secondary-text-color);
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    overflow-x: auto;
+                    scrollbar-width: none;
+                }
+                .stats::-webkit-scrollbar {
+                    display: none;
+                }
+                .stats span {
+                    white-space: nowrap;
+                }
+                .del {
+                    flex: 0 0 auto;
+                    display: grid;
+                    place-items: center;
+                    width: 28px;
+                    height: 28px;
+                    padding: 0;
+                    border: none;
+                    border-radius: 6px;
+                    background: transparent;
+                    color: var(--secondary-text-color);
+                    cursor: pointer;
+                }
+                .del svg {
+                    width: 17px;
+                    height: 17px;
+                    fill: currentColor;
+                }
+                .del:hover:not(:disabled) {
+                    color: var(--error-color, #db4437);
+                    background: var(--secondary-background-color);
+                }
+                .del:disabled {
+                    opacity: 0.35;
+                    cursor: default;
                 }
                 .stats b {
                     color: var(--primary-text-color);
@@ -457,8 +506,11 @@ class OpenNeatoReplayCard extends HTMLElement {
                 <div class="head">
                     <div class="title">Cleaning replay</div>
                     <select class="picker"></select>
+                    <button class="del" title="Delete this session" disabled>
+                        <svg viewBox="0 0 24 24"><path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    </button>
+                    <div class="stats"></div>
                 </div>
-                <div class="stats"></div>
                 <div class="stage">
                     <canvas></canvas>
                     <div class="overlay">Loading…</div>
@@ -482,6 +534,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._head = root.querySelector(".head");
         this._picker = root.querySelector(".picker");
         this._statsEl = root.querySelector(".stats");
+        this._delBtn = root.querySelector(".del");
         this._stage = root.querySelector(".stage");
         this._canvas = root.querySelector("canvas");
         this._overlay = root.querySelector(".overlay");
@@ -507,12 +560,16 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._stage.style.height = `${Number(this._config.height) || DEFAULTS.height}px`;
         }
         this._picker.hidden = !this._config.show_picker;
+        // The delete button acts on the picker's selection, so it follows it.
+        // Set `show_picker: false` to hide both.
+        this._delBtn.hidden = !this._config.show_picker;
         this._statsEl.hidden = !this._config.show_stats;
         if (this._config.title !== undefined) {
             root.querySelector(".title").textContent = this._config.title;
         }
 
         this._picker.addEventListener("change", () => this._selectSession(this._picker.value));
+        this._delBtn.addEventListener("click", () => this._deleteSelected());
         this._playBtn.addEventListener("click", () => this._togglePlay());
         this._restartBtn.addEventListener("click", () => this._restart());
         this._speedBtn.addEventListener("click", () => this._cycleSpeed());
@@ -621,6 +678,7 @@ class OpenNeatoReplayCard extends HTMLElement {
                 return;
             }
             this._renderPicker();
+            this._delBtn.disabled = false;
             const wanted =
                 this._selectedName && this._sessions.some((s) => s.name === this._selectedName)
                     ? this._selectedName
@@ -629,6 +687,37 @@ class OpenNeatoReplayCard extends HTMLElement {
         } catch (err) {
             this._fail(`Could not list sessions: ${err.message || err}`);
         }
+    }
+
+    async _deleteSelected() {
+        const name = this._selectedName;
+        if (!name || this._loading) return;
+
+        // Label the confirmation with what the user actually sees in the
+        // picker, not the raw filename.
+        const opt = this._picker.selectedOptions[0];
+        const label = opt ? opt.textContent : name;
+        if (!window.confirm(`Delete this cleaning session?\n\n${label}\n\nThis cannot be undone.`)) {
+            return;
+        }
+
+        this._delBtn.disabled = true;
+        try {
+            await this._hass.callWS({
+                type: "openneato/delete_session",
+                name,
+                ...(this._entryId ? { entry_id: this._entryId } : {}),
+            });
+        } catch (err) {
+            this._delBtn.disabled = false;
+            this._setOverlay(`Could not delete: ${err.message || err}`);
+            return;
+        }
+
+        // Fall back to whichever session is newest once this one is gone.
+        this._selectedName = null;
+        this._session = null;
+        await this._loadSessions();
     }
 
     _renderPicker() {
@@ -718,9 +807,15 @@ class OpenNeatoReplayCard extends HTMLElement {
         const s = this._session.summary || {};
         const info = this._session.session || {};
         const bits = [];
-        if (info.time) bits.push(`<span><b>${formatDate(info.time)}</b></span>`);
-        bits.push(`<span>${modeLabel(info.mode)}</span>`);
-        if (s.areaCovered) bits.push(`<span>Area <b>${s.areaCovered} m²</b></span>`);
+        // Date, mode and area are all in the picker's own label
+        // ("19/08 11:32 — House Clean · 27.25 m²"), so repeating them beside
+        // it just spends the row saying the same thing twice. They come back
+        // when the picker is hidden and nothing else would show them.
+        if (!this._config.show_picker) {
+            if (info.time) bits.push(`<span><b>${formatDate(info.time)}</b></span>`);
+            bits.push(`<span>${modeLabel(info.mode)}</span>`);
+            if (s.areaCovered) bits.push(`<span>Area <b>${s.areaCovered} m²</b></span>`);
+        }
         if (s.distanceTraveled) bits.push(`<span>Distance <b>${s.distanceTraveled} m</b></span>`);
         if (s.duration) bits.push(`<span>Duration <b>${formatClock(s.duration)}</b></span>`);
         if (s.batteryStart !== undefined && s.batteryEnd !== undefined) {

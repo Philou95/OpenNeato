@@ -136,6 +136,42 @@ class OpenNeatoApiClient:
                 f"Timeout connecting to OpenNeato at {self._host}"
             ) from err
 
+    async def delete_history_session(self, filename: str) -> None:
+        """Delete one recorded cleaning session from the bridge.
+
+        The firmware exposes DELETE /api/history/<name>. `filename` comes
+        from the /api/history listing and is concatenated into the URL, so
+        it is validated against the same strict pattern the download path
+        uses — a rogue or MITM'd peer could otherwise aim the delete at an
+        unrelated endpoint.
+        """
+        if not _SESSION_NAME_RE.match(filename):
+            raise OpenNeatoApiError(f"Refusing to delete unsafe filename: {filename!r}")
+
+        url = f"{self._base_url}/api/history/{filename}"
+        _LOGGER.debug("DELETE %s", url)
+        try:
+            async with timeout(TIMEOUT):
+                async with self._session.delete(url) as response:
+                    _LOGGER.debug("DELETE %s -> %s", url, response.status)
+                    response.raise_for_status()
+        except aiohttp.ClientConnectionError as err:
+            _LOGGER.warning("Connection error deleting %s: %s", filename, err)
+            raise OpenNeatoConnectionError(
+                f"Unable to connect to OpenNeato at {self._host}: {err}"
+            ) from err
+        except aiohttp.ClientResponseError as err:
+            _LOGGER.warning("HTTP %s deleting %s: %s", err.status, filename, err.message)
+            raise OpenNeatoApiError(
+                f"API error deleting /api/history/{filename}: "
+                f"{err.status} {err.message}"
+            ) from err
+        except TimeoutError as err:
+            _LOGGER.warning("Timeout deleting %s (limit %ss)", filename, TIMEOUT)
+            raise OpenNeatoConnectionError(
+                f"Timeout connecting to OpenNeato at {self._host}"
+            ) from err
+
     async def _put(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Perform a PUT request with a JSON body."""
         url = f"{self._base_url}{path}"
