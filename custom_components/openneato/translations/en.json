@@ -19,6 +19,15 @@
   },
   "entity": {
     "sensor": {
+      "wall_distance": {
+        "name": "Wall distance"
+      },
+      "drop_distance_left": {
+        "name": "Floor distance left"
+      },
+      "drop_distance_right": {
+        "name": "Floor distance right"
+      },
       "battery_level": {
         "name": "Battery level"
       },

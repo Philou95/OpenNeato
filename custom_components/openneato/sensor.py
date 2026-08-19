@@ -172,6 +172,32 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),
+    # ── Range finders (GetAnalogSensors, millimetres) ────────────────────
+    # The robot reports 23 analog sensors and the bridge forwarded four. These
+    # three are the ones with a physical meaning worth watching: the side
+    # follower on the right, and the two downward sensors that stop the robot
+    # falling down a step. -1 means the robot did not report a value, so a
+    # missing reading never reads as a cliff.
+    *(
+        OpenNeatoSensorEntityDescription(
+            key=key,
+            translation_key=key,
+            name=label,
+            section="analog",
+            field=field,
+            icon=icon,
+            native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+            device_class=SensorDeviceClass.DISTANCE,
+            state_class=SensorStateClass.MEASUREMENT,
+            entity_category=EntityCategory.DIAGNOSTIC,
+            value_fn=lambda v: None if v is None or v < 0 else v,
+        )
+        for key, field, label, icon in (
+            ("wall_distance", "wallSensorMM", "Wall distance", "mdi:wall"),
+            ("drop_distance_left", "dropSensorLeftMM", "Floor distance left", "mdi:arrow-down-bold"),
+            ("drop_distance_right", "dropSensorRightMM", "Floor distance right", "mdi:arrow-down-bold"),
+        )
+    ),
     # ── Battery warranty (PR #121, /api/warranty) ───────────────────────
     OpenNeatoSensorEntityDescription(
         key="warranty_battery_cycles",

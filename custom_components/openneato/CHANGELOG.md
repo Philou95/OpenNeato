@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.22.0
+
+### Added
+
+* **Three range sensors the bridge was dropping.** `GetAnalogSensors` returns
+23 readings and the firmware forwarded four. Now also exposed, in millimetres:
+  * **Wall distance** — `WallSensor`, the side follower on the robot's right.
+    Measured 157 mm docked, 63 mm while following a wall mid-clean.
+  * **Floor distance left / right** — `DropSensorLeft` / `DropSensorRight`,
+    the downward sensors that stop the robot falling down a step. There are
+    two, not one.
+
+  All three are diagnostic and report `unknown` rather than a number when the
+  robot does not answer, so a missing reading is never mistaken for a cliff.
+  Requires the matching firmware; older bridges simply leave them unknown.
+
 ## 1.21.1
 
 ### Fixed
