@@ -28,8 +28,8 @@ private:
     NeatoSerial& serial;
     DataLogger& dataLogger;
 
-    // Duplicate trigger guard: remember fired slots per day.
-    // Key = day * SCHEDULE_SLOTS_PER_DAY + slotIndex, value = minutes-since-midnight.
+    // Duplicate trigger guard, indexed by slot and reset when the day rolls
+    // over. Value is the slot's minutes-since-midnight, or -1 for unclaimed.
     int firedDay = -1;
     int firedSlots[SCHEDULE_SLOTS_PER_DAY] = {-1, -1}; // Minutes-since-midnight per slot index
 

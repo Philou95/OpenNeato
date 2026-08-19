@@ -52,7 +52,17 @@
 
 // Actual UART pins are stored in NVS and configurable via settings API.
 #define NEATO_BAUD_RATE 115200
-#define NEATO_UART_RX_BUFFER 4096 // Default 256 bytes overflows during GetLDSScan (~5KB response)
+// Must hold a whole GetLDSScan response, not most of one. Measured on a
+// Botvac D6 the reply is 6427 bytes; at 115200 baud it takes ~560 ms to
+// arrive, while 4096 bytes fill in 355 ms. The buffer is drained by
+// NeatoSerial::tick() from the main loop, so any stall longer than that --
+// an SPIFFS write, a WiFi retransmit -- dropped bytes mid-scan and the robot
+// reported UI_ERROR_LDS_MISSED_PACKETS. 8192 holds the full reply with room
+// to spare, for 4 KB of a 320 KB budget that is 18% used.
+#define NEATO_UART_RX_BUFFER 8192
+// Bytes reserved for the /api/lidar JSON document: 360 points at ~50 chars
+// plus the header, measured at 19355 on this robot, with headroom.
+#define LDS_JSON_RESERVE 20480
 
 // Neato command queue timing (milliseconds)
 #define NEATO_CMD_TIMEOUT_MS 3000

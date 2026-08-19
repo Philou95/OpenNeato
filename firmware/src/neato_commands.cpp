@@ -290,8 +290,17 @@ std::vector<Field> ErrorData::toFields() const {
 // -- LDS scan special serializers --------------------------------------------
 
 String LdsScanData::toJson() const {
-    String json = "{\"rotationSpeed\":" + String(rotationSpeed, 2) + ",\"validPoints\":" + String(validPoints) +
-                  ",\"points\":[";
+    String json;
+    // Reserve the whole thing up front. This document runs about 19 KB and was
+    // being grown by some 1400 concatenations; Arduino's String doubles its
+    // buffer, so the last few steps need the old buffer and the new one live at
+    // once -- roughly 57 KB of a heap that sits near 93 KB free and fragmented.
+    // When that allocation failed, String silently became empty and the route
+    // answered 200 with no body. Measured on an idle bridge: 16 of 25 requests
+    // to /api/lidar came back empty. One reservation removes the ladder.
+    json.reserve(LDS_JSON_RESERVE);
+    json += "{\"rotationSpeed\":" + String(rotationSpeed, 2) + ",\"validPoints\":" + String(validPoints) +
+            ",\"points\":[";
     for (int i = 0; i < 360; i++) {
         if (i > 0)
             json += ",";

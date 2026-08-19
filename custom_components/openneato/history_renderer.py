@@ -213,6 +213,22 @@ def _session_bounds(bounds: dict[str, float], image_size: int):
     return to_x, to_y, min_x, max_x, min_y, max_y, scale
 
 
+def _is_portrait(bounds: dict[str, float]) -> bool:
+    """True when the session's world bounding box is taller than it is wide.
+
+    Portrait runs are rotated 90 degrees clockwise at the end of rendering so
+    the longest dimension of the map always reads horizontally on screen.
+    Bounds come from the *full* session, so every animation frame makes the
+    same decision and the replay never flips mid-playback.
+    """
+    try:
+        world_w = float(bounds["maxX"]) - float(bounds["minX"])
+        world_h = float(bounds["maxY"]) - float(bounds["minY"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return world_h > world_w
+
+
 # ── Floorplan background ────────────────────────────────────────────────────
 
 # Cache the decoded floorplan image + its mtime so we only re-read the
@@ -493,6 +509,16 @@ def _render_frame(
     # Flatten alpha onto the dark background for stable encoding.
     rgb_img = Image.new("RGB", img.size, HISTORY_BG_COLOR)
     rgb_img.paste(img, mask=img.split()[3])
+
+    # -- Landscape orientation ----------------------------------------
+    # The canvas is square, so a portrait-shaped run leaves wide empty
+    # bands left and right. Turn it a quarter turn clockwise so the long
+    # side of the session lies horizontally, matching the wide cards the
+    # map is displayed in. ROTATE_270 is a 270 deg counter-clockwise
+    # transpose, i.e. exactly 90 deg clockwise, and is lossless.
+    if _is_portrait(bounds):
+        rgb_img = rgb_img.transpose(Image.ROTATE_270)
+
     return rgb_img
 
 
