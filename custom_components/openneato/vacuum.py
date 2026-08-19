@@ -102,16 +102,18 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
         # What the robot is *doing* outranks what it is *complaining about*.
         #
         # GetErr latches: it keeps reporting the last fault until something
-        # clears it. A robot that failed to undock (282
-        # UI_ERROR_NAVIGATION_UndockingFailed), then cleaned anyway, then set
-        # off home, still reports 282 the whole way -- so checking the error
-        # first painted a perfectly healthy return to base as ERROR on every
-        # run. The robot's own state machine had already moved on.
+        # clears it, so a fault raised early in a run is still being reported
+        # at the end of it. Checking the error first therefore painted a
+        # perfectly normal end-of-cycle return to base as ERROR, because some
+        # earlier complaint was still stuck in the register.
         #
-        # A genuine failure still shows: when the robot really is stuck it
-        # leaves the running/docking states, no substring matches, and the
-        # error check below takes over. The message stays available as the
-        # error_message attribute either way.
+        # ⚠ The trade-off is real: while an error is genuinely blocking, the
+        # robot may still advertise an active uiState, and this ordering shows
+        # that state rather than the fault. The Error binary sensor stays on
+        # throughout and the text stays in the error_message attribute, so the
+        # fault is never hidden -- but the vacuum entity will read "returning"
+        # rather than "error". Distinguishing a stale latch from a live fault
+        # needs freshness tracking the coordinator does not do yet.
         #
         # Match using substrings, same as the firmware frontend.
         for substring, activity in UISTATE_SUBSTRINGS:

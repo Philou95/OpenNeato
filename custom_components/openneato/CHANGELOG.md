@@ -5,19 +5,24 @@
 ### Fixed
 
 * **Returning to base showed up as an error.** `GetErr` latches: it keeps
-reporting the last fault until something clears it. A robot that failed to
-undock (282 `UI_ERROR_NAVIGATION_UndockingFailed`), cleaned anyway, then set
-off home, still reported 282 the whole way — and the vacuum entity checked the
-error *before* the robot's own state, so a perfectly healthy return to base
-read as `error` on every run.
+reporting the last fault until something clears it, so a complaint raised
+early in a run is still in the register at the end of it. The vacuum entity
+checked the error *before* the robot's own state, so a normal end-of-cycle
+return to base read as `error`.
 
-  The state now wins. `DOCKINGRUNNING` shows `returning`, `...CLEANINGRUNNING`
-  shows `cleaning`, and the error check only applies when no active state
-  matches — which is exactly when the robot really is stuck. Verified against
-  a live robot mid-dock with 282 latched: `error` before, **`returning`**
-  after, with the message kept as the `error_message` attribute and the
-  dedicated Error binary sensor still `on`. The vacuum says what the robot is
-  *doing*; the error sensor says there is a fault to acknowledge.
+  The state now wins. `DOCKINGRUNNING` shows `returning`,
+  `...CLEANINGRUNNING` shows `cleaning`, and the error check applies only when
+  no active state matches. Verified live with 282 latched: `error` before,
+  **`returning`** after, message kept as the `error_message` attribute and the
+  Error binary sensor still `on`. The vacuum says what the robot is *doing*;
+  the error sensor says there is a fault to acknowledge.
+
+  ⚠ **Known trade-off.** While a fault is genuinely blocking, the robot can
+  still advertise an active `uiState`, and this ordering shows that state
+  rather than the fault — the vacuum reads `returning` where it used to read
+  `error`. Nothing is hidden: the Error sensor stays `on` and the text stays
+  in `error_message`. Telling a stale latch from a live fault needs freshness
+  tracking the coordinator does not do yet.
 
 * **Informational alerts no longer count as problems.** The firmware groups
 codes 201-242 as `UI_ALERT_*` — "informational" in its own comment — and tags
