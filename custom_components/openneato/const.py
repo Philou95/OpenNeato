@@ -30,6 +30,34 @@ UISTATE_SUBSTRINGS: list[tuple[str, VacuumActivity]] = [
 
 FAN_SPEEDS = ["eco", "normal", "intense"]
 
+
+def is_real_error(error_data: dict | None) -> bool:
+    """True only for a fault, not for the robot's informational alerts.
+
+    `GetErr` reports far more than faults. The firmware groups codes 201-242
+    as `UI_ALERT_*` -- "informational", in its own words -- and tags them
+    `kind: "warning"`; everything else is `kind: "error"`. Among those alerts
+    are 201 `UI_ALERT_RETURN_TO_BASE` and 202 `..._PWR`, which the robot
+    raises *every time it heads home at the end of a clean*, alongside
+    "Cleaning complete", "Dust bin full" and "Recovering location".
+
+    Reading `hasError` alone therefore painted a normal end-of-cycle dock as a
+    fault: the vacuum entity flipped to ERROR and the problem sensor tripped,
+    on every single run. Real failures still surface -- 252
+    `UI_ERROR_UNABLE_TO_RETURN_TO_BASE` sits outside the alert range and keeps
+    `kind: "error"`.
+
+    Firmware predating the `kind` field falls back to the old behaviour rather
+    than silently swallowing faults.
+    """
+    if not error_data or not error_data.get("hasError"):
+        return False
+    kind = error_data.get("kind")
+    if not kind:
+        return True
+    return kind == "error"
+
+
 # ── LIDAR map camera ────────────────────────────────────────────────
 LIDAR_POLL_INTERVAL = 2  # seconds, only while robot is active
 
