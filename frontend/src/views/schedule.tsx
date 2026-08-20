@@ -5,15 +5,16 @@ import backSvg from "../assets/icons/back.svg?raw";
 import { ConfirmDialog } from "../components/confirm-dialog";
 import { ErrorBannerStack, useErrorStack } from "../components/error-banner";
 import { Icon } from "../components/icon";
+import { TimeInput } from "../components/time-input";
 import { useDirtyGuard } from "../hooks/use-dirty-guard";
 import { useFetch } from "../hooks/use-fetch";
+import { T, useI18n } from "../i18n";
 import type { SettingsData, SystemData } from "../types";
-import { normalizeError, pad2 } from "../utils";
+import { fmtTime, normalizeError, parseTime } from "../utils";
 import { findCurrentTzAbbrev, findPresetLabel } from "./settings/helpers";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const SLOTS_PER_DAY = 2;
-const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 interface SlotState {
     hour: number;
@@ -41,9 +42,19 @@ function readDays(s: SettingsData): DayState[] {
             minute: (s[`sched${day}Slot1Min` as keyof SettingsData] as number) ?? 0,
             on: (s[`sched${day}Slot1On` as keyof SettingsData] as boolean) ?? false,
         };
+        if (!slot0.on) slot1.on = false;
         days.push({ slots: [slot0, slot1] });
     }
     return days;
+}
+
+function normalizeDays(days: DayState[]): DayState[] {
+    return days.map((day) => {
+        const [slot0, slot1] = day.slots;
+        return {
+            slots: [slot0, { ...slot1, on: slot0.on && slot1.on }],
+        };
+    });
 }
 
 function daysToDrafts(days: DayState[]): string[][] {
@@ -63,16 +74,6 @@ function buildSchedulePatch(days: DayState[], server: DayState[]): Partial<Setti
         }
     }
     return patch as Partial<SettingsData>;
-}
-
-function fmtTime(h: number, m: number): string {
-    return `${pad2(h)}:${pad2(m)}`;
-}
-
-function parseTime(value: string): { hour: number; minute: number } | null {
-    const match = value.match(TIME_RE);
-    if (!match) return null;
-    return { hour: Number.parseInt(match[1], 10), minute: Number.parseInt(match[2], 10) };
 }
 
 function tzLabel(tz: string, isDst?: boolean): string {
@@ -108,17 +109,20 @@ function validateDrafts(days: DayState[], drafts: string[][]): Set<string> {
 
 // Apply parsed draft times back into day state (only for enabled, valid slots)
 function applyDrafts(days: DayState[], drafts: string[][]): DayState[] {
-    return days.map((day, d) => ({
-        slots: day.slots.map((slot, s) => {
-            if (!slot.on) return slot;
-            const parsed = parseTime(drafts[d][s]);
-            if (!parsed) return slot;
-            return { ...slot, hour: parsed.hour, minute: parsed.minute };
-        }),
-    }));
+    return normalizeDays(
+        days.map((day, d) => ({
+            slots: day.slots.map((slot, s) => {
+                if (!slot.on) return slot;
+                const parsed = parseTime(drafts[d][s]);
+                if (!parsed) return slot;
+                return { ...slot, hour: parsed.hour, minute: parsed.minute };
+            }),
+        })),
+    );
 }
 
 export function ScheduleView() {
+    const { t, formatSystemTime } = useI18n();
     const [errors, errorStack] = useErrorStack();
     const [saving, setSaving] = useState(false);
 
@@ -145,7 +149,7 @@ export function ScheduleView() {
 
     useEffect(() => {
         if (settings) {
-            const d = readDays(settings);
+            const d = normalizeDays(readDays(settings));
             setEnabled(settings.scheduleEnabled);
             serverEnabled.current = settings.scheduleEnabled;
             setTz(settings.tz);
@@ -163,13 +167,15 @@ export function ScheduleView() {
     // Dirty = toggle changed, or any draft text differs from server
     const isDirty = enabled !== serverEnabled.current || !draftsMatchDays(drafts, days, serverDays.current);
 
-    const { guardedNavigate, showDiscardConfirm, setShowDiscardConfirm, handleDiscard } = useDirtyGuard(isDirty);
+    const { guardedGoBack, showDiscardConfirm, setShowDiscardConfirm, handleDiscard } = useDirtyGuard(isDirty);
 
     // Local-only state changes (no API call)
     const updateSlot = useCallback((day: number, slot: number, patch: Partial<SlotState>) => {
         setDays((cur) =>
-            cur.map((d, i) =>
-                i === day ? { slots: d.slots.map((s, si) => (si === slot ? { ...s, ...patch } : s)) } : d,
+            normalizeDays(
+                cur.map((d, i) =>
+                    i === day ? { slots: d.slots.map((s, si) => (si === slot ? { ...s, ...patch } : s)) } : d,
+                ),
             ),
         );
         // When adding slot 2, seed draft with default time
@@ -182,12 +188,7 @@ export function ScheduleView() {
         }
     }, []);
 
-    const updateDraft = useCallback((day: number, slot: number, raw: string) => {
-        // Auto-insert colon: "0930" -> "09:30"
-        let value = raw;
-        if (/^\d{4}$/.test(value)) {
-            value = `${value.slice(0, 2)}:${value.slice(2)}`;
-        }
+    const updateDraft = useCallback((day: number, slot: number, value: string) => {
         setDrafts((cur) => cur.map((r, i) => (i === day ? r.map((v, si) => (si === slot ? value : v)) : r)));
         // Clear validation error for this slot on edit
         setInvalidSlots((cur) => {
@@ -208,7 +209,7 @@ export function ScheduleView() {
         const invalid = validateDrafts(finalDays, drafts);
         if (invalid.size > 0) {
             setInvalidSlots(invalid);
-            errorStack.push("Fix invalid times before saving (use HH:MM format, 00:00-23:59)");
+            errorStack.push(t("Fix invalid times before saving (use HH:MM format, 00:00-23:59)"));
             return;
         }
 
@@ -234,7 +235,7 @@ export function ScheduleView() {
                 errorStack.push(normalizeError(e, "Failed to save schedule"));
             })
             .finally(() => setSaving(false));
-    }, [days, drafts, enabled, errorStack]);
+    }, [days, drafts, enabled, errorStack, t]);
 
     const onKeyDown = useCallback((e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
         if (e.key === "Enter") {
@@ -248,12 +249,14 @@ export function ScheduleView() {
                 <button
                     type="button"
                     class="header-back-btn"
-                    onClick={() => guardedNavigate("/settings")}
-                    aria-label="Back"
+                    onClick={() => guardedGoBack("/settings")}
+                    aria-label={t("Back")}
                 >
                     <Icon svg={backSvg} />
                 </button>
-                <h1>Schedule</h1>
+                <h1>
+                    <T>Schedule</T>
+                </h1>
                 <div class="header-right-spacer" />
             </div>
 
@@ -261,27 +264,33 @@ export function ScheduleView() {
 
             <div class="schedule-page">
                 {loading ? (
-                    <div class="schedule-loading">Loading schedule...</div>
+                    <div class="schedule-loading">
+                        <T>Loading schedule...</T>
+                    </div>
                 ) : (
                     <>
                         {/* Master toggle */}
                         <div class="schedule-master">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Schedule enabled</span>
-                                <span class="settings-toggle-desc">Automatically clean on set days and times</span>
+                                <span class="settings-toggle-title">
+                                    <T>Schedule enabled</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Automatically clean on set days and times</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${enabled ? " on" : ""}`}
                                 onClick={() => setEnabled((v) => !v)}
-                                aria-label="Toggle schedule"
+                                aria-label={t("Toggle schedule")}
                             />
                         </div>
 
                         <div class="schedule-tz-hint">
                             {system?.localTime
-                                ? `${system.localTime} - ${tzLabel(tz, system.isDst)}`
-                                : `Times are in ${tzLabel(tz)}`}
+                                ? `${formatSystemTime(system.localTime)} - ${tzLabel(tz, system.isDst)}`
+                                : t("Times are in {timezone}", { timezone: tzLabel(tz) })}
                         </div>
 
                         {/* Day rows */}
@@ -295,46 +304,40 @@ export function ScheduleView() {
                                         <button
                                             type="button"
                                             class={`schedule-day-toggle${s0.on ? " on" : ""}`}
-                                            onClick={() => updateSlot(i, 0, { on: !s0.on })}
-                                            aria-label={`Toggle ${DAY_NAMES[i]}`}
+                                            onClick={() => updateSlot(i, 0, s0.on ? { on: false } : { on: true })}
+                                            aria-label={t("Toggle {day}", { day: t(DAY_NAMES[i]) })}
                                         />
-                                        <span class={`sched-day-label${s0.on ? "" : " off"}`}>{DAY_NAMES[i]}</span>
+                                        <span class={`sched-day-label${s0.on ? "" : " off"}`}>{t(DAY_NAMES[i])}</span>
 
                                         <div class="sched-slots">
                                             {s0.on && (
-                                                <input
-                                                    type="text"
-                                                    inputMode="numeric"
+                                                <TimeInput
                                                     class={`sched-time-input${invalidSlots.has(`${i}-0`) ? " invalid" : ""}`}
                                                     value={drafts[i][0]}
                                                     maxLength={5}
-                                                    placeholder="HH:MM"
-                                                    onInput={(e) =>
-                                                        updateDraft(i, 0, (e.target as HTMLInputElement).value)
-                                                    }
+                                                    placeholder={t("HH:MM")}
+                                                    onInput={(v) => updateDraft(i, 0, v)}
                                                     onKeyDown={onKeyDown}
                                                 />
                                             )}
 
                                             {s0.on && s1.on && (
                                                 <div class="sched-slot2-wrap">
-                                                    <input
-                                                        type="text"
-                                                        inputMode="numeric"
+                                                    <TimeInput
                                                         class={`sched-time-input${invalidSlots.has(`${i}-1`) ? " invalid" : ""}`}
                                                         value={drafts[i][1]}
                                                         maxLength={5}
-                                                        placeholder="HH:MM"
-                                                        onInput={(e) =>
-                                                            updateDraft(i, 1, (e.target as HTMLInputElement).value)
-                                                        }
+                                                        placeholder={t("HH:MM")}
+                                                        onInput={(v) => updateDraft(i, 1, v)}
                                                         onKeyDown={onKeyDown}
                                                     />
                                                     <button
                                                         type="button"
                                                         class="sched-remove-btn"
                                                         onClick={() => updateSlot(i, 1, { on: false })}
-                                                        aria-label={`Remove ${DAY_NAMES[i]} second slot`}
+                                                        aria-label={t("Remove {day} second slot", {
+                                                            day: t(DAY_NAMES[i]),
+                                                        })}
                                                     >
                                                         x
                                                     </button>
@@ -345,7 +348,7 @@ export function ScheduleView() {
                                                     type="button"
                                                     class="sched-add-btn"
                                                     onClick={() => updateSlot(i, 1, { on: true, hour: 15, minute: 0 })}
-                                                    aria-label={`Add ${DAY_NAMES[i]} second slot`}
+                                                    aria-label={t("Add {day} second slot", { day: t(DAY_NAMES[i]) })}
                                                 >
                                                     +
                                                 </button>
@@ -363,7 +366,7 @@ export function ScheduleView() {
                             onClick={handleSave}
                             disabled={saving || !isDirty}
                         >
-                            {saving ? "Saving..." : "Save"}
+                            {t(saving ? "Saving..." : "Save")}
                         </button>
                     </>
                 )}
@@ -371,8 +374,8 @@ export function ScheduleView() {
 
             {showDiscardConfirm && (
                 <ConfirmDialog
-                    message="You have unsaved changes. Discard them?"
-                    confirmLabel="Discard"
+                    message={t("You have unsaved changes. Discard them?")}
+                    confirmLabel={t("Discard")}
                     onConfirm={handleDiscard}
                     onCancel={() => setShowDiscardConfirm(false)}
                 />

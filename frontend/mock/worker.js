@@ -309,7 +309,7 @@ function initScenario(session, rawScenario) {
 }
 
 function isBlockedDemoEndpoint(method, path, query) {
-    if (method === "DELETE") return true;
+    if (method === "DELETE") return path !== "/api/schedule/next";
     if (method !== "POST") return false;
     if (path === "/api/firmware/update" || path === "/api/history/import") return true;
     if (["/api/system/restart", "/api/system/format-fs", "/api/system/reset"].includes(path)) return true;

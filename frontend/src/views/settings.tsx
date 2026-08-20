@@ -6,6 +6,7 @@ import bellSvg from "../assets/icons/bell.svg?raw";
 import boltSvg from "../assets/icons/bolt.svg?raw";
 import calendarSvg from "../assets/icons/calendar.svg?raw";
 import chipSvg from "../assets/icons/chip.svg?raw";
+import clockSvg from "../assets/icons/clock.svg?raw";
 import databaseSvg from "../assets/icons/database.svg?raw";
 import gearSvg from "../assets/icons/gear.svg?raw";
 import globeSvg from "../assets/icons/globe.svg?raw";
@@ -23,9 +24,12 @@ import { ConfirmDialog } from "../components/confirm-dialog";
 import { ErrorBannerStack, useErrorStack } from "../components/error-banner";
 import { Icon } from "../components/icon";
 import { useNavigate } from "../components/router";
+import { TimeInput } from "../components/time-input";
 import { useDirtyGuard } from "../hooks/use-dirty-guard";
 import { usePoll } from "../hooks/use-poll";
 import { usePolling } from "../hooks/use-polling";
+import type { DistanceUnit } from "../distance-units";
+import { availableLocales, type LanguagePreference, T, useI18n } from "../i18n";
 import type { FirmwareVersion, SystemData, UserSettingsData } from "../types";
 import { normalizeError } from "../utils";
 import {
@@ -49,10 +53,31 @@ type Theme = "system" | "dark" | "light";
 interface SettingsViewProps {
     theme: Theme;
     onThemeChange: (t: Theme) => void;
+    language: LanguagePreference;
+    onLanguageChange: (language: LanguagePreference) => void;
+    distanceUnit: DistanceUnit;
+    onDistanceUnitChange: (unit: DistanceUnit) => void;
     firmware: FirmwareVersion | null;
 }
 
-export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewProps) {
+function languageLabel(locale: string): string {
+    try {
+        return new Intl.DisplayNames([locale], { type: "language" }).of(locale) ?? locale;
+    } catch {
+        return locale;
+    }
+}
+
+export function SettingsView({
+    theme,
+    onThemeChange,
+    language,
+    onLanguageChange,
+    distanceUnit,
+    onDistanceUnitChange,
+    firmware,
+}: SettingsViewProps) {
+    const { t, formatDuration, formatBytes } = useI18n();
     const navigate = useNavigate();
     const systemPoll = usePolling<SystemData>(api.getSystem, 10000);
     const system = systemPoll.data;
@@ -126,10 +151,17 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
         setNtfyOnAlert,
         ntfyOnDocking,
         setNtfyOnDocking,
+        autoRestartEnabled,
+        setAutoRestartEnabled,
+        autoRestartTime,
+        setAutoRestartTime,
+        restartBeforeClean,
+        setRestartBeforeClean,
         isDirty,
         pinError,
         hostnameError,
         syslogIpError,
+        autoRestartTimeError,
         validationError,
         saving,
         showSaveConfirm,
@@ -229,7 +261,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
         robotRestartTimeout.current = setTimeout(() => {
             setRobotRestartPolling(false);
             setRobotRestarting(false);
-            errorStack.push("Robot did not recover after restart — check physical connection");
+            errorStack.push("Robot did not recover after restart - check physical connection");
         }, 30000);
 
         api.robotRestart()
@@ -335,20 +367,26 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
     return (
         <>
             <div class="header">
-                <button type="button" class="header-back-btn" onClick={() => guardedNavigate("/")} aria-label="Back">
+                <button
+                    type="button"
+                    class="header-back-btn"
+                    onClick={() => guardedNavigate("/")}
+                    aria-label={t("Back")}
+                >
                     <Icon svg={backSvg} />
                 </button>
-                <h1>Settings</h1>
+                <h1>
+                    <T>Settings</T>
+                </h1>
                 <div class="header-right-spacer" />
             </div>
 
             <ErrorBannerStack errors={errors} />
 
             <div class="settings-page">
-                <SettingsCategory title="Appearance" icon={paletteSvg} defaultOpen>
+                <SettingsCategory title={t("Appearance")} icon={paletteSvg} defaultOpen>
                     <div class="settings-section">
-                        <div class="settings-section-title">Appearance</div>
-                        <div class="settings-theme-row">
+                        <div class="settings-theme-row" role="group" aria-label={t("Theme")}>
                             <button
                                 type="button"
                                 class={`settings-theme-btn${theme === "system" ? " active" : ""}`}
@@ -358,7 +396,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                     <Icon svg={sunSvg} />
                                     <Icon svg={moonSvg} />
                                 </div>
-                                Auto
+                                <T>Auto</T>
                             </button>
                             <button
                                 type="button"
@@ -368,7 +406,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 <div class="settings-theme-icon">
                                     <Icon svg={sunSvg} />
                                 </div>
-                                Light
+                                <T>Light</T>
                             </button>
                             <button
                                 type="button"
@@ -378,56 +416,105 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 <div class="settings-theme-icon">
                                     <Icon svg={moonSvg} />
                                 </div>
-                                Dark
+                                <T>Dark</T>
                             </button>
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-tz-select-wrap">
+                            <select
+                                class="settings-tz-select"
+                                aria-label={t("Language")}
+                                value={language}
+                                onChange={(e) =>
+                                    onLanguageChange((e.target as HTMLSelectElement).value as LanguagePreference)
+                                }
+                            >
+                                {availableLocales.map((locale) => (
+                                    <option key={locale} value={locale}>
+                                        {languageLabel(locale)}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div class="settings-robot-time">
+                            <T>Choose the interface language. Missing translations fall back to English.</T>
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-tz-select-wrap">
+                            <select
+                                class="settings-tz-select"
+                                aria-label={t("Distance unit")}
+                                value={distanceUnit}
+                                onChange={(e) =>
+                                    onDistanceUnitChange((e.target as HTMLSelectElement).value as DistanceUnit)
+                                }
+                            >
+                                <option value="meters">{t("Meters")}</option>
+                                <option value="feet">{t("Feet")}</option>
+                            </select>
+                        </div>
+                        <div class="settings-robot-time">
+                            <T>Choose the units used for distance and area in cleaning history.</T>
                         </div>
                     </div>
                 </SettingsCategory>
 
-                <SettingsCategory title="Device" icon={gearSvg}>
+                <SettingsCategory title={t("Device")} icon={gearSvg}>
                     <div class="settings-section">
-                        <div class="settings-section-title">Hostname</div>
+                        <div class="fw-info-row">
+                            <div class="fw-info-item">
+                                <Icon svg={clockSvg} />
+                                <span>{system?.uptime ? formatDuration(Math.floor(system.uptime / 1000)) : "..."}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-section">
                         <input
                             type="text"
                             class="settings-text-input"
+                            aria-label={t("Hostname")}
                             value={hostname}
                             maxLength={32}
                             onInput={(e) => setHostname((e.target as HTMLInputElement).value)}
                             disabled={saving}
-                            placeholder="neato"
+                            placeholder={t("neato")}
                         />
                         {hostnameError ? (
                             <div class="settings-field-error">{hostnameError}</div>
                         ) : (
-                            <div class="settings-robot-time">mDNS hostname for the device on your network</div>
+                            <div class="settings-robot-time">
+                                <T>mDNS hostname for the device on your network</T>
+                            </div>
                         )}
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">WiFi TX Power</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("WiFi TX Power")}
                                 value={wifiTxPower}
                                 onChange={(e) => setWifiTxPower(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
                             >
                                 {TX_POWER_PRESETS.map((p) => (
                                     <option key={p.value} value={p.value}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                             </select>
                         </div>
                         <div class="settings-robot-time">
                             <Icon svg={wifiSvg} />
-                            Lower power reduces range but improves stability on serial port power
+                            <T>Lower power reduces range but improves stability on serial port power</T>
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">Timezone</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Timezone")}
                                 value={isCustom ? "__custom__" : tz}
                                 onChange={(e) => {
                                     const val = (e.target as HTMLSelectElement).value;
@@ -437,22 +524,21 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                             >
                                 {TIMEZONE_PRESETS.map((p) => (
                                     <option key={p.tz} value={p.tz}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                                 {isCustom && (
                                     <option value="__custom__" disabled>
-                                        Custom: {tz}
+                                        {t("Custom: {timezone}", { timezone: tz })}
                                     </option>
                                 )}
                             </select>
                         </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">UART Pins</div>
-                        <div class="settings-pin-row">
+                        <div class="settings-pin-row" role="group" aria-label={t("UART Pins")}>
                             <label class="settings-pin-label">
-                                TX (ESP → Robot)
+                                <T>TX (ESP → Robot)</T>
                                 <input
                                     type="number"
                                     class="settings-pin-input"
@@ -466,7 +552,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 />
                             </label>
                             <label class="settings-pin-label">
-                                RX (Robot → ESP)
+                                <T>RX (Robot → ESP)</T>
                                 <input
                                     type="number"
                                     class="settings-pin-input"
@@ -486,22 +572,92 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         <button type="button" class="settings-nav-row" onClick={() => guardedNavigate("/schedule")}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={calendarSvg} />
-                                Cleaning Schedule
+                                <T>Cleaning Schedule</T>
                             </div>
                             <span class="settings-nav-chevron">&rsaquo;</span>
                         </button>
                     </div>
                     <div class="settings-section">
+                        <div class="settings-toggle-row">
+                            <div class="settings-toggle-label">
+                                <span class="settings-toggle-title">
+                                    <T>Auto restart</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Restart the robot automatically once per day when it is idle</T>
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                class={`settings-toggle${autoRestartEnabled ? " on" : ""}`}
+                                onClick={() => setAutoRestartEnabled(!autoRestartEnabled)}
+                                disabled={saving || firmware?.supported === false}
+                                aria-label={t("Toggle auto restart")}
+                            />
+                        </div>
+                        {autoRestartEnabled && (
+                            <>
+                                <div class="settings-ntfy-row">
+                                    <TimeInput
+                                        class="settings-text-input"
+                                        value={autoRestartTime}
+                                        maxLength={5}
+                                        placeholder={t("HH:MM")}
+                                        onInput={setAutoRestartTime}
+                                        disabled={saving}
+                                    />
+                                </div>
+                                {autoRestartTimeError && <div class="settings-field-error">{autoRestartTimeError}</div>}
+                                <div class="settings-robot-time">
+                                    <T>
+                                        Uses the configured local timezone and skips the restart if the robot is busy.
+                                    </T>
+                                </div>
+                                {robotSettings?.melodies && (
+                                    <div class="settings-robot-time settings-hint-warn">
+                                        <T>
+                                            Robot melodies are enabled. Restart at the scheduled time will play sound.
+                                        </T>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-toggle-row">
+                            <div class="settings-toggle-label">
+                                <span class="settings-toggle-title">
+                                    <T>Restart before scheduled clean</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Power-cycle the robot before each scheduled clean to ensure responsiveness</T>
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                class={`settings-toggle${restartBeforeClean ? " on" : ""}`}
+                                onClick={() => setRestartBeforeClean(!restartBeforeClean)}
+                                disabled={saving || firmware?.supported === false}
+                                aria-label={t("Toggle restart before clean")}
+                            />
+                        </div>
+                        {restartBeforeClean && (
+                            <div class="settings-robot-time">
+                                <T>The robot will restart and wait for boot before starting the scheduled clean.</T>
+                            </div>
+                        )}
+                    </div>
+                    <div class="settings-section">
                         <button type="button" class="settings-nav-row" onClick={() => setShowRestartConfirm(true)}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={powerSvg} />
-                                Restart Device
+                                <T>Restart Device</T>
                             </div>
                         </button>
                     </div>
                 </SettingsCategory>
 
-                <SettingsCategory title="WiFi" icon={wifiSvg} lazy>
+                <SettingsCategory title={t("WiFi")} icon={wifiSvg} lazy>
                     <WiFiSection
                         apFallbackOnDisconnect={apFallbackOnDisconnect}
                         onApFallbackChange={setApFallbackOnDisconnect}
@@ -510,13 +666,15 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                     />
                 </SettingsCategory>
 
-                <SettingsCategory title="Notifications" icon={bellSvg}>
+                <SettingsCategory title={t("Notifications")} icon={bellSvg}>
                     <div class="settings-section">
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Enable notifications</span>
+                                <span class="settings-toggle-title">
+                                    <T>Enable notifications</T>
+                                </span>
                                 <span class="settings-toggle-desc">
-                                    Push alerts via ntfy (custom server or ntfy.sh)
+                                    <T>Push alerts via ntfy (custom server or ntfy.sh)</T>
                                 </span>
                             </div>
                             <button
@@ -524,7 +682,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 class={`settings-toggle${ntfyEnabled ? " on" : ""}`}
                                 onClick={() => setNtfyEnabled(!ntfyEnabled)}
                                 disabled={saving}
-                                aria-label="Toggle notifications"
+                                aria-label={t("Toggle notifications")}
                             />
                         </div>
                         {ntfyEnabled && (
@@ -536,7 +694,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                         value={ntfyTopic}
                                         onInput={(e) => setNtfyTopic((e.target as HTMLInputElement).value)}
                                         disabled={saving}
-                                        placeholder="e.g. my-robot-alerts"
+                                        placeholder={t("e.g. my-robot-alerts")}
                                     />
                                     <button
                                         type="button"
@@ -544,7 +702,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                         onClick={handleTestNotification}
                                         disabled={!ntfyTopic.trim() || testingNotif}
                                     >
-                                        {testingNotif ? "..." : (notifTestResult ?? "Test")}
+                                        {testingNotif ? "..." : t(notifTestResult ?? "Test")}
                                     </button>
                                 </div>
                                 <input
@@ -553,7 +711,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                     value={ntfyServer}
                                     onInput={(e) => setNtfyServer((e.target as HTMLInputElement).value)}
                                     disabled={saving}
-                                    placeholder="Server hostname (blank = ntfy.sh)"
+                                    placeholder={t("Server hostname (blank = ntfy.sh)")}
                                 />
                                 <input
                                     type="password"
@@ -561,71 +719,91 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                     value={ntfyToken}
                                     onInput={(e) => setNtfyToken((e.target as HTMLInputElement).value)}
                                     disabled={saving}
-                                    placeholder="Access token (blank = no auth)"
+                                    placeholder={t("Access token (blank = no auth)")}
                                 />
                                 <div class="settings-toggle-row">
                                     <div class="settings-toggle-label">
-                                        <span class="settings-toggle-title">Cleaning started</span>
-                                        <span class="settings-toggle-desc">When a cleaning cycle begins</span>
+                                        <span class="settings-toggle-title">
+                                            <T>Cleaning started</T>
+                                        </span>
+                                        <span class="settings-toggle-desc">
+                                            <T>When a cleaning cycle begins</T>
+                                        </span>
                                     </div>
                                     <button
                                         type="button"
                                         class={`settings-toggle${ntfyOnStart ? " on" : ""}`}
                                         onClick={() => setNtfyOnStart(!ntfyOnStart)}
                                         disabled={saving}
-                                        aria-label="Toggle cleaning started notification"
+                                        aria-label={t("Toggle cleaning started notification")}
                                     />
                                 </div>
                                 <div class="settings-toggle-row">
                                     <div class="settings-toggle-label">
-                                        <span class="settings-toggle-title">Cleaning done</span>
-                                        <span class="settings-toggle-desc">When a cleaning cycle completes</span>
+                                        <span class="settings-toggle-title">
+                                            <T>Cleaning done</T>
+                                        </span>
+                                        <span class="settings-toggle-desc">
+                                            <T>When a cleaning cycle completes</T>
+                                        </span>
                                     </div>
                                     <button
                                         type="button"
                                         class={`settings-toggle${ntfyOnDone ? " on" : ""}`}
                                         onClick={() => setNtfyOnDone(!ntfyOnDone)}
                                         disabled={saving}
-                                        aria-label="Toggle cleaning done notification"
+                                        aria-label={t("Toggle cleaning done notification")}
                                     />
                                 </div>
                                 <div class="settings-toggle-row">
                                     <div class="settings-toggle-label">
-                                        <span class="settings-toggle-title">Robot error</span>
-                                        <span class="settings-toggle-desc">Stuck brush, wheel, or other failures</span>
+                                        <span class="settings-toggle-title">
+                                            <T>Robot error</T>
+                                        </span>
+                                        <span class="settings-toggle-desc">
+                                            <T>Stuck brush, wheel, or other failures</T>
+                                        </span>
                                     </div>
                                     <button
                                         type="button"
                                         class={`settings-toggle${ntfyOnError ? " on" : ""}`}
                                         onClick={() => setNtfyOnError(!ntfyOnError)}
                                         disabled={saving}
-                                        aria-label="Toggle error notification"
+                                        aria-label={t("Toggle error notification")}
                                     />
                                 </div>
                                 <div class="settings-toggle-row">
                                     <div class="settings-toggle-label">
-                                        <span class="settings-toggle-title">Robot alert</span>
-                                        <span class="settings-toggle-desc">Brush or filter replacement reminders</span>
+                                        <span class="settings-toggle-title">
+                                            <T>Robot alert</T>
+                                        </span>
+                                        <span class="settings-toggle-desc">
+                                            <T>Brush or filter replacement reminders</T>
+                                        </span>
                                     </div>
                                     <button
                                         type="button"
                                         class={`settings-toggle${ntfyOnAlert ? " on" : ""}`}
                                         onClick={() => setNtfyOnAlert(!ntfyOnAlert)}
                                         disabled={saving}
-                                        aria-label="Toggle alert notification"
+                                        aria-label={t("Toggle alert notification")}
                                     />
                                 </div>
                                 <div class="settings-toggle-row">
                                     <div class="settings-toggle-label">
-                                        <span class="settings-toggle-title">Returning to base</span>
-                                        <span class="settings-toggle-desc">When the robot docks to charge</span>
+                                        <span class="settings-toggle-title">
+                                            <T>Returning to base</T>
+                                        </span>
+                                        <span class="settings-toggle-desc">
+                                            <T>When the robot docks to charge</T>
+                                        </span>
                                     </div>
                                     <button
                                         type="button"
                                         class={`settings-toggle${ntfyOnDocking ? " on" : ""}`}
                                         onClick={() => setNtfyOnDocking(!ntfyOnDocking)}
                                         disabled={saving}
-                                        aria-label="Toggle docking notification"
+                                        aria-label={t("Toggle docking notification")}
                                     />
                                 </div>
                             </>
@@ -633,111 +811,118 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                     </div>
                 </SettingsCategory>
 
-                <SettingsCategory title="House Cleaning" icon={houseSvg} disabled={firmware?.supported === false}>
+                <SettingsCategory title={t("House Cleaning")} icon={houseSvg} disabled={firmware?.supported === false}>
                     <div class="settings-section">
-                        <div class="settings-section-title">Navigation</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Navigation")}
                                 value={navMode}
                                 onChange={(e) => setNavMode((e.target as HTMLSelectElement).value)}
                                 disabled={saving}
                             >
                                 {NAV_MODE_PRESETS.map((p) => (
                                     <option key={p.value} value={p.value}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                             </select>
                         </div>
                         <div class="settings-robot-time">
-                            How the robot navigates during house cleaning. Extra Care avoids obstacles, Deep cleans
-                            corners thoroughly.
+                            <T>
+                                How the robot navigates during house cleaning. Extra Care avoids obstacles, Deep cleans
+                                corners thoroughly.
+                            </T>
                         </div>
                     </div>
                 </SettingsCategory>
 
-                <SettingsCategory title="Manual Clean" icon={manualSvg}>
+                <SettingsCategory title={t("Manual Clean")} icon={manualSvg}>
                     <div class="settings-section">
-                        <div class="settings-section-title">Brush Speed</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Brush Speed")}
                                 value={brushRpm}
                                 onChange={(e) => setBrushRpm(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
                             >
                                 {BRUSH_PRESETS.map((p) => (
                                     <option key={p.value} value={p.value}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                             </select>
                         </div>
-                        <div class="settings-robot-time">Main brush rotation speed during manual clean</div>
+                        <div class="settings-robot-time">
+                            <T>Main brush rotation speed during manual clean</T>
+                        </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">Vacuum Power</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Vacuum Power")}
                                 value={vacuumSpeed}
                                 onChange={(e) => setVacuumSpeed(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
                             >
                                 {VACUUM_PRESETS.map((p) => (
                                     <option key={p.value} value={p.value}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                             </select>
                         </div>
-                        <div class="settings-robot-time">Vacuum motor speed during manual clean</div>
+                        <div class="settings-robot-time">
+                            <T>Vacuum motor speed during manual clean</T>
+                        </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">Side Brush Power</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Side Brush Power")}
                                 value={sideBrushPower}
                                 onChange={(e) => setSideBrushPower(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
                             >
                                 {SIDE_BRUSH_PRESETS.map((p) => (
                                     <option key={p.value} value={p.value}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                             </select>
                         </div>
-                        <div class="settings-robot-time">Side brush motor power (D5 and above)</div>
+                        <div class="settings-robot-time">
+                            <T>Side brush motor power (D5 and above)</T>
+                        </div>
                     </div>
                     <div class="settings-section">
-                        <div class="settings-section-title">Stall Detection</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Stall Detection")}
                                 value={stallThreshold}
                                 onChange={(e) => setStallThreshold(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
                             >
                                 {STALL_PRESETS.map((p) => (
                                     <option key={p.value} value={p.value}>
-                                        {p.label}
+                                        {t(p.label)}
                                     </option>
                                 ))}
                             </select>
                         </div>
                         <div class="settings-robot-time">
-                            Wheel load threshold for obstacle detection during manual driving
+                            <T>Wheel load threshold for obstacle detection during manual driving</T>
                         </div>
                     </div>
                 </SettingsCategory>
 
-                <SettingsCategory title="Firmware" icon={chipSvg}>
+                <SettingsCategory title={t("Firmware")} icon={chipSvg}>
                     <div class="settings-section">
-                        <div class="settings-section-title">Firmware</div>
-                        <div class="fw-info-row">
+                        <div class="fw-info-row" role="group" aria-label={t("Firmware")}>
                             <div class="fw-info-item">
                                 <Icon svg={tagSvg} />
                                 <span>{firmware?.version ?? "..."}</span>
@@ -748,8 +933,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                             </div>
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">Update</div>
+                    <div class="settings-section" role="group" aria-label={t("Update")}>
                         {fw.status === "idle" && (
                             <>
                                 <label class="fw-file-label">
@@ -762,12 +946,12 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                         }
                                     />
                                     <span class={`fw-file-btn${fw.file ? " has-file" : ""}`}>
-                                        {fw.file ? fw.file.name : "Select firmware file (.bin)"}
+                                        {fw.file ? fw.file.name : t("Select firmware file (.bin)")}
                                     </span>
                                 </label>
                                 {fw.file && (
                                     <div class="fw-file-meta">
-                                        {(fw.file.size / 1024).toFixed(0)} KB
+                                        {formatBytes(fw.file.size)}
                                         {fw.chipError && <span class="fw-chip-error">{fw.chipError}</span>}
                                     </div>
                                 )}
@@ -787,20 +971,22 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                             <span class={`fw-file-btn${fw.checksumFile ? " has-file" : ""}`}>
                                                 {fw.checksumFile
                                                     ? fw.checksumFile.name
-                                                    : "Select checksums.txt (optional)"}
+                                                    : t("Select checksums.txt (optional)")}
                                             </span>
                                         </label>
                                         {fw.checksumResult === "match" && (
-                                            <div class="fw-checksum-status fw-checksum-ok">Checksum verified</div>
+                                            <div class="fw-checksum-status fw-checksum-ok">
+                                                <T>Checksum verified</T>
+                                            </div>
                                         )}
                                         {fw.checksumResult === "mismatch" && (
                                             <div class="fw-checksum-status fw-checksum-fail">
-                                                Checksum mismatch — firmware file may be corrupted
+                                                <T>Checksum mismatch - firmware file may be corrupted</T>
                                             </div>
                                         )}
                                         {fw.checksumResult === "not-found" && (
                                             <div class="fw-checksum-status fw-checksum-warn">
-                                                Firmware filename not found in checksums file
+                                                <T>Firmware filename not found in checksums file</T>
                                             </div>
                                         )}
                                         {fw.canUpload && (
@@ -815,7 +1001,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                                     }
                                                 }}
                                             >
-                                                Upload & Install
+                                                <T>Upload & Install</T>
                                             </button>
                                         )}
                                     </>
@@ -827,7 +1013,9 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 <div class="fw-progress-bar">
                                     <div class="fw-progress-fill indeterminate" />
                                 </div>
-                                <div class="fw-progress-text">Computing checksum...</div>
+                                <div class="fw-progress-text">
+                                    <T>Computing checksum...</T>
+                                </div>
                             </div>
                         )}
                         {fw.status === "uploading" && (
@@ -836,7 +1024,9 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                     <div class="fw-progress-fill" style={{ width: `${fw.progress}%` }} />
                                 </div>
                                 <div class="fw-progress-text">
-                                    {fw.progress >= 90 ? "Writing firmware..." : `Uploading... ${fw.progress}%`}
+                                    {fw.progress >= 90
+                                        ? t("Writing firmware...")
+                                        : t("Uploading... {progress}%", { progress: fw.progress })}
                                 </div>
                             </div>
                         )}
@@ -845,45 +1035,55 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 <div class="fw-progress-bar">
                                     <div class="fw-progress-fill" style={{ width: "100%" }} />
                                 </div>
-                                <div class="fw-progress-text">Upload complete. Rebooting...</div>
+                                <div class="fw-progress-text">
+                                    <T>Upload complete. Rebooting...</T>
+                                </div>
                             </div>
                         )}
                     </div>
                 </SettingsCategory>
 
-                <SettingsCategory title="Diagnostics" icon={stethoscopeSvg} lazy>
+                <SettingsCategory title={t("Diagnostics")} icon={stethoscopeSvg} lazy>
                     <div class="settings-section">
-                        <div class="settings-section-title">Log Level</div>
                         <div class="settings-tz-select-wrap">
                             <select
                                 class="settings-tz-select"
+                                aria-label={t("Log Level")}
                                 value={logLevel}
                                 onChange={(e) => setLogLevel(parseInt((e.target as HTMLSelectElement).value, 10))}
                                 disabled={saving}
                             >
-                                <option value={0}>Off (default)</option>
-                                <option value={1}>{syslogEnabled ? "Info" : "Info (auto-off after 1 hour)"}</option>
-                                <option value={2}>{syslogEnabled ? "Debug" : "Debug (auto-off after 10 min)"}</option>
+                                <option value={0}>{t("Off (default)")}</option>
+                                <option value={1}>{t(syslogEnabled ? "Info" : "Info (auto-off after 1 hour)")}</option>
+                                <option value={2}>
+                                    {t(syslogEnabled ? "Debug" : "Debug (auto-off after 10 min)")}
+                                </option>
                             </select>
                         </div>
                         <div class="settings-robot-time">
                             {syslogEnabled
-                                ? "Logs are sent to the remote syslog server over UDP."
-                                : "Logging writes to flash storage. Higher levels increase wear and can slow serial communication."}
+                                ? t("Logs are sent to the remote syslog server over UDP.")
+                                : t(
+                                      "Logging writes to flash storage. Higher levels increase wear and can slow serial communication.",
+                                  )}
                         </div>
                     </div>
                     <div class="settings-section">
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Remote syslog</span>
-                                <span class="settings-toggle-desc">Send logs over UDP instead of writing to flash</span>
+                                <span class="settings-toggle-title">
+                                    <T>Remote syslog</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Send logs over UDP instead of writing to flash</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${syslogEnabled ? " on" : ""}`}
                                 onClick={() => setSyslogEnabled(!syslogEnabled)}
                                 disabled={saving}
-                                aria-label="Toggle remote syslog"
+                                aria-label={t("Toggle remote syslog")}
                             />
                         </div>
                         {syslogEnabled && (
@@ -895,7 +1095,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                         value={syslogIp}
                                         onInput={(e) => setSyslogIp((e.target as HTMLInputElement).value)}
                                         disabled={saving}
-                                        placeholder="e.g. 192.168.1.100"
+                                        placeholder={t("e.g. 192.168.1.100")}
                                     />
                                 </div>
                                 {syslogIpError && <div class="settings-field-error">{syslogIpError}</div>}
@@ -906,7 +1106,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         <button type="button" class="settings-nav-row" onClick={() => guardedNavigate("/battery")}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={boltSvg} />
-                                Battery Diagnostics
+                                <T>Battery Diagnostics</T>
                             </div>
                             <span class="settings-nav-chevron">&rsaquo;</span>
                         </button>
@@ -915,7 +1115,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         <button type="button" class="settings-nav-row" onClick={() => guardedNavigate("/logs")}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={databaseSvg} />
-                                Logs
+                                <T>Logs</T>
                             </div>
                             <span class="settings-nav-chevron">&rsaquo;</span>
                         </button>
@@ -929,7 +1129,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         >
                             <div class="settings-nav-row-left">
                                 <Icon svg={alertSvg} />
-                                Clear Robot Errors
+                                <T>Clear Robot Errors</T>
                             </div>
                         </button>
                     </div>
@@ -941,59 +1141,71 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                     onClick={onSaveClick}
                     disabled={saving || !isDirty || !!validationError}
                 >
-                    {saveLabel}
+                    {t(saveLabel)}
                 </button>
 
-                <SettingsCategory title="Robot" icon={robotSvg} disabled={firmware?.supported === false}>
-                    <div class="settings-section">
-                        <div class="settings-section-title">Sound</div>
+                <SettingsCategory title={t("Robot")} icon={robotSvg} disabled={firmware?.supported === false}>
+                    <div class="settings-section" role="group" aria-label={t("Sound")}>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Button clicks</span>
-                                <span class="settings-toggle-desc">Sound when pressing buttons</span>
+                                <span class="settings-toggle-title">
+                                    <T>Button clicks</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Sound when pressing buttons</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.buttonClick ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("buttonClick", !robotSettings?.buttonClick)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle button clicks"
+                                aria-label={t("Toggle button clicks")}
                             />
                         </div>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Melodies</span>
-                                <span class="settings-toggle-desc">Startup and shutdown sounds</span>
+                                <span class="settings-toggle-title">
+                                    <T>Melodies</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Startup and shutdown sounds</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.melodies ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("melodies", !robotSettings?.melodies)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle melodies"
+                                aria-label={t("Toggle melodies")}
                             />
                         </div>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Warnings</span>
-                                <span class="settings-toggle-desc">Warning beeps</span>
+                                <span class="settings-toggle-title">
+                                    <T>Warnings</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Warning beeps</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.warnings ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("warnings", !robotSettings?.warnings)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle warnings"
+                                aria-label={t("Toggle warnings")}
                             />
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">Cleaning</div>
+                    <div class="settings-section" role="group" aria-label={t("Cleaning options")}>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Eco mode</span>
+                                <span class="settings-toggle-title">
+                                    <T>Eco mode</T>
+                                </span>
                                 <span class="settings-toggle-desc">
-                                    Lower brush and vacuum power, longer battery life
+                                    <T>Lower brush and vacuum power, longer battery life</T>
                                 </span>
                             </div>
                             <button
@@ -1001,26 +1213,34 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                 class={`settings-toggle${robotSettings?.ecoMode ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("ecoMode", !robotSettings?.ecoMode)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle eco mode"
+                                aria-label={t("Toggle eco mode")}
                             />
                         </div>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Intense clean</span>
-                                <span class="settings-toggle-desc">Double-pass cleaning for deeper clean</span>
+                                <span class="settings-toggle-title">
+                                    <T>Intense clean</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Double-pass cleaning for deeper clean</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.intenseClean ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("intenseClean", !robotSettings?.intenseClean)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle intense clean"
+                                aria-label={t("Toggle intense clean")}
                             />
                         </div>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Bin full detection</span>
-                                <span class="settings-toggle-desc">Alert when dust bin is full</span>
+                                <span class="settings-toggle-title">
+                                    <T>Bin full detection</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Alert when dust bin is full</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
@@ -1029,62 +1249,72 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                                     handleRobotSettingsChange("binFullDetect", !robotSettings?.binFullDetect)
                                 }
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle bin full detection"
+                                aria-label={t("Toggle bin full detection")}
                             />
                         </div>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Wall following</span>
-                                <span class="settings-toggle-desc">Follow walls and edges for thorough cleaning</span>
+                                <span class="settings-toggle-title">
+                                    <T>Wall following</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Follow walls and edges for thorough cleaning</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.wallEnable ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("wallEnable", !robotSettings?.wallEnable)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle wall following"
+                                aria-label={t("Toggle wall following")}
                             />
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">Power Saving</div>
+                    <div class="settings-section" role="group" aria-label={t("Power Saving")}>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Robot WiFi</span>
-                                <span class="settings-toggle-desc">Unused with OpenNeato, disable to save power</span>
+                                <span class="settings-toggle-title">
+                                    <T>Robot WiFi</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Unused with OpenNeato, disable to save power</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.wifi ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("wifi", !robotSettings?.wifi)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle robot WiFi"
+                                aria-label={t("Toggle robot WiFi")}
                             />
                         </div>
                         <div class="settings-toggle-row">
                             <div class="settings-toggle-label">
-                                <span class="settings-toggle-title">Stealth LEDs</span>
-                                <span class="settings-toggle-desc">Disable standby indicator lights</span>
+                                <span class="settings-toggle-title">
+                                    <T>Stealth LEDs</T>
+                                </span>
+                                <span class="settings-toggle-desc">
+                                    <T>Disable standby indicator lights</T>
+                                </span>
                             </div>
                             <button
                                 type="button"
                                 class={`settings-toggle${robotSettings?.stealthLed ? " on" : ""}${savingRobotSettings ? " pending" : ""}`}
                                 onClick={() => handleRobotSettingsChange("stealthLed", !robotSettings?.stealthLed)}
                                 disabled={robotSettingsDisabled}
-                                aria-label="Toggle stealth LEDs"
+                                aria-label={t("Toggle stealth LEDs")}
                             />
                         </div>
                     </div>
-                    <div class="settings-section">
-                        <div class="settings-section-title">Power Control</div>
+                    <div class="settings-section" role="group" aria-label={t("Power Control")}>
                         <button type="button" class="settings-nav-row" onClick={() => setShowRobotRestartConfirm(true)}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={powerSvg} />
-                                Restart Robot
+                                <T>Restart Robot</T>
                             </div>
                         </button>
                     </div>
-                    <div class="settings-section">
+                    <div class="settings-section" role="group" aria-label={t("Power Control")}>
                         <button
                             type="button"
                             class="settings-nav-row danger"
@@ -1092,22 +1322,26 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         >
                             <div class="settings-nav-row-left">
                                 <Icon svg={alertSvg} />
-                                Shutdown Robot
+                                <T>Shutdown Robot</T>
                             </div>
                         </button>
                     </div>
                 </SettingsCategory>
 
                 {firmware && (
-                    <SettingsCategory title="About" icon={globeSvg}>
+                    <SettingsCategory title={t("About")} icon={globeSvg}>
                         <div class="settings-section">
                             <div class="settings-about-card">
                                 <div class="settings-about-name">{firmware.name}</div>
                                 <div class="settings-about-description">
-                                    Open-source replacement for Neato's discontinued cloud and mobile app.
+                                    <T>Open-source replacement for Neato's discontinued cloud and mobile app.</T>
                                 </div>
-                                <div class="settings-about-meta">Copyright © 2026 Soner Köksal</div>
-                                <div class="settings-about-meta">Licensed under {firmware.license} License</div>
+                                <div class="settings-about-meta">
+                                    <T>Copyright © 2026 Soner Köksal</T>
+                                </div>
+                                <div class="settings-about-meta">
+                                    {t("Licensed under {license} License", { license: firmware.license })}
+                                </div>
                             </div>
                         </div>
                         <div class="settings-section">
@@ -1119,7 +1353,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                             >
                                 <div class="settings-nav-row-left">
                                     <Icon svg={globeSvg} />
-                                    View on GitHub
+                                    <T>View on GitHub</T>
                                 </div>
                                 <span class="settings-nav-chevron">&rsaquo;</span>
                             </a>
@@ -1127,7 +1361,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                     </SettingsCategory>
                 )}
 
-                <SettingsCategory title="Danger Zone" icon={alertSvg}>
+                <SettingsCategory title={t("Danger Zone")} icon={alertSvg}>
                     <div class="settings-section">
                         <button
                             type="button"
@@ -1136,7 +1370,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         >
                             <div class="settings-nav-row-left">
                                 <Icon svg={databaseSvg} />
-                                Format Storage
+                                <T>Format Storage</T>
                             </div>
                         </button>
                     </div>
@@ -1144,7 +1378,7 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                         <button type="button" class="settings-nav-row danger" onClick={() => setShowResetConfirm(true)}>
                             <div class="settings-nav-row-left">
                                 <Icon svg={alertSvg} />
-                                Factory Reset
+                                <T>Factory Reset</T>
                             </div>
                         </button>
                     </div>
@@ -1153,8 +1387,8 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showDiscardConfirm && (
                 <ConfirmDialog
-                    message="You have unsaved changes. Discard them?"
-                    confirmLabel="Discard"
+                    message={t("You have unsaved changes. Discard them?")}
+                    confirmLabel={t("Discard")}
                     onConfirm={handleDiscard}
                     onCancel={() => setShowDiscardConfirm(false)}
                 />
@@ -1162,8 +1396,8 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showSaveConfirm && (
                 <ConfirmDialog
-                    message="Some changes require a device reboot. Save and reboot now?"
-                    confirmLabel="Save & Reboot"
+                    message={t("Some changes require a device reboot. Save and reboot now?")}
+                    confirmLabel={t("Save & Reboot")}
                     disabled={saving}
                     onConfirm={handleSave}
                     onCancel={() => setShowSaveConfirm(false)}
@@ -1172,8 +1406,8 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showRestartConfirm && (
                 <ConfirmDialog
-                    message="Restart device?"
-                    confirmLabel="Restart"
+                    message={t("Restart device?")}
+                    confirmLabel={t("Restart")}
                     disabled={restarting}
                     onConfirm={handleRestart}
                     onCancel={() => setShowRestartConfirm(false)}
@@ -1182,8 +1416,8 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showFormatConfirm && (
                 <ConfirmDialog
-                    message="This will erase all logs and map data. Settings are preserved. Device will reboot."
-                    confirmLabel="Format"
+                    message={t("This will erase all logs and map data. Settings are preserved. Device will reboot.")}
+                    confirmLabel={t("Format")}
                     disabled={restarting}
                     onConfirm={handleFormatFs}
                     onCancel={() => setShowFormatConfirm(false)}
@@ -1192,9 +1426,9 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showResetConfirm && (
                 <ConfirmDialog
-                    message="This will erase all settings including WiFi credentials. Are you sure?"
-                    confirmLabel="Factory Reset"
-                    confirmText="RESET"
+                    message={t("This will erase all settings including WiFi credentials. Are you sure?")}
+                    confirmLabel={t("Factory Reset")}
+                    confirmText={t("RESET")}
                     disabled={restarting}
                     onConfirm={handleFactoryReset}
                     onCancel={() => setShowResetConfirm(false)}
@@ -1203,8 +1437,10 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showUploadConfirm && (
                 <ConfirmDialog
-                    message="No checksums.txt provided. A corrupted firmware file could brick your device. Upload anyway?"
-                    confirmLabel="Upload"
+                    message={t(
+                        "No checksums.txt provided. A corrupted firmware file could brick your device. Upload anyway?",
+                    )}
+                    confirmLabel={t("Upload")}
                     onConfirm={() => {
                         setShowUploadConfirm(false);
                         fw.startUpload();
@@ -1215,8 +1451,10 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showClearErrorsConfirm && (
                 <ConfirmDialog
-                    message="Clear all robot errors and warnings? This dismisses any active error state on the robot."
-                    confirmLabel="Clear"
+                    message={t(
+                        "Clear all robot errors and warnings? This dismisses any active error state on the robot.",
+                    )}
+                    confirmLabel={t("Clear")}
                     onConfirm={handleClearErrors}
                     onCancel={() => setShowClearErrorsConfirm(false)}
                 />
@@ -1224,8 +1462,8 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showRobotRestartConfirm && (
                 <ConfirmDialog
-                    message="Restart the robot? It will be unavailable for a few seconds."
-                    confirmLabel="Restart"
+                    message={t("Restart the robot? It will be unavailable for a few seconds.")}
+                    confirmLabel={t("Restart")}
                     onConfirm={() => {
                         setShowRobotRestartConfirm(false);
                         handleRobotRestart();
@@ -1236,8 +1474,10 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
 
             {showRobotShutdownConfirm && (
                 <ConfirmDialog
-                    message="Shut down the robot? The ESP32 will lose power and go offline. The robot needs a physical button press to turn back on."
-                    confirmLabel="Shutdown"
+                    message={t(
+                        "Shut down the robot? The ESP32 will lose power and go offline. The robot needs a physical button press to turn back on.",
+                    )}
+                    confirmLabel={t("Shutdown")}
                     onConfirm={handleRobotShutdown}
                     onCancel={() => setShowRobotShutdownConfirm(false)}
                 />
@@ -1247,11 +1487,13 @@ export function SettingsView({ theme, onThemeChange, firmware }: SettingsViewPro
                 <div class="loading-overlay">
                     <div class="loading-dialog">
                         <div class="loading-spinner" />
-                        <div class="loading-text">{robotRestarting ? "Restarting robot..." : "Rebooting..."}</div>
+                        <div class="loading-text">{t(robotRestarting ? "Restarting robot..." : "Rebooting...")}</div>
                         <div class="loading-subtext">
-                            {robotRestarting
-                                ? "Waiting for robot to come back online"
-                                : "Waiting for device to come back online"}
+                            {t(
+                                robotRestarting
+                                    ? "Waiting for robot to come back online"
+                                    : "Waiting for device to come back online",
+                            )}
                         </div>
                     </div>
                 </div>

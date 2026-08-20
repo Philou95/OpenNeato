@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { api } from "./api";
 import { Route, Router } from "./components/router";
 import { usePolling } from "./hooks/use-polling";
+import { I18nProvider, type LanguagePreference, loadLanguagePreference, resolveLocale } from "./i18n";
+import { type DistanceUnit, loadDistanceUnit } from "./distance-units";
 import type { FirmwareVersion, ManualStatus, StateData } from "./types";
 import { checkForUpdate, getAvailableUpdate, type UpdateInfo } from "./update";
 import { BatteryView } from "./views/battery";
@@ -44,6 +46,9 @@ function loadTheme(): Theme {
 
 export function App() {
     const [theme, setTheme] = useState<Theme>(loadTheme);
+    const [language, setLanguage] = useState<LanguagePreference>(loadLanguagePreference);
+    const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>(loadDistanceUnit);
+    const locale = resolveLocale(language);
 
     const themeInitialized = useRef(false);
     useEffect(() => {
@@ -61,6 +66,15 @@ export function App() {
             return () => mq.removeEventListener("change", onChange);
         }
     }, [theme]);
+
+    useEffect(() => {
+        localStorage.setItem("language", language);
+        document.documentElement.lang = locale;
+    }, [language, locale]);
+
+    useEffect(() => {
+        localStorage.setItem("distanceUnit", distanceUnit);
+    }, [distanceUnit]);
 
     const state = usePolling<StateData>(api.getState, 2000);
     const firmware = usePolling<FirmwareVersion>(api.getFirmwareVersion, 60000);
@@ -141,47 +155,57 @@ export function App() {
     const robotReady = !!(firmware.data && !firmware.data.identifying && firmware.data.supported);
 
     return (
-        <Router>
-            <Route path="/">
-                <DashboardView
-                    firmware={firmware}
-                    state={state}
-                    isManual={isManual}
-                    updateInfo={updateInfo}
-                    robotReady={robotReady}
-                    identifying={!firmware.data || firmware.data.identifying}
-                />
-            </Route>
-            <Route path="/settings">
-                <SettingsView theme={theme} onThemeChange={setTheme} firmware={firmware.data} />
-            </Route>
-            {robotReady && (
-                <Route path="/manual">
-                    <ManualView
+        <I18nProvider preference={language} locale={locale} setPreference={setLanguage}>
+            <Router>
+                <Route path="/">
+                    <DashboardView
+                        firmware={firmware}
+                        state={state}
                         isManual={isManual}
-                        status={manualStatus.data}
-                        brush={brush}
-                        vacuum={vacuum}
-                        sideBrush={sideBrush}
-                        onToggleBrush={toggleBrush}
-                        onToggleVacuum={toggleVacuum}
-                        onToggleSideBrush={toggleSideBrush}
-                        onToggleAll={toggleAll}
+                        updateInfo={updateInfo}
+                        robotReady={robotReady}
+                        identifying={!firmware.data || firmware.data.identifying}
                     />
                 </Route>
-            )}
-            <Route path="/schedule">
-                <ScheduleView />
-            </Route>
-            <Route path="/battery">
-                <BatteryView firmwareSupported={firmware.data?.supported !== false} />
-            </Route>
-            <Route path="/logs" prefix>
-                <LogsView />
-            </Route>
-            <Route path="/history" prefix>
-                <HistoryView />
-            </Route>
-        </Router>
+                <Route path="/settings">
+                    <SettingsView
+                        theme={theme}
+                        onThemeChange={setTheme}
+                        language={language}
+                        onLanguageChange={setLanguage}
+                        distanceUnit={distanceUnit}
+                        onDistanceUnitChange={setDistanceUnit}
+                        firmware={firmware.data}
+                    />
+                </Route>
+                {robotReady && (
+                    <Route path="/manual">
+                        <ManualView
+                            isManual={isManual}
+                            status={manualStatus.data}
+                            brush={brush}
+                            vacuum={vacuum}
+                            sideBrush={sideBrush}
+                            onToggleBrush={toggleBrush}
+                            onToggleVacuum={toggleVacuum}
+                            onToggleSideBrush={toggleSideBrush}
+                            onToggleAll={toggleAll}
+                        />
+                    </Route>
+                )}
+                <Route path="/schedule">
+                    <ScheduleView />
+                </Route>
+                <Route path="/battery">
+                    <BatteryView firmwareSupported={firmware.data?.supported !== false} />
+                </Route>
+                <Route path="/logs" prefix>
+                    <LogsView />
+                </Route>
+                <Route path="/history" prefix>
+                    <HistoryView distanceUnit={distanceUnit} />
+                </Route>
+            </Router>
+        </I18nProvider>
     );
 }

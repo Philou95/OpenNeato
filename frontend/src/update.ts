@@ -70,6 +70,11 @@ function writeTimestamp(): void {
     localStorage.setItem(LS_KEY_TIMESTAMP, String(Date.now()));
 }
 
+export function clearUpdateCache(): void {
+    localStorage.removeItem(LS_KEY_LATEST);
+    localStorage.removeItem(LS_KEY_TIMESTAMP);
+}
+
 // Fetch latest release from GitHub, compare against current version,
 // store result in localStorage. Fails silently on network errors.
 export async function checkForUpdate(currentVersion: string): Promise<void> {

@@ -81,16 +81,13 @@ void NotificationManager::checkTransitions() {
                     bool prevInCleaningContext =
                             prevUiState.indexOf("CLEANING") >= 0 || prevUiState.indexOf("DOCKING") >= 0;
                     if (isCleaningRunning && !prevInCleaningContext && cfg.ntfyOnStart) {
-                        sendNotification(topic, "arrow_forward", hostname + ": Cleaning started");
+                        sendNotification(topic, "arrow_forward", hostname, "Cleaning started");
                     }
 
                     if (isDocking && !wasDocking && isRecharging && cfg.ntfyOnDocking) {
-                        // Recharge dock — robot will resume cleaning after charging
-                        sendNotification(topic, "electric_plug", hostname + ": Returning to base to recharge");
+                        sendNotification(topic, "electric_plug", hostname, "Returning to base to recharge");
                     }
 
-                    // Cleaning completed: cleaning/docking -> idle, but NOT if it's a recharge.
-                    // Also handle suspended -> idle (user stops clean while recharging).
                     bool dockingDone = wasDocking && wasCleaningBeforeDock && !isRecharging;
                     bool suspendedDone = (prevUiState.indexOf("CLEANINGSUSPENDED") >= 0) && wasCleaningBeforeDock;
                     if ((wasCleaning || dockingDone || suspendedDone) && isIdle && cfg.ntfyOnDone && !donePending) {
@@ -127,7 +124,7 @@ void NotificationManager::checkTransitions() {
                     bool allowed = isAlert ? cfg.ntfyOnAlert : cfg.ntfyOnError;
                     if (allowed) {
                         String tag = isAlert ? "information_source" : "warning";
-                        sendNotification(topic, tag, hostname + ": " + err.displayMessage);
+                        sendNotification(topic, tag, hostname, err.displayMessage);
                     }
                 }
                 prevHasError = err.hasError;
@@ -156,7 +153,7 @@ void NotificationManager::flushPendingDone() {
 }
 
 void NotificationManager::sendDoneNotification(const String& topic, const String& hostname, bool withStats) {
-    String msg = hostname + ": Cleaning done";
+    String msg = "Cleaning done";
     if (withStats) {
         const LastCleanStats& stats = history.getLastCleanStats();
         long mins = stats.durationSec / 60;
@@ -167,11 +164,12 @@ void NotificationManager::sendDoneNotification(const String& topic, const String
             msg += " | " + String(stats.batteryStart) + "% -> " + String(stats.batteryEnd) + "%";
         }
     }
-    sendNotification(topic, "white_check_mark", msg);
+    sendNotification(topic, "white_check_mark", hostname, msg);
 }
 
-void NotificationManager::sendNotification(const String& topic, const String& tags, const String& message) {
-    LOG("NOTIF", "Sending: [%s] %s", tags.c_str(), message.c_str());
+void NotificationManager::sendNotification(const String& topic, const String& tags, const String& title,
+                                           const String& message) {
+    LOG("NOTIF", "Sending: [%s] %s: %s", tags.c_str(), title.c_str(), message.c_str());
 
     const Settings& cfg = settings.get();
     String host = cfg.ntfyServer.isEmpty() ? NTFY_DEFAULT_HOST : cfg.ntfyServer;
@@ -232,5 +230,5 @@ void NotificationManager::sendNotification(const String& topic, const String& ta
 
 void NotificationManager::sendTestNotification(const String& topic) {
     const String& hostname = settings.get().hostname;
-    sendNotification(topic, "bell", hostname + ": Test notification");
+    sendNotification(topic, "bell", hostname, "Test notification");
 }

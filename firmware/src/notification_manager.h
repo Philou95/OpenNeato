@@ -51,7 +51,7 @@ private:
     void checkTransitions();
     void flushPendingDone();
     void sendDoneNotification(const String& topic, const String& hostname, bool withStats);
-    void sendNotification(const String& topic, const String& tags, const String& message);
+    void sendNotification(const String& topic, const String& tags, const String& title, const String& message);
     static bool isActiveState(const String& uiState);
 };
 

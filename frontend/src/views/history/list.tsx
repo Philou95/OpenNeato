@@ -6,9 +6,11 @@ import downloadSvg from "../../assets/icons/download.svg?raw";
 import trashSvg from "../../assets/icons/trash.svg?raw";
 import { ConfirmDialog } from "../../components/confirm-dialog";
 import { Icon } from "../../components/icon";
+import { T, useI18n } from "../../i18n";
+import { formatArea, formatDistance, type DistanceUnit } from "../../distance-units";
 import type { HistoryFileInfo, MapSession, MapSummary } from "../../types";
 import { normalizeError } from "../../utils";
-import { formatDate, formatDuration, modeInfo } from "./helpers";
+import { modeInfo } from "./helpers";
 
 // Session card component
 interface SessionCardProps {
@@ -19,9 +21,20 @@ interface SessionCardProps {
     active?: boolean;
     onSelect: (i: number) => void;
     onDelete: (i: number) => void;
+    distanceUnit: DistanceUnit;
 }
 
-function SessionCard({ session, summary, filename, index, active, onSelect, onDelete }: SessionCardProps) {
+function SessionCard({
+    session,
+    summary,
+    filename,
+    index,
+    active,
+    onSelect,
+    onDelete,
+    distanceUnit,
+}: SessionCardProps) {
+    const { t, formatDateTime, formatDuration, formatNumber } = useI18n();
     const info = modeInfo(session?.mode ?? "");
     return (
         <div class={`history-session-row${active ? " running" : ""}`}>
@@ -32,10 +45,14 @@ function SessionCard({ session, summary, filename, index, active, onSelect, onDe
                 <div class="history-session-body">
                     <div class="history-session-header">
                         <span class="history-session-mode">
-                            {info.label}
-                            {active && <span class="history-running-badge">Running</span>}
+                            {t(info.label)}
+                            {active && (
+                                <span class="history-running-badge">
+                                    <T>Running</T>
+                                </span>
+                            )}
                         </span>
-                        <span class="history-session-date">{session ? formatDate(session.time) : ""}</span>
+                        <span class="history-session-date">{session ? formatDateTime(session.time) : ""}</span>
                     </div>
                     {summary && (
                         <div class="history-session-stats">
@@ -43,8 +60,8 @@ function SessionCard({ session, summary, filename, index, active, onSelect, onDe
                                 <Icon svg={clockSvg} />
                                 {formatDuration(summary.duration)}
                             </span>
-                            <span>{summary.distanceTraveled.toFixed(1)}m</span>
-                            <span>{summary.areaCovered.toFixed(1)}m&sup2;</span>
+                            <span>{formatDistance(summary.distanceTraveled, distanceUnit, formatNumber)}</span>
+                            <span>{formatArea(summary.areaCovered, distanceUnit, formatNumber)}</span>
                             <span class="history-session-battery">
                                 <Icon svg={boltSvg} />
                                 {session?.battery ?? "?"}% &rarr; {summary.batteryEnd ?? "?"}%
@@ -59,7 +76,7 @@ function SessionCard({ session, summary, filename, index, active, onSelect, onDe
                     class="history-session-download"
                     href={`/api/history/${filename}`}
                     download={filename.replace(/\.hs$/, "")}
-                    aria-label="Download session"
+                    aria-label={t("Download session")}
                 >
                     <Icon svg={downloadSvg} />
                 </a>
@@ -69,7 +86,7 @@ function SessionCard({ session, summary, filename, index, active, onSelect, onDe
                     type="button"
                     class="history-session-delete"
                     onClick={() => onDelete(index)}
-                    aria-label="Delete session"
+                    aria-label={t("Delete session")}
                 >
                     <Icon svg={trashSvg} />
                 </button>
@@ -87,6 +104,7 @@ interface HistoryListViewProps {
     onDeleteAll: () => void;
     onImported: () => void;
     onError: (msg: string) => void;
+    distanceUnit: DistanceUnit;
 }
 
 type ImportStatus = "idle" | "uploading" | "done" | "error";
@@ -100,7 +118,9 @@ export function HistoryListView({
     onDeleteAll,
     onImported,
     onError,
+    distanceUnit,
 }: HistoryListViewProps) {
+    const { t } = useI18n();
     const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
     const [importStatus, setImportStatus] = useState<ImportStatus>("idle");
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -179,8 +199,9 @@ export function HistoryListView({
             {/* Summary bar */}
             <div class="history-summary">
                 <span>
-                    {files.length} session{files.length !== 1 ? "s" : ""}
-                    {hasRecording ? " · Running..." : ""}
+                    {files.length} {t(files.length === 1 ? "session" : "sessions")}
+                    {hasRecording ? " · " : ""}
+                    {hasRecording && <T>Running...</T>}
                 </span>
                 <div class="history-summary-actions">
                     <label class="history-import-label">
@@ -196,11 +217,13 @@ export function HistoryListView({
                             }}
                         />
                         <span class={`history-import-btn${importStatus === "uploading" ? " pending" : ""}`}>
-                            {importStatus === "uploading"
-                                ? "Importing..."
-                                : importStatus === "done"
-                                  ? "Imported"
-                                  : "Import"}
+                            {t(
+                                importStatus === "uploading"
+                                    ? "Importing..."
+                                    : importStatus === "done"
+                                      ? "Imported"
+                                      : "Import",
+                            )}
                         </span>
                     </label>
                     <button
@@ -209,12 +232,16 @@ export function HistoryListView({
                         onClick={() => setConfirmTarget("__all__")}
                         disabled={deleting}
                     >
-                        Delete All
+                        <T>Delete All</T>
                     </button>
                 </div>
             </div>
 
-            {files.length === 0 && <div class="history-empty">No cleaning history yet</div>}
+            {files.length === 0 && (
+                <div class="history-empty">
+                    <T>No cleaning history yet</T>
+                </div>
+            )}
 
             {/* Session cards */}
             {files.map((f, i) => (
@@ -227,13 +254,14 @@ export function HistoryListView({
                     active={f.recording}
                     onSelect={onSelect}
                     onDelete={() => setConfirmTarget(`session-${i}`)}
+                    distanceUnit={distanceUnit}
                 />
             ))}
 
             {confirmTarget && (
                 <ConfirmDialog
-                    message={confirmTarget === "__all__" ? "Delete all map data?" : "Delete this session?"}
-                    confirmLabel="Delete"
+                    message={t(confirmTarget === "__all__" ? "Delete all map data?" : "Delete this session?")}
+                    confirmLabel={t("Delete")}
                     disabled={deleting}
                     onConfirm={handleConfirmDelete}
                     onCancel={() => setConfirmTarget(null)}

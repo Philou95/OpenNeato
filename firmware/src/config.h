@@ -25,6 +25,7 @@
 // Pin Configuration — boot/reset button and default UART pins vary by chip.
 // Original ESP32: BOOT is GPIO0, GPIO1/3 are the USB-UART bridge (U0TXD/U0RXD).
 // ESP32-C3: BOOT is GPIO9, GPIO1/3 are free GPIOs.
+// Seeed Studio XIAO ESP32C3: D6/TX is GPIO21, D7/RX is GPIO20.
 // ESP32-S3: BOOT is GPIO0, GPIO19/20 are native USB — use free GPIOs for UART.
 #if CONFIG_IDF_TARGET_ESP32
 #define RESET_BUTTON_PIN 0
@@ -33,8 +34,13 @@
 #define MAX_GPIO_PIN 39
 #elif CONFIG_IDF_TARGET_ESP32C3
 #define RESET_BUTTON_PIN 9
+#if defined(OPENNEATO_BOARD_XIAO_ESP32C3)
+#define NEATO_DEFAULT_TX_PIN 21
+#define NEATO_DEFAULT_RX_PIN 20
+#else
 #define NEATO_DEFAULT_TX_PIN 3
 #define NEATO_DEFAULT_RX_PIN 4
+#endif
 #define MAX_GPIO_PIN 21
 #elif CONFIG_IDF_TARGET_ESP32C6
 #define RESET_BUTTON_PIN 9
@@ -183,12 +189,18 @@ enum CommandStatus {
 
 // NVS keys — Schedule (ESP32-managed, not robot serial)
 #define NVS_KEY_SCHED_ENABLED "sched_on"
+#define NVS_KEY_SKIP_NEXT_CLEAN "skip_next_clean"
+#define NVS_KEY_AUTO_RESTART_ENABLED "auto_rst_on"
+#define NVS_KEY_AUTO_RESTART_HOUR "auto_rst_h"
+#define NVS_KEY_AUTO_RESTART_MIN "auto_rst_m"
+#define NVS_KEY_RESTART_BEFORE_CLEAN "rst_b4_clean"
 // Per-day keys use suffix: "s0h","s0m","s0on" .. "s6h","s6m","s6on" (Mon=0..Sun=6)
 // Built programmatically in SettingsManager — no individual defines needed.
 #define SCHEDULE_DAYS 7
 #define SCHEDULE_SLOTS_PER_DAY 2 // Two time slots per day (e.g. morning + afternoon)
 #define SCHEDULE_CHECK_INTERVAL_MS 30000 // Check schedule against NTP time every 30s
 #define SCHEDULE_WINDOW_MINS 5 // Fire if current time is 0..N minutes after scheduled slot
+#define RESTART_BOOT_TIMEOUT_MS 120000 // Max wait time for robot to boot after restart (2 min)
 
 // Notification manager — adaptive polling intervals
 #define NOTIF_INTERVAL_ACTIVE_MS 3000 // Check state every 3s when robot is active (cleaning/docking)
