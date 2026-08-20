@@ -37,7 +37,9 @@ const FILL_MIN_HEIGHT = 220;
 // must be to count as the one holding the free space. Bounded so an
 // unfamiliar dashboard layout cannot send it restyling its way to <body>.
 const STRETCH_MAX_HOPS = 8;
-const STRETCH_SLACK_PX = 40;
+// Frames to keep re-checking the stretch after connecting. 30 frames is
+// about half a second at 60Hz -- enough for a dashboard to finish painting.
+const STRETCH_RETRY_FRAMES = 30;
 
 const LIVE_REFRESH_MS = 3000;
 
@@ -305,33 +307,62 @@ class OpenNeatoReplayCard extends HTMLElement {
     // "one time in two": on a warm cache the page paints before the timer, on
     // a cold one after. So the chain is (re)built from a ResizeObserver on the
     // column instead of from a clock -- see _observeStretch.
+    // ⚠ Never restyle these. The walk below sets `display: flex` as it climbs,
+    // and `flex` overrides `grid` -- so reaching the dashboard's own layout
+    // container replaces its `grid-template-columns` with a single flex column
+    // and collapses the whole page into one column. That is not theoretical:
+    // it happened on this dashboard, and it was the real cause of all three
+    // reported symptoms -- the collapsed layout, the card coming up small
+    // (different ancestors in the collapsed layout), and the config errors.
+    // The hop limit alone did not protect it, because the stop-on-slack test
+    // cannot fire while the page is still laying out and every height is 0.
+    _isLayoutHost(node) {
+        const tag = node.tagName ? node.tagName.toLowerCase() : "";
+        if (tag === "grid-layout" || tag === "masonry-layout" || tag.startsWith("hui-view")) {
+            return true;
+        }
+        // Anything already laying its children out as a grid owns its own
+        // geometry -- the dashboard's columns live there.
+        const display = getComputedStyle(node).display;
+        return display === "grid" || display === "inline-grid";
+    }
+
     _stretchWrapper() {
         const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || null;
-        const own = this.getBoundingClientRect().height;
         let child = this;
         let node = up(this);
 
+        // Walk to the layout host and flex everything strictly below it. The
+        // stopping rule is *structural*, not a height comparison, and that is
+        // the point: the old version stopped at "the first ancestor taller
+        // than the card", which cannot be evaluated until the dashboard has
+        // painted. Before that every height is 0, the test never fires, and
+        // the card was left at its minimum until some later resize happened to
+        // re-trigger it -- seconds later, or never. That was the whole of the
+        // "one refresh in two".
+        //
+        // The chain between this card and the layout host is always ours to
+        // flex and always the right chain, whether or not anything has been
+        // measured yet.
         for (let hop = 0; node && hop < STRETCH_MAX_HOPS; hop++) {
             child.style.flex = "1 1 auto";
             child.style.minHeight = "0";
+
+            if (this._isLayoutHost(node)) {
+                // The dashboard's own column. Its geometry is not ours to
+                // touch -- turning it into a flex column is what collapsed the
+                // page into one column. Stop here, and watch it so a later
+                // resize still re-runs this.
+                this._observeStretch(node);
+                return;
+            }
+
             node.style.display = "flex";
             node.style.flexDirection = "column";
             node.style.minHeight = "0";
 
-            const next = up(node);
-            // Stop once the next ancestor is clearly taller than the card:
-            // that is the one holding the free space, and everything below it
-            // is now a flex column that can claim it. Going further would
-            // restyle unrelated dashboard structure.
-            if (next && next.getBoundingClientRect().height > own + STRETCH_SLACK_PX) {
-                node.style.flex = "1 1 auto";
-                next.style.display = "flex";
-                next.style.flexDirection = "column";
-                this._observeStretch(next);
-                return;
-            }
             child = node;
-            node = next;
+            node = up(node);
         }
         // Nothing had slack yet -- the columns have not rendered. Watch the
         // furthest ancestor we reached: when the layout settles it will
@@ -363,6 +394,24 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._stretchObserver.observe(target);
     }
 
+    // The observer covers a layout that settles *after* we look. It cannot
+    // cover one that settled *before*: nothing resizes afterwards, so nothing
+    // fires, and the card sits at its minimum forever. That is the other half
+    // of the "one refresh in two" -- which half you get depends on whether the
+    // dashboard painted before or after the card connected.
+    //
+    // So retry over a bounded run of frames as well, and stop the moment the
+    // stage is taller than its minimum. A card that stretched on the first
+    // attempt costs one extra frame check and nothing more.
+    _ensureStretched(framesLeft = STRETCH_RETRY_FRAMES) {
+        if (!this._config || this._config.height !== "fill") return;
+        const stage = this._stage;
+        if (stage && stage.getBoundingClientRect().height > FILL_MIN_HEIGHT + 1) return;
+        this._stretchWrapper();
+        if (framesLeft <= 0) return;
+        requestAnimationFrame(() => this._ensureStretched(framesLeft - 1));
+    }
+
     getCardSize() {
         const h = Number(this._config.height);
         return Math.ceil((Number.isFinite(h) ? h : DEFAULTS.height) / 50) + 1;
@@ -384,10 +433,10 @@ class OpenNeatoReplayCard extends HTMLElement {
         // not final yet -- measuring too early is what made the card come up at
         // its minimum on some loads and not others.
         if (this._config && this._config.height === "fill") {
-            this._stretchWrapper();
-            // A first pass now, and a backstop after the frame. Everything
-            // beyond that is driven by the ResizeObserver rather than a timer.
-            requestAnimationFrame(() => this._stretchWrapper());
+            // One pass now, then keep checking for a bounded run of frames.
+            // The ResizeObserver handles a layout that settles later; this
+            // handles one that settled before we got here.
+            this._ensureStretched();
         }
         if (this._canvas) this._observeResize();
         this._dirty = true;
