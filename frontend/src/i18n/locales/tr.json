@@ -414,5 +414,12 @@
   "China / Singapore (UTC+8)": "Çin / Singapur (UTC+8)",
   "Japan / Korea (UTC+9)": "Japonya / Kore (UTC+9)",
   "Australia Eastern (UTC+10/+11)": "Avustralya Doğu (UTC+10/+11)",
-  "New Zealand (UTC+12/+13)": "Yeni Zelanda (UTC+12/+13)"
+  "New Zealand (UTC+12/+13)": "Yeni Zelanda (UTC+12/+13)",
+  "Push alerts via ntfy (custom server or ntfy.sh)": "ntfy ile anlık bildirimler (özel sunucu veya ntfy.sh)",
+  "Server hostname (blank = ntfy.sh)": "Sunucu adı (boş = ntfy.sh)",
+  "Access token (blank = no auth)": "Erişim belirteci (boş = kimlik doğrulama yok)",
+  "Cleaning started": "Temizlik başladı",
+  "When a cleaning cycle begins": "Bir temizlik döngüsü başladığında",
+  "Toggle cleaning started notification": "Temizlik başlangıcı bildirimini aç/kapat",
+  "This resets the battery fuel gauge and calibration data. Only use this after physically replacing the battery. The charge percentage may be inaccurate for a few cycles until the system relearns the battery capacity.": "Bu, pil göstergesini ve kalibrasyon verilerini sıfırlar. Yalnızca pili fiziksel olarak değiştirdikten sonra kullanın. Sistem pil kapasitesini yeniden öğrenene kadar şarj yüzdesi birkaç döngü boyunca yanlış olabilir."
 }

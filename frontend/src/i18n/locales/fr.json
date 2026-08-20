@@ -414,5 +414,12 @@
   "China / Singapore (UTC+8)": "Chine / Singapour (UTC+8)",
   "Japan / Korea (UTC+9)": "Japon / Corée (UTC+9)",
   "Australia Eastern (UTC+10/+11)": "Australie Est (UTC+10/+11)",
-  "New Zealand (UTC+12/+13)": "Nouvelle-Zélande (UTC+12/+13)"
+  "New Zealand (UTC+12/+13)": "Nouvelle-Zélande (UTC+12/+13)",
+  "Push alerts via ntfy (custom server or ntfy.sh)": "Alertes push via ntfy (serveur personnalisé ou ntfy.sh)",
+  "Server hostname (blank = ntfy.sh)": "Nom d'hôte du serveur (vide = ntfy.sh)",
+  "Access token (blank = no auth)": "Jeton d'accès (vide = sans authentification)",
+  "Cleaning started": "Nettoyage démarré",
+  "When a cleaning cycle begins": "Quand un cycle de nettoyage commence",
+  "Toggle cleaning started notification": "Activer la notification de démarrage de nettoyage",
+  "This resets the battery fuel gauge and calibration data. Only use this after physically replacing the battery. The charge percentage may be inaccurate for a few cycles until the system relearns the battery capacity.": "Cette action réinitialise la jauge de batterie et les données d'étalonnage. À n'utiliser qu'après un remplacement physique de la batterie. Le pourcentage de charge peut être inexact pendant quelques cycles, le temps que le système réapprenne la capacité de la batterie."
 }
