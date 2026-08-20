@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -149,9 +148,27 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         await hass.http.async_register_static_paths(
             [StaticPathConfig(REPLAY_CARD_URL, str(card_path), True)]
         )
-        # Version query busts the browser cache when the integration updates.
+        # Deliberately no add_extra_js_url here.
+        #
+        # The card also has to be declared as a Lovelace resource, because
+        # add_extra_js_url alone loses the race against the dashboard's first
+        # render. Having *both* is worse than either: the two loaders race, and
+        # on the loads where neither import wins before the view is built the
+        # file is fetched but never evaluated, so the element is unregistered
+        # and the card renders as "Custom element doesn't exist" -- about one
+        # reload in three, and more often when reloading quickly.
+        #
+        # One loader, and the reliable one: the Lovelace resource is awaited
+        # before the view builds, which is why every HACS card uses it. The
+        # resource URL carries ?v=<manifest version>, so bump the manifest when
+        # the card changes or browsers will serve a stale copy.
         integration = await async_get_integration(hass, DOMAIN)
-        add_extra_js_url(hass, f"{REPLAY_CARD_URL}?v={integration.version or '0'}")
+        _LOGGER.debug(
+            "Replay card %s served at %s; register it as a Lovelace resource "
+            "with the matching ?v= query",
+            integration.version or "0",
+            REPLAY_CARD_URL,
+        )
     except Exception:  # noqa: BLE001
         _LOGGER.exception(
             "Could not auto-register the replay card. Add %s as a Lovelace "

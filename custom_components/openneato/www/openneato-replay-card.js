@@ -1218,9 +1218,19 @@ class OpenNeatoReplayCard extends HTMLElement {
         const W = img.width;
         const H = img.height;
         const at = (x, y) => (y * W + x) * 4;
-        // Background = median-ish of the four corners, which are margin on
-        // every plan export I've seen.
         const corners = [at(0, 0), at(W - 1, 0), at(0, H - 1), at(W - 1, H - 1)];
+
+        // A plan exported with an alpha channel needs no colour guessing: the
+        // content *is* the opaque part. Guessing from the corners is actively
+        // wrong there, because a fully transparent pixel still reports its RGB
+        // as (0, 0, 0) -- which is exactly the colour the walls are drawn in.
+        // The estimate then says "background is black", every wall matches it,
+        // and the content box comes back empty. Our own generated plans are
+        // black on transparent, so this was every one of them.
+        const transparentBg = corners.every((o) => data[o + 3] < 8);
+
+        // Opaque exports keep the old heuristic: background = median-ish of the
+        // four corners, which are margin on every such plan I've seen.
         const bg = [0, 1, 2].map((ch) => {
             const v = corners.map((o) => data[o + ch]).sort((a, b) => a - b);
             return (v[1] + v[2]) / 2;
@@ -1237,6 +1247,7 @@ class OpenNeatoReplayCard extends HTMLElement {
                 const o = at(x, y);
                 if (data[o + 3] < 8) continue; // transparent margin, if any
                 if (
+                    !transparentBg &&
                     Math.abs(data[o] - bg[0]) <= TOL &&
                     Math.abs(data[o + 1] - bg[1]) <= TOL &&
                     Math.abs(data[o + 2] - bg[2]) <= TOL
@@ -2102,18 +2113,41 @@ class OpenNeatoReplayCard extends HTMLElement {
     }
 }
 
-customElements.define("openneato-replay-card", OpenNeatoReplayCard);
+// This module can be evaluated more than once: the integration injects it with
+// add_extra_js_url, and it is also declared as a Lovelace resource because
+// add_extra_js_url on its own loses the race against the dashboard's first
+// render. So the registration has to survive being run twice.
+//
+// Always *attempt* the define and swallow the duplicate-name error, rather
+// than skipping the define when customElements.get() reports the name is
+// taken. Guarding on get() was observed leaving the element unregistered
+// while the rest of this block had plainly run -- and a card that is loaded
+// but not registered is exactly the "Custom element doesn't exist" error the
+// dashboard shows. Attempting unconditionally has no such failure mode: the
+// only way to end up unregistered is for define() itself to throw, which it
+// only does when the name is already taken.
+try {
+    customElements.define("openneato-replay-card", OpenNeatoReplayCard);
+    console.info(
+        `%c OPENNEATO-REPLAY-CARD %c ${CARD_VERSION} `,
+        "color: #1e1e22; background: #34c759; font-weight: 700;",
+        "color: #34c759; background: #1e1e22;",
+    );
+} catch (err) {
+    // Already registered by the other loader. Harmless -- but it must not
+    // propagate, because an exception at module top level aborts the module
+    // and takes every other card in the view down with it.
+    console.debug("openneato-replay-card already registered", err);
+}
 
+// Separate from the define: the picker entry has its own idempotence, and
+// tying it to the define left it missing whenever the define was skipped.
 window.customCards = window.customCards || [];
-window.customCards.push({
-    type: "openneato-replay-card",
-    name: "OpenNeato Replay",
-    description: "Smooth canvas replay of a cleaning session, with scrubber and playback controls.",
-    preview: false,
-});
-
-console.info(
-    `%c OPENNEATO-REPLAY-CARD %c ${CARD_VERSION} `,
-    "color: #1e1e22; background: #34c759; font-weight: 700;",
-    "color: #34c759; background: #1e1e22;",
-);
+if (!window.customCards.some((c) => c && c.type === "openneato-replay-card")) {
+    window.customCards.push({
+        type: "openneato-replay-card",
+        name: "OpenNeato Replay",
+        description: "Smooth canvas replay of a cleaning session, with scrubber and playback controls.",
+        preview: false,
+    });
+}
