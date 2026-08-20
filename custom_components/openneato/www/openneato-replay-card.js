@@ -33,6 +33,12 @@ const FILL_MIN_HEIGHT = 220;
 // something reads the active session the firmware flushes every 3 s instead,
 // so polling faster than that would fetch the same bytes twice. Measured
 // round trip on a live 38 KB session: ~380 ms.
+// How far _stretchWrapper() may climb, and how much taller an ancestor
+// must be to count as the one holding the free space. Bounded so an
+// unfamiliar dashboard layout cannot send it restyling its way to <body>.
+const STRETCH_MAX_HOPS = 8;
+const STRETCH_SLACK_PX = 40;
+
 const LIVE_REFRESH_MS = 3000;
 
 const DEFAULT_CELL_M = 0.05;
@@ -267,23 +273,94 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._buildDom();
     }
 
-    // Make the wrapper Home Assistant puts around this card stretch.
+    // Make the wrappers Home Assistant puts around this card stretch.
     //
     // `height: fill` is useless on its own: the card sits inside a `hui-card`
     // that sizes to its content, so asking for 100% of an auto height gives
-    // back the content height. Styling that wrapper from the dashboard does
-    // not work either — `stack-in-card` renders its children through a
-    // `hui-vertical-stack-card`, which puts the wrapper a second shadow root
-    // down, and CSS does not cross shadow boundaries. Reaching one level out
-    // from here is the only way left, so keep it to exactly that: set flex on
-    // the immediate parent and touch nothing else.
+    // back the content height. Styling those wrappers from the dashboard does
+    // not work either, because `stack-in-card` renders its children through a
+    // `hui-vertical-stack-card` and CSS does not cross shadow boundaries.
+    //
+    // Setting flex on the immediate parent alone -- what this used to do --
+    // is not enough. Measured on a real dashboard, the chain above the card
+    // was hui-card, div, hui-vertical-stack-card, div, ha-card, stack-in-card,
+    // hui-card. The plain `div` sits at `display: block` and `stack-in-card`
+    // at `display: inline`, so either one stops a flex chain dead: the card
+    // stayed at its 220px minimum inside a 901px column.
+    //
+    // It looked intermittent because it depends on the neighbouring columns.
+    // When they render short the row is short too and 322px fills it, so the
+    // card looks right; when they render tall the card stays 322px and looks
+    // stranded. Same bug either way.
+    //
+    // So walk up instead, crossing shadow roots by hand -- `parentElement` is
+    // null at a shadow boundary, the way out is `parentNode.host` -- and make
+    // each ancestor a flex column until reaching one with real slack. Bounded
+    // to a few hops so a different dashboard layout cannot send it climbing
+    // to `<body>`.
+    // ⚠ Deciding where to stop by comparing heights only works once the
+    // dashboard has actually been laid out, and at connect time the
+    // neighbouring columns have not rendered. Firing on a timer to wait for
+    // them is a race, and it is the race that made this look like it happened
+    // "one time in two": on a warm cache the page paints before the timer, on
+    // a cold one after. So the chain is (re)built from a ResizeObserver on the
+    // column instead of from a clock -- see _observeStretch.
     _stretchWrapper() {
-        const wrapper = this.parentElement;
-        if (!wrapper) return;
-        wrapper.style.flex = "1 1 auto";
-        wrapper.style.minHeight = "0";
-        wrapper.style.display = "flex";
-        wrapper.style.flexDirection = "column";
+        const up = (n) => n.parentElement || (n.parentNode && n.parentNode.host) || null;
+        const own = this.getBoundingClientRect().height;
+        let child = this;
+        let node = up(this);
+
+        for (let hop = 0; node && hop < STRETCH_MAX_HOPS; hop++) {
+            child.style.flex = "1 1 auto";
+            child.style.minHeight = "0";
+            node.style.display = "flex";
+            node.style.flexDirection = "column";
+            node.style.minHeight = "0";
+
+            const next = up(node);
+            // Stop once the next ancestor is clearly taller than the card:
+            // that is the one holding the free space, and everything below it
+            // is now a flex column that can claim it. Going further would
+            // restyle unrelated dashboard structure.
+            if (next && next.getBoundingClientRect().height > own + STRETCH_SLACK_PX) {
+                node.style.flex = "1 1 auto";
+                next.style.display = "flex";
+                next.style.flexDirection = "column";
+                this._observeStretch(next);
+                return;
+            }
+            child = node;
+            node = next;
+        }
+        // Nothing had slack yet -- the columns have not rendered. Watch the
+        // furthest ancestor we reached: when the layout settles it will
+        // resize, and that is the signal to build the chain properly.
+        if (child && child !== this) this._observeStretch(child);
+    }
+
+    // Re-run the stretch whenever the container that holds the free space
+    // changes size. That covers the dashboard finishing its first layout, the
+    // window being resized, and a neighbouring column growing later -- none of
+    // which a timeout can catch reliably.
+    _observeStretch(target) {
+        if (this._stretchTarget === target) return;
+        if (this._stretchObserver) this._stretchObserver.disconnect();
+        this._stretchTarget = target;
+        this._stretchObserver = new ResizeObserver(() => {
+            // Guard against the observer reacting to its own restyling.
+            if (this._stretching) return;
+            this._stretching = true;
+            requestAnimationFrame(() => {
+                this._stretching = false;
+                const stage = this._stage;
+                if (!stage) return;
+                if (stage.getBoundingClientRect().height <= FILL_MIN_HEIGHT + 1) {
+                    this._stretchWrapper();
+                }
+            });
+        });
+        this._stretchObserver.observe(target);
     }
 
     getCardSize() {
@@ -300,7 +377,18 @@ class OpenNeatoReplayCard extends HTMLElement {
     connectedCallback() {
         // setConfig runs before the card is in the tree, so the wrapper may not
         // have existed yet; do it again now that it certainly does.
-        if (this._config && this._config.height === "fill") this._stretchWrapper();
+        //
+        // And again once the browser has laid the dashboard out. _stretchWrapper
+        // decides where to stop by comparing ancestor heights, and at connect
+        // time the neighbouring columns have not rendered, so those heights are
+        // not final yet -- measuring too early is what made the card come up at
+        // its minimum on some loads and not others.
+        if (this._config && this._config.height === "fill") {
+            this._stretchWrapper();
+            // A first pass now, and a backstop after the frame. Everything
+            // beyond that is driven by the ResizeObserver rather than a timer.
+            requestAnimationFrame(() => this._stretchWrapper());
+        }
         if (this._canvas) this._observeResize();
         this._dirty = true;
         this._scheduleRender();
@@ -312,6 +400,8 @@ class OpenNeatoReplayCard extends HTMLElement {
         // longer on screen, and keeps a reference to it alive with it.
         clearTimeout(this._liveTimer);
         if (this._resizeObserver) this._resizeObserver.disconnect();
+        if (this._stretchObserver) this._stretchObserver.disconnect();
+        this._stretchTarget = null;
     }
 
     /* ---- DOM ---- */
