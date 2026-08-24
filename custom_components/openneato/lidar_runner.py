@@ -50,20 +50,31 @@ MIN_CAPTURES = 60            # below this a run is too thin to be worth merging
 BYTES_PER_POSE = 48          # firmware writes ~48 bytes per snapshot, every 2 s
 MAX_INTERVAL = 12.0
 
-# Health is judged on growth since collection began, never window to window.
+# Health is judged over the window between two checks, and the control runs
+# both ways.
 #
-# The firmware buffers pose lines and flushes to flash every 30 s, so a short
-# window catches one flush or three depending on where it lands. Measuring the
-# same thing over 60 s windows on a workstation read 97%, then 51%, then 142%
-# across three consecutive minutes while the robot was logging perfectly.
-# Judging a cumulative average removes that aliasing, and a grace period keeps
-# the first minutes -- when a single flush dominates -- from counting at all.
+# The firmware buffers pose lines and flushes to flash every 30 s, so a *short*
+# window catches one flush or three depending on where it lands: over 60 s the
+# same healthy robot read 97%, then 51%, then 142%. A 300 s window spans ten
+# flushes, so that aliasing is down to a few percent and there is no longer any
+# reason to average since the start -- which was the real problem. A cumulative
+# average cannot recover: one bad stretch keeps it depressed for the rest of the
+# run, so sampling ratcheted down 4 -> 6 -> 9 s and never came back even once
+# the robot was logging perfectly again.
 #
-# The check can now only slow sampling down, never stop it. Stopping on a
-# measurement this noisy silently threw away the rest of a run's captures.
+# Backing off is also partly self-inflicted, which is exactly why the loop has
+# to close. Each LIDAR read holds the serial link for around 800 ms and the
+# firmware skips its own pose snapshot while a fetch is in flight, so polling
+# faster depresses the very number used to decide whether to poll faster.
+# Slowing down raises the ratio, which then earns the speed back, and the loop
+# settles at the fastest rate the robot can actually sustain.
+#
+# The check can only change the rate, never stop collection: the measurement is
+# too coarse to justify throwing a run away.
 HEALTH_EVERY = 300.0
 HEALTH_GRACE = 600.0
 BACKOFF_RATIO = 0.55
+RECOVER_RATIO = 0.80   # hysteresis band: below 0.55 slow down, above 0.80 speed up
 
 # uiState substrings, matching camera.py.
 CLEANING = ("CLEANINGRUNNING", "CLEANINGPAUSED", "CLEANINGSUSPENDED", "DOCKING")
@@ -87,6 +98,10 @@ class LidarMapRunner:
         self._interval = POLL_INTERVAL
         self._busy = False
         self._last_health = 0.0
+        # Collection start, kept apart from the health window anchor: the grace
+        # period is about how long the run has been going, not how long since
+        # the last check.
+        self._collect_start = 0.0
         self._health_start = 0.0
         self._health_ref: dict[str, Any] | None = None
         self._session_name: str | None = None
@@ -126,6 +141,7 @@ class LidarMapRunner:
         self._captures = []
         self._interval = POLL_INTERVAL
         self._last_health = time.monotonic()
+        self._collect_start = time.monotonic()
         self._health_start = time.monotonic()
         self._health_ref = self._recording_session()
         # Remember which file this run is writing to, so the alignment worked
@@ -226,10 +242,11 @@ class LidarMapRunner:
     def _check_health(self) -> None:
         """Slow sampling down if the robot's own pose logging is thinning out.
 
-        Compares the recording file's growth against the firmware's 2 s
-        cadence, averaged over the whole run so the 30 s flush granularity
-        cannot fake a collapse. It never stops collection: the measurement is
-        too coarse to justify throwing a run away.
+        Compares the recording file's growth against the firmware's 2 s cadence
+        over the window since the last check -- long enough that the 30 s flush
+        granularity cannot fake a collapse, short enough that a recovery is
+        visible. It never stops collection: the measurement is too coarse to
+        justify throwing a run away.
         """
         self._last_health = time.monotonic()
         cur = self._recording_session()
@@ -242,26 +259,38 @@ class LidarMapRunner:
             self._health_start = time.monotonic()
             return
 
-        elapsed = time.monotonic() - self._health_start
-        if elapsed < HEALTH_GRACE:
+        now = time.monotonic()
+        window = now - self._health_start
+        grown = cur.get("size", 0) - self._health_ref.get("size", 0)
+        # Re-anchor whatever happens next, so the following window measures the
+        # rate that this window's decision produces.
+        self._health_ref = cur
+        self._health_start = now
+
+        if now - self._collect_start < HEALTH_GRACE:
             return
-        expected = elapsed / 2.0 * BYTES_PER_POSE
+        expected = window / 2.0 * BYTES_PER_POSE
         if expected <= 0:
             return
-        ratio = (cur.get("size", 0) - self._health_ref.get("size", 0)) / expected
+        ratio = grown / expected
 
-        if ratio < BACKOFF_RATIO and self._interval < MAX_INTERVAL:
+        before = self._interval
+        if ratio < BACKOFF_RATIO:
             self._interval = min(MAX_INTERVAL, self._interval * 1.5)
+        elif ratio > RECOVER_RATIO:
+            self._interval = max(POLL_INTERVAL, self._interval / 1.5)
+
+        if self._interval != before:
             _LOGGER.info(
                 "LIDAR mapping: robot pose logging at %.0f%% of normal over %.0fs; "
-                "sampling every %.0fs (%d captures so far)",
-                100 * ratio, elapsed, self._interval, len(self._captures),
+                "sampling every %.0fs (was %.0fs, %d captures so far)",
+                100 * ratio, window, self._interval, before, len(self._captures),
             )
             self._start_timer()
         else:
             _LOGGER.debug(
-                "LIDAR mapping: pose logging at %.0f%% over %.0fs, %d captures",
-                100 * ratio, elapsed, len(self._captures),
+                "LIDAR mapping: pose logging at %.0f%% over %.0fs, holding %.0fs, %d captures",
+                100 * ratio, window, self._interval, len(self._captures),
             )
 
     # ── completion ──────────────────────────────────────────────────
