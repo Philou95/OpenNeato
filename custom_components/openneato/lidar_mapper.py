@@ -14,8 +14,8 @@ tied to the recorded path with no wall-clock synchronisation.
 Beam geometry, measured rather than assumed (95.3% of returns agree, against
 60% for the next-best candidate):
 
-    wx = x + d * cos(radians(angle + theta))
-    wy = y + d * sin(radians(angle + theta))
+    wx = (x - LIDAR_BEHIND_M * cos(radians(theta))) + d * cos(radians(angle + theta))
+    wy = (y - LIDAR_BEHIND_M * sin(radians(theta))) + d * sin(radians(angle + theta))
 
 Two things make this survive across sessions:
 
@@ -87,9 +87,31 @@ def wall_threshold(walls: dict[Any, int]) -> int:
 # rather than in the runner because the weighting is what gives them meaning,
 # and the runner already imports from this module.
 MAX_MOVE_DURING_SCAN_M = 0.12
-MAX_TURN_DURING_SCAN_DEG = 25.0
+# Measured on the 2026-08-24 run (481 scans with a pose recorded on each side of
+# the scan window): median turn during a scan 1.65 deg, p90 12.6 deg, max 48.7.
+# The old 25 deg let a scan through at weight 0.86 that had already smeared a
+# point 1 m away by 47 cm -- far more than the 12.5 cm the box over-renders by,
+# so the fade was doing nothing. At 5 deg the weighted mean smear at 1 m drops
+# from 50 mm to 17 mm while 353 of 481 scans still contribute.
+# Tightening MAX_MOVE_DURING_SCAN_M alongside it makes the map *worse* (20 mm):
+# `min()` means a tight move limit discards scans the turn limit had kept.
+MAX_TURN_DURING_SCAN_DEG = 5.0
 
 ROBOT_RADIUS_M = 0.165       # Botvac D6, for stamping visited floor
+
+# The turret sits at the BACK of the robot while the wheels are on a central
+# axle, so the LIDAR is not on the centre of rotation and a scan does not
+# originate at the reported pose. Measured 2026-08-24 by turning 178 deg in
+# place and fitting the range change against bearing: the range shift is a
+# sinusoid of amplitude 205 mm, so the lever arm is half that. The pose is at
+# the centre of rotation, not the turret -- x,y held at -0.000/-0.002 through a
+# 131 deg in-place turn.
+#
+# Left uncorrected, every return is displaced by this much along the heading, so
+# the same wall is stamped up to 2 x 103 = 206 mm apart depending on which way
+# the robot faced. On the calibration box that is most of the error: with the
+# 5 deg fade alone it renders 85 x 55 cm, and with this offset as well, 65 x 50.
+LIDAR_BEHIND_M = 0.103
 RENDER_PX_PER_M = 100
 RENDER_PAD_M = 0.3
 
@@ -134,6 +156,9 @@ def project_scan(
     """
     tr = math.radians(theta_deg)
     ct, st = math.cos(tr), math.sin(tr)
+    # Scans leave from the turret, which trails the pose along the heading.
+    ox = x - LIDAR_BEHIND_M * ct
+    oy = y - LIDAR_BEHIND_M * st
     inv = 1.0 / CELL_M
     out: list[tuple[int, int]] = []
     for angle, dist_mm in points:
@@ -142,8 +167,8 @@ def project_scan(
         d = dist_mm / 1000.0
         ar = math.radians(angle)
         c, s = math.cos(ar), math.sin(ar)
-        wx = x + d * (c * ct - s * st)
-        wy = y + d * (s * ct + c * st)
+        wx = ox + d * (c * ct - s * st)
+        wy = oy + d * (s * ct + c * st)
         out.append((math.floor(wx * inv), math.floor(wy * inv)))
     return out
 
@@ -526,8 +551,68 @@ def scan_weight(moved_m: float, turned_deg: float) -> float:
     return min(move_w, turn_w)
 
 
+# -- Scan matching ------------------------------------------------------------
+# Odometry drifts, and nothing used to correct it *inside* a session:
+# align_to_reference only fits whole sessions to each other. Over a 58 minute
+# run the drift is what smears the map -- measured against a 50 x 29 cm box,
+# correcting each scan against the map built so far takes it from 65 x 50 cm to
+# 60 x 35 (5 cm cells), and to 54 x 34 on a 2 cm grid.
+#
+# The search is deliberately small and local: this is a nudge onto an existing
+# map, not a relocalisation. A run that needs more than MATCH_MAX_DRIFT_M of
+# accumulated correction has gone wrong somewhere the matcher cannot fix, so it
+# gives up and lets the raw odometry through rather than inventing a pose.
+MATCH_SEED = 8               # scans trusted as-is, so there is a map to match against
+MATCH_CAP = 6.0              # per-cell score cap: one dense wall must not dominate
+MATCH_STRIDE = 2             # every other return is plenty for scoring
+MATCH_MAX_DRIFT_M = 0.60     # give up past this much accumulated correction
+# (linear step m, steps each way, angular step deg, steps each way)
+MATCH_PASSES = ((0.10, 2, 3.0, 2), (0.025, 2, 0.75, 2))
+
+
+def _match_score(
+    walls: dict[tuple[int, int], float],
+    x: float,
+    y: float,
+    theta: float,
+    points: list[tuple[int, int]],
+) -> float:
+    """How well a scan placed at this pose agrees with the map so far."""
+    return sum(min(walls.get(cell, 0.0), MATCH_CAP)
+               for cell in project_scan(x, y, theta, points))
+
+
+def match_pose(
+    walls: dict[tuple[int, int], float],
+    x: float,
+    y: float,
+    theta: float,
+    points: list[tuple[int, int]],
+) -> tuple[float, float, float]:
+    """Nudge a pose so its scan lands on the map already built.
+
+    Coarse pass then fine pass around the winner, which costs a fraction of a
+    single flat search over the same span.
+    """
+    sparse = points[::MATCH_STRIDE]
+    bx, by, bt = x, y, theta
+    for step, span, astep, aspan in MATCH_PASSES:
+        best_score: float | None = None
+        cx, cy, ct = bx, by, bt
+        for i in range(-span, span + 1):
+            for j in range(-span, span + 1):
+                for k in range(-aspan, aspan + 1):
+                    px, py, pt = bx + i * step, by + j * step, bt + k * astep
+                    score = _match_score(walls, px, py, pt, sparse)
+                    if best_score is None or score > best_score:
+                        best_score, cx, cy, ct = score, px, py, pt
+        bx, by, bt = cx, cy, ct
+    return bx, by, bt
+
+
 def build_session_grids(
     captures: list[tuple[float, ...]],
+    match: bool = True,
 ) -> tuple[dict[tuple[int, int], float], set[tuple[int, int]]]:
     """Turn a run's captures into wall hit counts and traversed floor.
 
@@ -536,18 +621,39 @@ def build_session_grids(
     1. Older callers passing only (x, y, theta, points) keep the old
     behaviour.
 
+    Each scan is also matched onto the map built from the ones before it,
+    which is what stops odometry drift accumulating across a run. Pass
+    match=False for the raw-odometry behaviour.
+
     CPU-bound; call it from the executor.
     """
     walls: dict[tuple[int, int], float] = {}
     floor: set[tuple[int, int]] = set()
+    # Running correction: drift accumulates, so each scan starts from the
+    # previous scan's answer rather than from raw odometry again.
+    dx = dy = dtheta = 0.0
+    matching = match
+    placed = 0
     for capture in captures:
         x, y, theta, points = capture[:4]
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
         if weight <= 0:
             continue
+        x, y, theta = x + dx, y + dy, theta + dtheta
+        if matching and placed >= MATCH_SEED:
+            mx, my, mtheta = match_pose(walls, x, y, theta, points)
+            dx, dy, dtheta = dx + (mx - x), dy + (my - y), dtheta + (mtheta - theta)
+            if math.hypot(dx, dy) > MATCH_MAX_DRIFT_M:
+                # Runaway: stop correcting rather than invent a pose.
+                _LOGGER.debug("scan matching gave up after %.2f m of drift", math.hypot(dx, dy))
+                dx = dy = dtheta = 0.0
+                matching = False
+            else:
+                x, y, theta = mx, my, mtheta
         for cell in project_scan(x, y, theta, points):
             walls[cell] = walls.get(cell, 0.0) + weight
         floor.update(stamp_floor(x, y))
+        placed += 1
     return walls, floor
 
 
