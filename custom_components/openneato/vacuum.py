@@ -252,9 +252,11 @@ class OpenNeatoVacuum(OpenNeatoEntity, StateVacuumEntity):
 
     async def async_set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
         """Set the fan speed."""
+        # Clear the opposite mode before setting the wanted one: Eco and Intense
+        # are two ends of one control on the robot and must never both be ON.
         if fan_speed == "eco":
-            await self._api.set_user_setting("EcoMode", "ON")
             await self._api.set_user_setting("IntenseClean", "OFF")
+            await self._api.set_user_setting("EcoMode", "ON")
         elif fan_speed == "intense":
             await self._api.set_user_setting("EcoMode", "OFF")
             await self._api.set_user_setting("IntenseClean", "ON")

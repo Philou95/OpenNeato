@@ -33,6 +33,11 @@ class OpenNeatoSwitchEntityDescription(SwitchEntityDescription):
     settings_field: str | None = None
     # For switches with a dedicated API method (e.g. wall follower)
     api_method: str | None = None
+    # Robot user setting that must be turned OFF before this one is turned ON.
+    # Eco and Intense are the two ends of one suction/brush-speed control on the
+    # robot (Eco = minimum, Intense = maximum, neither = in between), so only one
+    # of them may ever be ON. Nothing on the robot enforces that for us.
+    exclusive_with: str | None = None
 
 
 SWITCH_DESCRIPTIONS: tuple[OpenNeatoSwitchEntityDescription, ...] = (
@@ -43,6 +48,7 @@ SWITCH_DESCRIPTIONS: tuple[OpenNeatoSwitchEntityDescription, ...] = (
         section="user_settings",
         field="ecoMode",
         setting_key="EcoMode",
+        exclusive_with="IntenseClean",
         icon="mdi:leaf",
     ),
     OpenNeatoSwitchEntityDescription(
@@ -52,6 +58,7 @@ SWITCH_DESCRIPTIONS: tuple[OpenNeatoSwitchEntityDescription, ...] = (
         section="user_settings",
         field="intenseClean",
         setting_key="IntenseClean",
+        exclusive_with="EcoMode",
         icon="mdi:flash",
     ),
     OpenNeatoSwitchEntityDescription(
@@ -270,6 +277,9 @@ class OpenNeatoSwitch(OpenNeatoEntity, SwitchEntity):
         if desc.api_method is not None:
             await getattr(self._api, desc.api_method)(True)
         elif desc.setting_key is not None:
+            # Clear the opposite mode first, so the robot never sees both ON.
+            if desc.exclusive_with is not None:
+                await self._api.set_user_setting(desc.exclusive_with, "OFF")
             await self._api.set_user_setting(desc.setting_key, "ON")
         elif desc.settings_field is not None:
             await self._api.update_settings({desc.settings_field: True})
