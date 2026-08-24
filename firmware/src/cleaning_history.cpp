@@ -57,6 +57,12 @@ void CleaningHistory::notifyCleanStart() {
 }
 
 void CleaningHistory::tick() {
+    // Refresh the cached /api/history listing here rather than in the HTTP
+    // handler, so all SPIFFS enumeration stays on the loop task. Skipped
+    // while compressing: the source and destination files are in flux.
+    if (listJsonDirty && !compressing)
+        rebuildListJson();
+
     // Run incremental compression when a session just finished
     if (compressing) {
         if (compressStep()) {
@@ -76,6 +82,7 @@ void CleaningHistory::tick() {
             pendingSummaryJson = "";
 
             compressing = false;
+            listJsonDirty = true;
             setInterval(HISTORY_INTERVAL_IDLE_MS);
         }
         return;
@@ -93,6 +100,7 @@ void CleaningHistory::tick() {
             flushWriteBuffer();
         }
         collectSnapshot();
+        listJsonDirty = true; // active entry's size/metadata changed
     } else {
         checkState();
         enforceLimits();
@@ -183,6 +191,7 @@ void CleaningHistory::resetSession() {
 
 void CleaningHistory::startCollection(const String& uiState) {
     collecting = true;
+    listJsonDirty = true;
     resetSession();
 
     cleanMode = cleanModeFromState(uiState);
@@ -963,6 +972,7 @@ void CleaningHistory::enforceLimits() {
             histBudget);
         SPIFFS.remove(fullPath);
         metaCache.erase(oldest);
+        listJsonDirty = true;
     }
 }
 
@@ -1045,6 +1055,35 @@ void CleaningHistory::readFirstLastLines(const String& path, bool compressed, St
         lastLine.trim();
         f.close();
     }
+}
+
+const String& CleaningHistory::getListJson() {
+    // Cold path only: a request that lands before the first tick() has run.
+    // Every later request is served from RAM.
+    if (listJsonCache.isEmpty())
+        rebuildListJson();
+    return listJsonCache;
+}
+
+void CleaningHistory::rebuildListJson() {
+    auto sessions = listSessions();
+    String json = "[";
+    for (size_t i = 0; i < sessions.size(); i++) {
+        if (i > 0)
+            json += ",";
+        const auto& s = sessions[i];
+        json += R"({"name":")" + s.name + R"(","size":)" + String(static_cast<unsigned long>(s.size)) +
+                R"(,"compressed":)" + String(s.compressed ? "true" : "false") + R"(,"recording":)" +
+                String(s.recording ? "true" : "false");
+        json += ",\"session\":";
+        json += s.session.length() > 0 ? s.session : String("null");
+        json += ",\"summary\":";
+        json += s.summary.length() > 0 ? s.summary : String("null");
+        json += "}";
+    }
+    json += "]";
+    listJsonCache = json;
+    listJsonDirty = false;
 }
 
 std::vector<HistorySessionInfo> CleaningHistory::listSessions() {
@@ -1171,6 +1210,7 @@ bool CleaningHistory::deleteSession(const String& filename) {
     if (!SPIFFS.exists(path))
         return false;
     metaCache.erase(filename);
+    listJsonDirty = true;
     return SPIFFS.remove(path);
 }
 
@@ -1190,6 +1230,7 @@ void CleaningHistory::deleteAllSessions() {
         SPIFFS.remove(p);
     }
     metaCache.clear();
+    listJsonDirty = true;
     LOG("HIST", "Deleted %u session files", paths.size());
 }
 

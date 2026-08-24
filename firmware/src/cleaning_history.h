@@ -57,6 +57,16 @@ public:
     // -- File management (for API, mirrors DataLogger pattern) ----------------
 
     std::vector<HistorySessionInfo> listSessions();
+
+    // JSON array served by GET /api/history, rebuilt in the loop task.
+    // The HTTP handler runs on the AsyncTCP task; enumerating and
+    // decompressing session files there stalls that task while the loop
+    // writes to SPIFFS, and ESPAsyncWebServer then aborts the response
+    // mid-body (truncated JSON) or the client times out. Serving a
+    // pre-built String keeps the handler pure-RAM.
+    const String& getListJson();
+    void invalidateListJson() { listJsonDirty = true; }
+
     std::shared_ptr<LogReader> readSession(const String& filename);
     bool deleteSession(const String& filename);
     void deleteAllSessions();
@@ -189,6 +199,11 @@ private:
         String summary; // Raw JSON of summary line
     };
     std::map<String, CachedMeta> metaCache;
+
+    // Pre-serialized /api/history listing (see getListJson()).
+    String listJsonCache;
+    bool listJsonDirty = true;
+    void rebuildListJson();
 
     // Session/summary JSON captured during stopCollection for cache insertion
     // after compression completes (avoids re-decompressing the just-written file).

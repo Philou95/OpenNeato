@@ -395,31 +395,12 @@ void WebServer::registerMapRoutes() {
         String suffix = request->url().substring(String("/api/history/").length());
 
         if (suffix.isEmpty()) {
-            // List all session files with embedded session/summary metadata
-            auto sessions = historyMgr.listSessions();
-            String json = "[";
-            for (size_t i = 0; i < sessions.size(); i++) {
-                if (i > 0)
-                    json += ",";
-                const auto& s = sessions[i];
-                json += R"({"name":")" + s.name + R"(","size":)" + String(static_cast<unsigned long>(s.size)) +
-                        R"(,"compressed":)" + String(s.compressed ? "true" : "false") + R"(,"recording":)" +
-                        String(s.recording ? "true" : "false");
-                if (s.session.length() > 0) {
-                    json += ",\"session\":" + s.session;
-                } else {
-                    json += ",\"session\":null";
-                }
-                if (s.summary.length() > 0) {
-                    json += ",\"summary\":" + s.summary;
-                } else {
-                    json += ",\"summary\":null";
-                }
-                json += "}";
-            }
-            json += "]";
+            // Serve the listing CleaningHistory pre-built on the loop task.
+            // Enumerating and decompressing session files from this AsyncTCP
+            // callback stalls it against the loop's SPIFFS writes during a
+            // clean, and the server then aborts the body mid-send.
             logger.logRequest(HTTP_GET, "/api/history", 200, millis() - startMs);
-            request->send(200, "application/json", json);
+            request->send(200, "application/json", historyMgr.getListJson());
             return;
         }
 
