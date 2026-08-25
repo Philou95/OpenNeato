@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1424,11 +1424,33 @@ class OpenNeatoReplayCard extends HTMLElement {
     // stayed the same fineness, which is the "ugly on zoom" complaint — and
     // it also made the coverage overstate itself, because a 5 cm cell spilled
     // across two or three squares and lit them all.
+    // The lattice also carries a phase, and it has to.
+    //
+    // Each square is decided by ONE sample, its centre pixel. Anchor the
+    // squares to the screen and the content slides under them as you pan, so a
+    // wall cell whose centre sat just inside a square slides out and the square
+    // goes dark: the outline changes shape by a square while nothing in the
+    // data moved. Sliding the lattice with the content instead keeps every cell
+    // in the same square whatever the pan.
+    //
+    // The pan is applied *after* the straightening rotation, so the content's
+    // displacement on screen is the pan turned by that angle.
     _lattice(dpr, proj) {
         const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
         const period = Math.max(2, Math.round(cellM * proj.scale * this._tf.zoom * dpr));
         const gutter = Math.max(1, Math.round(period * GRID_GUTTER_RATIO));
-        return { period, size: Math.max(1, period - gutter) };
+        const rot = (this._rotationDeg() * Math.PI) / 180;
+        const cos = Math.cos(rot);
+        const sin = Math.sin(rot);
+        const sx = (this._tf.panX * cos - this._tf.panY * sin) * dpr;
+        const sy = (this._tf.panX * sin + this._tf.panY * cos) * dpr;
+        const wrap = (v) => ((v % period) + period) % period;
+        return {
+            period,
+            size: Math.max(1, period - gutter),
+            phaseX: wrap(sx),
+            phaseY: wrap(sy),
+        };
     }
 
     _applyTransform(ctx, dpr, displayW, displayH) {
@@ -1558,7 +1580,7 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._trk.cursor = 0;
         }
 
-        const { period, size } = this._lattice(dpr, proj);
+        const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
         const matrix = this._trk.matrix;
         const painted = this._trk.painted;
         const at = (i) =>
@@ -1566,8 +1588,8 @@ class OpenNeatoReplayCard extends HTMLElement {
                 new DOMPoint(proj.toX(session.path[i * 4]), proj.toY(session.path[i * 4 + 1])),
             );
         const lay = (px, py) => {
-            const gx = Math.floor(px / period) * period;
-            const gy = Math.floor(py / period) * period;
+            const gx = Math.floor((px - phaseX) / period) * period + Math.round(phaseX);
+            const gy = Math.floor((py - phaseY) / period) * period + Math.round(phaseY);
             const k = gy * 100000 + gx;
             if (painted.has(k)) return;
             painted.add(k);
@@ -1617,7 +1639,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         const n = session.poseCountUpTo(tNow);
         if (n === 0) return;
 
-        const { period, size } = this._lattice(dpr, proj);
+        const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
 
         ctx.save();
         this._applyTransform(ctx, dpr, displayW, displayH);
@@ -1627,8 +1649,8 @@ class OpenNeatoReplayCard extends HTMLElement {
         const oldest = tNow - TRAIL_SECONDS;
         const strongest = new Map();
         const mark = (px, py, weight) => {
-            const gx = Math.floor(px / period) * period;
-            const gy = Math.floor(py / period) * period;
+            const gx = Math.floor((px - phaseX) / period) * period + Math.round(phaseX);
+            const gy = Math.floor((py - phaseY) / period) * period + Math.round(phaseY);
             const k = gy * 100000 + gx;
             const prev = strongest.get(k);
             if (prev === undefined || weight > prev.w) {
@@ -1674,14 +1696,18 @@ class OpenNeatoReplayCard extends HTMLElement {
     // Snap a drawn layer onto the lattice: one flat square per cell, one
     // colour each, with a transparent gutter between them.
     _quantiseToLattice(cx, width, height, lattice) {
-        const { period, size } = lattice;
+        const { period, size, phaseX = 0, phaseY = 0 } = lattice;
         const src = cx.getImageData(0, 0, width, height);
         const dst = cx.createImageData(width, height);
         const s = src.data;
         const d = dst.data;
 
-        for (let y0 = 0; y0 < height; y0 += period) {
-            for (let x0 = 0; x0 < width; x0 += period) {
+        // Start one period before the phase so the square straddling the top
+        // or left edge is still drawn, rather than leaving a moving gap there.
+        const firstX = Math.round(phaseX) - period;
+        const firstY = Math.round(phaseY) - period;
+        for (let y0 = firstY; y0 < height; y0 += period) {
+            for (let x0 = firstX; x0 < width; x0 += period) {
                 // Sample the square's centre — the same rule the coverage
                 // layer uses in _resolveToLattice().
                 //
@@ -1695,16 +1721,16 @@ class OpenNeatoReplayCard extends HTMLElement {
                 // wall — the two layers drawn to different rules, not a
                 // misalignment in the data underneath.
                 const mid = size >> 1;
-                const sy = Math.min(y0 + mid, height - 1);
-                const sx = Math.min(x0 + mid, width - 1);
+                const sy = Math.min(Math.max(y0 + mid, 0), height - 1);
+                const sx = Math.min(Math.max(x0 + mid, 0), width - 1);
                 const o = (sy * width + sx) * 4;
                 if (s[o + 3] < 128) continue;
                 const r = s[o];
                 const g = s[o + 1];
                 const b = s[o + 2];
-                for (let y = y0; y < y0 + size && y < height; y++) {
+                for (let y = Math.max(y0, 0); y < y0 + size && y < height; y++) {
                     const row = y * width;
-                    for (let x = x0; x < x0 + size && x < width; x++) {
+                    for (let x = Math.max(x0, 0); x < x0 + size && x < width; x++) {
                         const o = (row + x) * 4;
                         d[o] = r;
                         d[o + 1] = g;
@@ -1859,9 +1885,16 @@ class OpenNeatoReplayCard extends HTMLElement {
     // Resolve one patch of a continuous shape onto the lattice: a square is
     // lit when the shape covers its centre. Only the given box is looked at,
     // so this is a small read even though the layers are canvas-sized.
-    _resolveToLattice(rctx, lctx, layer, period, size, x0, y0, x1, y1) {
-        const bx = Math.max(0, Math.floor(x0 / period) * period);
-        const by = Math.max(0, Math.floor(y0 / period) * period);
+    _resolveToLattice(rctx, lctx, layer, period, size, x0, y0, x1, y1, phaseX = 0, phaseY = 0) {
+        // Same phase as the plan's lattice, or the two layers would drift
+        // against each other by up to a square as the view is panned.
+        const align = (v, phase) => {
+            let b = Math.floor((v - phase) / period) * period + Math.round(phase);
+            while (b < 0) b += period;
+            return b;
+        };
+        const bx = align(x0, phaseX);
+        const by = align(y0, phaseY);
         const bw = Math.min(layer.width, Math.ceil(x1 / period) * period + period) - bx;
         const bh = Math.min(layer.height, Math.ceil(y1 / period) * period + period) - by;
         if (bw <= 0 || bh <= 0) return;
@@ -1948,7 +1981,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         // device-space box they touched so only that part has to be resolved
         // onto the lattice afterwards. The robot covers very little ground
         // between two frames, so this stays a small patch.
-        const { period, size } = this._lattice(dpr, proj);
+        const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
         const matrix = this._cov.matrix || rctx.getTransform();
         this._cov.matrix = matrix;
         const cells = session.coverage;
@@ -1975,7 +2008,9 @@ class OpenNeatoReplayCard extends HTMLElement {
             i++;
         }
         if (i > this._cov.cursor) {
-            this._resolveToLattice(rctx, lctx, layer, period, size, x0, y0, x1, y1);
+            this._resolveToLattice(
+                rctx, lctx, layer, period, size, x0, y0, x1, y1, phaseX, phaseY,
+            );
         }
         this._cov.cursor = i;
         this._cov.time = tNow;
