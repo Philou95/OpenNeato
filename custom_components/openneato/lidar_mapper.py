@@ -483,13 +483,18 @@ def render_plan(
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    step = CELL_M * px_per_m
+    step = max(1, round(CELL_M * px_per_m))
 
     def box(cx: int, cy: int):
         # World Y grows up, image rows grow down.
-        x0 = (cx * CELL_M - min_x) * px_per_m
-        y0 = (max_y - (cy + 1) * CELL_M) * px_per_m
-        return [x0, y0, x0 + step, y0 + step]
+        #
+        # Rounded to whole pixels, and exactly `step` of them: the card reads
+        # this image back cell by cell, and float coordinates put the odd cell
+        # a pixel across a boundary -- 8 of 1220 went missing that way. PIL's
+        # rectangle includes both ends, hence the -1.
+        x0 = round((cx * CELL_M - min_x) * px_per_m)
+        y0 = round((max_y - (cy + 1) * CELL_M) * px_per_m)
+        return [x0, y0, x0 + step - 1, y0 + step - 1]
 
     # Walls only — the floor is deliberately left out.
     #

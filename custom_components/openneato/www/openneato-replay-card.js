@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -239,6 +239,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._loading = false;
         this._error = null;
         this._floorplanImg = null;
+        this._floorplanCells = null;
         this._floorplanKey = null;
 
         // Playback state. `_time` is the source of truth and is mutated by
@@ -1003,11 +1004,21 @@ class OpenNeatoReplayCard extends HTMLElement {
         if (!this._config.floorplan || !fp || !fp.url) {
             this._floorplan = null;
             this._floorplanImg = null;
+        this._floorplanCells = null;
             this._floorplanBounds = null;
             return;
         }
         this._floorplan = fp;
-        if (this._floorplanKey === fp.url && this._floorplanImg) return;
+        // cellSize can arrive after the image does, and the cells were read on
+        // a grid derived from it, so a change has to force a re-read.
+        const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+        if (this._floorplanKey === fp.url && this._floorplanImg) {
+            if (this._floorplanCellM !== cellM) {
+                this._floorplanCells = this._planCells(this._floorplanImg, fp);
+                this._floorplanCellM = cellM;
+            }
+            return;
+        }
         try {
             // <img> can't send an auth header, so ask HA for a signed URL.
             const signed = await this._hass.callWS({
@@ -1024,10 +1035,13 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._floorplanImg = img;
             this._floorplanKey = fp.url;
             this._floorplanBounds = this._planContentBounds(img, fp);
+            this._floorplanCells = this._planCells(img, fp);
+            this._floorplanCellM = cellM;
         } catch (err) {
             // A missing plan is cosmetic — fall back to the plain background.
             console.warn("openneato-replay-card: floorplan unavailable", err);
             this._floorplanImg = null;
+        this._floorplanCells = null;
         }
     }
 
@@ -1202,6 +1216,51 @@ class OpenNeatoReplayCard extends HTMLElement {
     // property of the plan alone, so it does not move between sessions.
     // Returns null if the scan finds nothing, and the caller falls back to
     // session framing.
+    // The plan's cells, read once, in the plan's own grid.
+    //
+    // Re-quantising the rendered plan onto a screen lattice samples one
+    // already-quantised image with a second grid of a different pitch, and
+    // which cells survive then depends on how the two grids happen to line up
+    // -- so the outline changed shape from one zoom to the next. Reading the
+    // cells out once and drawing them makes the shape data rather than a
+    // sampling accident: the same cells are drawn at every zoom, and only
+    // their pixel positions move.
+    _planCells(img, fp) {
+        const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+        const cellPx = cellM * fp.scale;
+        if (!(cellPx >= 1) || !img.width || !img.height) return null;
+        let data;
+        try {
+            const c = document.createElement("canvas");
+            c.width = img.width;
+            c.height = img.height;
+            const cx = c.getContext("2d", { willReadFrequently: true });
+            cx.drawImage(img, 0, 0);
+            data = cx.getImageData(0, 0, c.width, c.height).data;
+        } catch (err) {
+            console.warn("openneato-replay-card: cannot read the plan", err);
+            return null;
+        }
+        const cols = Math.floor(img.width / cellPx);
+        const rows = Math.floor(img.height / cellPx);
+        const out = [];
+        for (let row = 0; row < rows; row++) {
+            const py = Math.min(img.height - 1, Math.floor((row + 0.5) * cellPx));
+            for (let col = 0; col < cols; col++) {
+                const px = Math.min(img.width - 1, Math.floor((col + 0.5) * cellPx));
+                const o = (py * img.width + px) * 4;
+                if (data[o + 3] < 128) continue;
+                // World Y grows up, image rows grow down.
+                out.push({
+                    x: (col + 0.5) * cellM,
+                    y: (rows - row - 0.5) * cellM,
+                    c: `rgb(${data[o]},${data[o + 1]},${data[o + 2]})`,
+                });
+            }
+        }
+        return out.length ? out : null;
+    }
+
     _planContentBounds(img, fp) {
         if (!(fp.scale > 0) || !img.width || !img.height) return null;
         let data;
@@ -1830,19 +1889,45 @@ class OpenNeatoReplayCard extends HTMLElement {
         c.height = Math.max(1, Math.round(displayH * dpr));
         const cx = c.getContext("2d", { willReadFrequently: true });
         this._applyTransform(cx, dpr, displayW, displayH);
-
-        const factor = proj.scale / fp.scale;
-        const w = img.width * factor;
-        const h = img.height * factor;
-        // No smoothing: interpolation invents colours between the three the
-        // plan actually uses, and those blends survive quantising.
-        cx.imageSmoothingEnabled = false;
         cx.translate(ax, ay);
         if (fp.rotation) cx.rotate((fp.rotation * Math.PI) / 180);
-        cx.drawImage(img, 0, -h, w, h);
 
-        cx.setTransform(1, 0, 0, 1, 0, 0);
-        this._quantiseToLattice(cx, c.width, c.height, this._lattice(dpr, proj));
+        const cells = this._floorplanCells;
+        if (cells) {
+            // One square per cell of the plan, placed by transforming the
+            // cell's own centre. Nothing is re-sampled, so the set of squares
+            // drawn is the same at every zoom -- only where they land moves.
+            const m = cx.getTransform();
+            cx.setTransform(1, 0, 0, 1, 0, 0);
+            const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
+            const ox = Math.round(phaseX);
+            const oy = Math.round(phaseY);
+            const taken = new Set();
+            const point = new DOMPoint();
+            for (const cell of cells) {
+                point.x = cell.x * proj.scale;
+                point.y = -cell.y * proj.scale;
+                const p = m.transformPoint(point);
+                if (p.x < -period || p.y < -period ||
+                    p.x > c.width + period || p.y > c.height + period) continue;
+                const gx = Math.round((p.x - ox) / period) * period + ox;
+                const gy = Math.round((p.y - oy) / period) * period + oy;
+                const k = gy * 100000 + gx;
+                if (taken.has(k)) continue;
+                taken.add(k);
+                cx.fillStyle = cell.c;
+                cx.fillRect(gx, gy, size, size);
+            }
+        } else {
+            // The plan could not be read cell by cell -- a tainted canvas, or
+            // a scale that is not a whole number of pixels per cell. Fall back
+            // to re-sampling the image, shape wobble and all.
+            const factor = proj.scale / fp.scale;
+            cx.imageSmoothingEnabled = false;
+            cx.drawImage(img, 0, -img.height * factor, img.width * factor, img.height * factor);
+            cx.setTransform(1, 0, 0, 1, 0, 0);
+            this._quantiseToLattice(cx, c.width, c.height, this._lattice(dpr, proj));
+        }
 
         this._planKey = key;
         this._planCanvas = c;
