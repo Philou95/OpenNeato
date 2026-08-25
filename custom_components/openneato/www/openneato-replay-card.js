@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.2.0";
+const CARD_VERSION = "2.3.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1589,6 +1589,18 @@ class OpenNeatoReplayCard extends HTMLElement {
         return unit > 0 ? Math.max(2, Math.round(unit)) / unit : 1;
     }
 
+    // The zoom that makes the cell step a whole number of device pixels,
+    // without the one-notch nudge a gesture needs.
+    _quantiseZoom(zoom) {
+        const unit = this._zoomUnit();
+        if (!(unit > 0)) return zoom;
+        const period = Math.min(
+            Math.round(unit * 8),
+            Math.max(Math.max(2, Math.round(unit)), Math.max(2, Math.round(unit * zoom))),
+        );
+        return period / unit;
+    }
+
     _snapZoom(zoom) {
         const unit = this._zoomUnit();
         if (!(unit > 0)) return zoom;
@@ -1692,6 +1704,15 @@ class OpenNeatoReplayCard extends HTMLElement {
         // Cached for _snapZoom(), which runs in the wheel handler where the
         // projection is not in scope.
         this._projScale = proj.scale;
+        // The zoom starts at exactly 1, and 1 is not usually a value that puts
+        // a whole number of device pixels on a cell: here it gives a step of
+        // 5.55 px against a drawn period of 6, so positions round alternately
+        // to 5 and 6 and every other grid line doubles up. It cleared on the
+        // first wheel notch because that snapped the zoom -- quantising it
+        // here means the first frame is already on the grid every later one
+        // uses.
+        const quantised = this._quantiseZoom(this._tf.zoom);
+        if (quantised !== this._tf.zoom) this._tf.zoom = quantised;
         const tNow = this._time;
 
         // Grid first, and square to the screen rather than to the world: once
