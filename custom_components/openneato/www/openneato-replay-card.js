@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "1.4.0";
+const CARD_VERSION = "2.0.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1250,10 +1250,14 @@ class OpenNeatoReplayCard extends HTMLElement {
                 const px = Math.min(img.width - 1, Math.floor((col + 0.5) * cellPx));
                 const o = (py * img.width + px) * 4;
                 if (data[o + 3] < 128) continue;
-                // World Y grows up, image rows grow down.
+                // World Y grows up, image rows grow down. Stored as indices
+                // on the robot's own cell grid, so every layer speaks the
+                // same coordinates.
                 out.push({
-                    x: (col + 0.5) * cellM,
-                    y: (rows - row - 0.5) * cellM,
+                    i: OpenNeatoReplayCard._cellIndex(
+                        fp.originX + (col + 0.5) * cellM, cellM),
+                    j: OpenNeatoReplayCard._cellIndex(
+                        fp.originY + (rows - row - 0.5) * cellM, cellM),
                     c: `rgb(${data[o]},${data[o + 1]},${data[o + 2]})`,
                 });
             }
@@ -1499,7 +1503,13 @@ class OpenNeatoReplayCard extends HTMLElement {
     _lattice(dpr, proj) {
         const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
         const period = Math.max(2, Math.round(cellM * proj.scale * this._tf.zoom * dpr));
-        const gutter = Math.max(1, Math.round(period * GRID_GUTTER_RATIO));
+        // Cap the gutter as well as flooring it: at the smallest periods a
+        // 28% gutter leaves a single lit pixel against a single dark one, and
+        // the whole map reads as hatching instead of squares.
+        const gutter = Math.min(
+            Math.max(1, Math.round(period * GRID_GUTTER_RATIO)),
+            Math.max(0, period - 2),
+        );
         const rot = (this._rotationDeg() * Math.PI) / 180;
         const cos = Math.cos(rot);
         const sin = Math.sin(rot);
@@ -1548,6 +1558,43 @@ class OpenNeatoReplayCard extends HTMLElement {
         if (period === current) period = zoom > this._tf.zoom ? current + 1 : current - 1;
         period = Math.min(Math.round(unit * 8), Math.max(Math.max(2, Math.round(unit)), period));
         return period / unit;
+    }
+
+    // Where a map cell lands on screen, laid out from the data's own indices.
+    //
+    // Every layer used to transform each cell and round the result onto a
+    // screen lattice. Rounding per cell is what let the shape move: two cells
+    // could round onto one square, or one could slip into its neighbour's, and
+    // which ones did depended on the zoom and pan. Transforming the origin and
+    // the two unit steps *once* and reaching every other cell by integer
+    // arithmetic makes that impossible -- cell (i, j) has its own square by
+    // construction, at every view. The step vectors carry the rotation and the
+    // zoom, so the grid still follows the map rather than the screen.
+    //
+    // This is the same thing as rendering the map once and only transforming
+    // it afterwards, which is what it amounts to: the set of squares is the
+    // data, and the view only decides where they are drawn.
+    _cellGrid(proj, dpr, matrix) {
+        const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+        const lat = this._lattice(dpr, proj);
+        const at = (mx, my) =>
+            matrix.transformPoint(new DOMPoint(proj.toX(mx), proj.toY(my)));
+        const o = at(0, 0);
+        const ux = at(cellM, 0);
+        const uy = at(0, cellM);
+        return {
+            period: lat.period,
+            size: lat.size,
+            cellM,
+            ox: o.x, oy: o.y,
+            ax: ux.x - o.x, ay: ux.y - o.y,
+            bx: uy.x - o.x, by: uy.y - o.y,
+        };
+    }
+
+    // Cell index of a world coordinate, on the same grid the robot uses.
+    static _cellIndex(v, cellM) {
+        return Math.floor(v / cellM + 0.5);
     }
 
     _applyTransform(ctx, dpr, displayW, displayH) {
@@ -1680,33 +1727,36 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._trk.cursor = 0;
         }
 
-        const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
-        const matrix = this._trk.matrix;
+        // Walked in world metres, not screen pixels: the squares are the map's
+        // own cells, so `painted` stays valid whatever the view does.
+        const g = this._cellGrid(proj, dpr, this._trk.matrix);
         const painted = this._trk.painted;
-        const at = (i) =>
-            matrix.transformPoint(
-                new DOMPoint(proj.toX(session.path[i * 4]), proj.toY(session.path[i * 4 + 1])),
-            );
-        const lay = (px, py) => {
-            const gx = Math.floor((px - phaseX) / period) * period + Math.round(phaseX);
-            const gy = Math.floor((py - phaseY) / period) * period + Math.round(phaseY);
-            const k = gy * 100000 + gx;
+        const px = (i) => session.path[i * 4];
+        const py = (i) => session.path[i * 4 + 1];
+        const lay = (x, y) => {
+            const ci = OpenNeatoReplayCard._cellIndex(x, g.cellM);
+            const cj = OpenNeatoReplayCard._cellIndex(y, g.cellM);
+            const k = cj * 100000 + ci;
             if (painted.has(k)) return;
             painted.add(k);
-            lctx.fillRect(gx, gy, size, size);
+            lctx.fillRect(
+                Math.round(g.ox + ci * g.ax + cj * g.bx),
+                Math.round(g.oy + ci * g.ay + cj * g.by),
+                g.size, g.size,
+            );
         };
 
         const n = session.poseCountUpTo(tNow);
         let i = Math.max(1, this._trk.cursor);
-        if (this._trk.cursor === 0 && n > 0) lay(at(0).x, at(0).y);
+        if (this._trk.cursor === 0 && n > 0) lay(px(0), py(0));
         for (; i < n; i++) {
-            const a = at(i - 1);
-            const b = at(i);
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (period / 2)));
+            const ax = px(i - 1);
+            const ay = py(i - 1);
+            const dx = px(i) - ax;
+            const dy = py(i) - ay;
+            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (g.cellM / 2)));
             for (let s = 1; s <= steps; s++) {
-                lay(a.x + (dx * s) / steps, a.y + (dy * s) / steps);
+                lay(ax + (dx * s) / steps, ay + (dy * s) / steps);
             }
         }
         this._trk.cursor = n;
@@ -1739,28 +1789,32 @@ class OpenNeatoReplayCard extends HTMLElement {
         const n = session.poseCountUpTo(tNow);
         if (n === 0) return;
 
-        const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
-
         ctx.save();
         this._applyTransform(ctx, dpr, displayW, displayH);
         const matrix = ctx.getTransform();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
 
+        const g = this._cellGrid(proj, dpr, matrix);
+        const size = g.size;
         const oldest = tNow - TRAIL_SECONDS;
         const strongest = new Map();
-        const mark = (px, py, weight) => {
-            const gx = Math.floor((px - phaseX) / period) * period + Math.round(phaseX);
-            const gy = Math.floor((py - phaseY) / period) * period + Math.round(phaseY);
-            const k = gy * 100000 + gx;
+        const mark = (x, y, weight) => {
+            const ci = OpenNeatoReplayCard._cellIndex(x, g.cellM);
+            const cj = OpenNeatoReplayCard._cellIndex(y, g.cellM);
+            const k = cj * 100000 + ci;
             const prev = strongest.get(k);
             if (prev === undefined || weight > prev.w) {
-                strongest.set(k, { x: gx, y: gy, w: weight });
+                strongest.set(k, {
+                    x: Math.round(g.ox + ci * g.ax + cj * g.bx),
+                    y: Math.round(g.oy + ci * g.ay + cj * g.by),
+                    w: weight,
+                });
             }
         };
-        const at = (i) =>
-            matrix.transformPoint(
-                new DOMPoint(proj.toX(session.path[i * 4]), proj.toY(session.path[i * 4 + 1])),
-            );
+        const at = (i) => ({
+            x: session.path[i * 4],
+            y: session.path[i * 4 + 1],
+        });
 
         // Walk the segments, not the poses. The robot logs a pose about every
         // two seconds and covers some 9 cm between them — wider than a square
@@ -1775,7 +1829,7 @@ class OpenNeatoReplayCard extends HTMLElement {
             const tail = at(i - 1);
             const dx = tail.x - head.x;
             const dy = tail.y - head.y;
-            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (period / 2)));
+            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (g.cellM / 2)));
             for (let s = 0; s <= steps; s++) {
                 mark(head.x + (dx * s) / steps, head.y + (dy * s) / steps, weight);
             }
@@ -1897,26 +1951,18 @@ class OpenNeatoReplayCard extends HTMLElement {
             // One square per cell of the plan, placed by transforming the
             // cell's own centre. Nothing is re-sampled, so the set of squares
             // drawn is the same at every zoom -- only where they land moves.
-            const m = cx.getTransform();
             cx.setTransform(1, 0, 0, 1, 0, 0);
-            const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
-            const ox = Math.round(phaseX);
-            const oy = Math.round(phaseY);
-            const taken = new Set();
-            const point = new DOMPoint();
+            this._applyTransform(cx, dpr, displayW, displayH);
+            const view = cx.getTransform();
+            cx.setTransform(1, 0, 0, 1, 0, 0);
+            const g = this._cellGrid(proj, dpr, view);
             for (const cell of cells) {
-                point.x = cell.x * proj.scale;
-                point.y = -cell.y * proj.scale;
-                const p = m.transformPoint(point);
-                if (p.x < -period || p.y < -period ||
-                    p.x > c.width + period || p.y > c.height + period) continue;
-                const gx = Math.round((p.x - ox) / period) * period + ox;
-                const gy = Math.round((p.y - oy) / period) * period + oy;
-                const k = gy * 100000 + gx;
-                if (taken.has(k)) continue;
-                taken.add(k);
+                const gx = Math.round(g.ox + cell.i * g.ax + cell.j * g.bx);
+                const gy = Math.round(g.oy + cell.i * g.ay + cell.j * g.by);
+                if (gx < -g.period || gy < -g.period ||
+                    gx > c.width || gy > c.height) continue;
                 cx.fillStyle = cell.c;
-                cx.fillRect(gx, gy, size, size);
+                cx.fillRect(gx, gy, g.size, g.size);
             }
         } else {
             // The plan could not be read cell by cell -- a tainted canvas, or
@@ -2076,21 +2122,18 @@ class OpenNeatoReplayCard extends HTMLElement {
         // Append the newly cleaned cells, a square each. The cursor only ever
         // moves forward, so a frame costs the handful of cells the robot has
         // covered since the last one.
-        const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
-        const matrix = this._cov.matrix;
         const cells = session.coverage;
-        const ox = Math.round(phaseX);
-        const oy = Math.round(phaseY);
-        const point = new DOMPoint();
+        const g = this._cellGrid(proj, dpr, this._cov.matrix);
         let i = this._cov.cursor;
         const n = session.cellCount;
         while (i < n && cells[i * 3 + 2] <= tNow) {
-            point.x = proj.toX(cells[i * 3] * session.cellSize);
-            point.y = proj.toY(cells[i * 3 + 1] * session.cellSize);
-            const p = matrix.transformPoint(point);
-            const gx = Math.round((p.x - ox) / period) * period + ox;
-            const gy = Math.round((p.y - oy) / period) * period + oy;
-            lctx.fillRect(gx, gy, size, size);
+            const ci = cells[i * 3];
+            const cj = cells[i * 3 + 1];
+            lctx.fillRect(
+                Math.round(g.ox + ci * g.ax + cj * g.bx),
+                Math.round(g.oy + ci * g.ay + cj * g.by),
+                g.size, g.size,
+            );
             i++;
         }
         this._cov.cursor = i;
