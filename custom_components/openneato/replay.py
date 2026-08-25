@@ -299,22 +299,38 @@ def _coverage_cells(
     Returned flat as [cx, cy, ts, cx, cy, ts, ...] so the payload stays small.
     """
     cell = HISTORY_CELL_SIZE_M
-    radius_cells = math.ceil(HISTORY_ROBOT_DIAMETER_M / 2 / cell)
-    # Precompute the footprint disc once instead of re-testing dx^2+dy^2 per pose.
-    disc = [
-        (dx, dy)
-        for dx in range(-radius_cells, radius_cells + 1)
-        for dy in range(-radius_cells, radius_cells + 1)
-        if dx * dx + dy * dy <= radius_cells * radius_cells
-    ]
+    half = HISTORY_ROBOT_DIAMETER_M / 2
+    half_cells = half / cell
 
     first_ts: dict[tuple[int, int], float] = {}
 
-    def stamp(x: float, y: float, ts: float) -> None:
-        cx = round(x / cell)
-        cy = round(y / cell)
-        for dx, dy in disc:
-            first_ts.setdefault((cx + dx, cy + dy), ts)
+    def stamp(x0: float, y0: float, x1: float, y1: float, ts: float) -> None:
+        """Cells within half a robot of the segment: the band it swept.
+
+        A disc stamped at samples along the path leaves specks behind, because
+        the disc's rim is a discrete circle and consecutive centres snap to
+        cells. Measured on a real session: six holes of four cells or fewer,
+        which read as scattered dark squares on floor the robot plainly drove
+        over. The band leaves one.
+        """
+        lo_i = math.floor(min(x0, x1) / cell - half_cells) - 1
+        hi_i = math.ceil(max(x0, x1) / cell + half_cells) + 1
+        lo_j = math.floor(min(y0, y1) / cell - half_cells) - 1
+        hi_j = math.ceil(max(y0, y1) / cell + half_cells) + 1
+        dx, dy = x1 - x0, y1 - y0
+        length2 = dx * dx + dy * dy
+        for i in range(lo_i, hi_i + 1):
+            px = (i + 0.5) * cell
+            for j in range(lo_j, hi_j + 1):
+                py = (j + 0.5) * cell
+                if length2 <= 0.0:
+                    dist = math.hypot(px - x0, py - y0)
+                else:
+                    t = ((px - x0) * dx + (py - y0) * dy) / length2
+                    t = min(max(t, 0.0), 1.0)
+                    dist = math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+                if dist <= half:
+                    first_ts.setdefault((i, j), ts)
 
     # Walk the path, not just the poses on it.
     #
@@ -334,7 +350,9 @@ def _coverage_cells(
     # the robot did. A missing value means an older session that never recorded
     # the brush, and those keep their old behaviour rather than losing their
     # coverage entirely.
-    step = HISTORY_ROBOT_DIAMETER_M / 4
+    # Beyond this two poses cannot be joined by a straight band: the robot had
+    # time to turn, and the chord would invent cleaned floor.
+    max_join = HISTORY_ROBOT_DIAMETER_M * 5
     prev: tuple[float, float, float] | None = None
     for i, (x, y, _t, ts) in enumerate(norm):
         b = brush[i] if brush is not None and i < len(brush) else None
@@ -343,16 +361,10 @@ def _coverage_cells(
             # segment, but lay nothing down.
             prev = (x, y, ts)
             continue
-        if prev is not None:
-            px, py, pts = prev
-            gap = math.hypot(x - px, y - py)
-            if gap > step:
-                for k in range(1, int(gap / step) + 1):
-                    f = k * step / gap
-                    if f >= 1.0:
-                        break
-                    stamp(px + (x - px) * f, py + (y - py) * f, pts + (ts - pts) * f)
-        stamp(x, y, ts)
+        if prev is not None and math.hypot(x - prev[0], y - prev[1]) <= max_join:
+            stamp(prev[0], prev[1], x, y, prev[2])
+        else:
+            stamp(x, y, x, y, ts)
         prev = (x, y, ts)
 
     flat: list[float] = []

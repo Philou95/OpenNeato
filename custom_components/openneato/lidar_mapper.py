@@ -40,7 +40,7 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .const import CELL_SIZE_M
+from .const import CELL_SIZE_M, CLEAN_WIDTH_M as _CLEAN_WIDTH_M
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ MAX_TURN_DURING_SCAN_DEG = 5.0
 # What the robot actually cleans is 319 mm wide -- its own width, not the
 # 280 mm of the main brush: the side brush exists precisely to sweep the strip
 # beyond the main brush into its path. Measured on Philou's D6.
-CLEAN_WIDTH_M = 0.319
+CLEAN_WIDTH_M = _CLEAN_WIDTH_M
 CLEAN_HALF_M = CLEAN_WIDTH_M / 2
 # Beyond this, two consecutive poses cannot be joined by a straight swath: the
 # robot had time to turn, and painting the chord would invent cleaned floor.

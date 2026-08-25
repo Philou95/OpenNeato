@@ -85,7 +85,12 @@ LIDAR_ROBOT_COLOR = (138, 138, 142)  # #8A8A8E
 
 # ── History (cleaning session) map ──────────────────────────────────
 HISTORY_IMAGE_SIZE = 480  # pixels (square)
-HISTORY_ROBOT_DIAMETER_M = 0.33  # Neato Botvac diameter
+# What the robot actually cleans, measured on Philou's D6: its own width, not
+# the 280 mm of the main brush -- the side brush sweeps the strip beyond the
+# main brush into its path. Defined once here because the map and the replay
+# both stamp with it, and they drift apart the moment there are two numbers.
+CLEAN_WIDTH_M = 0.319
+HISTORY_ROBOT_DIAMETER_M = CLEAN_WIDTH_M
 # One grid for the whole integration. The accumulated map counts in these
 # cells, the replay's coverage is stamped in them, and align_to_reference
 # returns its shift in them -- so the moment there are two numbers, a session
