@@ -170,8 +170,24 @@ class LidarMapRunner:
             return
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
         if not any(s in state for s in ACTIVE):
-            # Paused or heading for the dock: no new floor is being laid, so
-            # spend nothing on the serial link.
+            # Paused, recharging, or heading for the dock: no new floor is
+            # being laid, so spend nothing on the serial link.
+            #
+            # Re-anchor the health window while it lasts. A mid-clean recharge
+            # can hold the robot on its base for half an hour, and the firmware
+            # stops writing poses for the whole of it -- so the growth this
+            # check measures collapses to nothing through no fault of the
+            # serial link. Left alone it would read that as a sick robot and
+            # ratchet the sampling out to MAX_INTERVAL, then take a window per
+            # step to climb back: a quarter of an hour of thin sampling on
+            # floor the robot is cleaning perfectly well. Counting only the
+            # time the robot was actually cleaning is what the measurement
+            # meant in the first place.
+            self._health_ref = self._recording_session() or self._health_ref
+            self._health_start = time.monotonic()
+            self._collect_start = max(
+                self._collect_start, time.monotonic() - HEALTH_GRACE
+            )
             return
         self._busy = True
         try:
