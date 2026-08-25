@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.2.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -792,13 +792,15 @@ class OpenNeatoReplayCard extends HTMLElement {
                 const cx = u.x + w / 2;
                 const cy = u.y + h / 2;
                 const factor = Math.exp(-e.deltaY * 0.0015);
-                const next = Math.min(8, Math.max(1, this._tf.zoom * factor));
+                const wanted = Math.min(8, Math.max(1, this._tf.zoom * factor));
+                const next = this._snapZoom(wanted);
                 const applied = next / this._tf.zoom;
                 // Keep the world point under the cursor fixed across the zoom.
                 this._tf.panX = cx - (cx - this._tf.panX) * applied;
                 this._tf.panY = cy - (cy - this._tf.panY) * applied;
                 this._tf.zoom = next;
-                if (next === 1) {
+                if (next <= this._minZoom()) {
+                    this._tf.zoom = this._minZoom();
                     this._tf.panX = 0;
                     this._tf.panY = 0;
                 }
@@ -1453,6 +1455,42 @@ class OpenNeatoReplayCard extends HTMLElement {
         };
     }
 
+    // One lattice square is one 5 cm cell, and it has to be a whole number of
+    // device pixels or it cannot be drawn crisply -- hence the Math.round in
+    // _lattice(). While the zoom slides continuously that rounding flips
+    // between integers, and every flip re-tiles the whole lattice: the squares
+    // all change size and position at once, which is the reshuffle you see
+    // through a zoom. There is no way to both keep the squares crisp and let
+    // the zoom vary continuously.
+    //
+    // So the zoom is snapped to the values that make the period exact. Every
+    // reachable zoom is then crisp, the re-tiling happens on a deliberate step
+    // instead of at an arbitrary moment mid-gesture, and one notch moves the
+    // cell by exactly one device pixel -- around seventy steps between 1x and
+    // 8x, which is finer than the wheel resolves anyway.
+    _zoomUnit() {
+        const dpr = window.devicePixelRatio || 1;
+        const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+        return cellM * (this._projScale || 0) * dpr;
+    }
+
+    _minZoom() {
+        const unit = this._zoomUnit();
+        return unit > 0 ? Math.max(2, Math.round(unit)) / unit : 1;
+    }
+
+    _snapZoom(zoom) {
+        const unit = this._zoomUnit();
+        if (!(unit > 0)) return zoom;
+        const current = Math.max(2, Math.round(unit * this._tf.zoom));
+        let period = Math.max(2, Math.round(unit * zoom));
+        // A small notch can round to the period already in use, which would
+        // read as the zoom being stuck. Always move at least one pixel.
+        if (period === current) period = zoom > this._tf.zoom ? current + 1 : current - 1;
+        period = Math.min(Math.round(unit * 8), Math.max(Math.max(2, Math.round(unit)), period));
+        return period / unit;
+    }
+
     _applyTransform(ctx, dpr, displayW, displayH) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.scale(dpr, dpr);
@@ -1504,6 +1542,9 @@ class OpenNeatoReplayCard extends HTMLElement {
 
         this._applyTransform(ctx, dpr, displayW, displayH);
         const proj = this._projection(displayW, displayH, bounds);
+        // Cached for _snapZoom(), which runs in the wheel handler where the
+        // projection is not in scope.
+        this._projScale = proj.scale;
         const tNow = this._time;
 
         // Grid first, and square to the screen rather than to the world: once
