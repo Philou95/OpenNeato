@@ -40,6 +40,8 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .const import CELL_SIZE_M
+
 _LOGGER = logging.getLogger(__name__)
 
 # 2.5 cm, measured rather than chosen: the LIDAR is faithful to about a
@@ -49,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 # quantisation on every measurement. Cells cost the square of this, so the grid
 # is four times denser -- about 16 000 wall cells and 32 000 floor against a
 # MAX_GRID_CELLS of 200 000.
-CELL_M = 0.025               # grid resolution
+CELL_M = CELL_SIZE_M         # grid resolution — defined once, in const.py
 MAX_RANGE_M = 3.5            # returns beyond this are noisy and grazing
 # Scales with the cell: a return lands in exactly one cell whatever the grid,
 # so quartering the cell area quarters the hits each one collects. Left at 12

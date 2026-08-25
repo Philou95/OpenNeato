@@ -86,7 +86,13 @@ LIDAR_ROBOT_COLOR = (138, 138, 142)  # #8A8A8E
 # ── History (cleaning session) map ──────────────────────────────────
 HISTORY_IMAGE_SIZE = 480  # pixels (square)
 HISTORY_ROBOT_DIAMETER_M = 0.33  # Neato Botvac diameter
-HISTORY_CELL_SIZE_M = 0.05  # 5cm grid cells for coverage
+# One grid for the whole integration. The accumulated map counts in these
+# cells, the replay's coverage is stamped in them, and align_to_reference
+# returns its shift in them -- so the moment there are two numbers, a session
+# is replayed at twice or half the shift the map meant. 2.5 cm is the map's
+# measured resolution; see CELL_M in lidar_mapper.
+CELL_SIZE_M = 0.025
+HISTORY_CELL_SIZE_M = CELL_SIZE_M
 HISTORY_PAD_PX = 20  # canvas padding
 HISTORY_GRID_STEP_M = 0.5  # grid line spacing
 
