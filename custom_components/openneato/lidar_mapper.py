@@ -149,6 +149,14 @@ MAX_GRID_CELLS = 200_000
 # only 35%. Anything below this is far more likely to be a bad fit than a
 # genuine discovery, and merging it would corrupt the accumulated map.
 MERGE_MIN_OVERLAP = 0.55
+# After this many cleanings in a row that will not fit the stored map, it is the
+# map that is wrong, not the house: the dock has been moved somewhere the fine
+# sweep cannot reach, or the furniture has changed beyond recognition. Without a
+# way out the map freezes for good, because every later session is compared
+# against the same stale reference and refused in turn -- silently, since a
+# rejection only reaches the log. Three is a compromise: fewer and one odd run
+# could throw away a good map, more and a real move leaves it stuck for weeks.
+MAX_CONSECUTIVE_REJECTS = 3
 # Fine angle sweep around the winning quarter turn. +-8 deg covers a dock the
 # robot has shoved out of true; 0.5 deg leaves 3.5 cm of residual error 4 m out,
 # below what a 5 cm grid can express anyway.
@@ -503,6 +511,7 @@ class AccumulatedMap:
             _key(k) for k in (data.get("floor") or [])
         }
         self.sessions: int = int(data.get("sessions", 0))
+        self.rejects: int = int(data.get("rejects", 0))
         # Quarter turn that puts the reference map the right way up, kept so
         # the orientation cannot flip between renders.
         self.quarter_lock: int = int(data.get("quarter_lock", 0))
@@ -526,6 +535,7 @@ class AccumulatedMap:
             "floor": [f"{cx},{cy}" for cx, cy in self.floor],
             "sessions": self.sessions,
             "quarter_lock": self.quarter_lock,
+            "rejects": self.rejects,
             "alignments": {k: list(v) for k, v in self.alignments.items()},
         }
 
@@ -544,14 +554,38 @@ class AccumulatedMap:
                 quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3)
             )
             if overlap < MERGE_MIN_OVERLAP:
-                # Nothing lines up. Rather than corrupt a good map with a bad
-                # fit, keep what we have and say so.
-                report["rejected"] = True
+                self.rejects += 1
+                report["rejects"] = self.rejects
+                if self.rejects < MAX_CONSECUTIVE_REJECTS:
+                    # Rather than corrupt a good map with a bad fit, keep what
+                    # we have and say so.
+                    report["rejected"] = True
+                    _LOGGER.warning(
+                        "LIDAR map: new session only overlaps %.0f%% of the "
+                        "stored map; refusing to merge it (%d in a row, "
+                        "starting over at %d)",
+                        100 * overlap, self.rejects, MAX_CONSECUTIVE_REJECTS,
+                    )
+                    return report
+                # Three in a row: the stored map is the thing that no longer
+                # matches reality. Drop it and let this session be the new one.
                 _LOGGER.warning(
-                    "LIDAR map: new session only overlaps %.0f%% of the stored "
-                    "map; refusing to merge it", 100 * overlap,
+                    "LIDAR map: %d sessions in a row would not fit (last one "
+                    "%.0f%%); discarding the stored map and starting from this "
+                    "cleaning", self.rejects, 100 * overlap,
                 )
-                return report
+                report["reset"] = True
+                self.walls = {}
+                self.floor = set()
+                self.alignments = {}
+                self.sessions = 0
+                self.quarter_lock = 0
+                # The transform was fitted against the map just discarded, so
+                # it means nothing now: this session becomes the reference in
+                # its own frame, untouched.
+                quarter = dx = dy = 0
+                fine = 0.0
+                report.update(quarter=0, dx=0, dy=0, fine=0.0)
             if quarter or dx or dy or fine:
                 report["realigned"] = True
                 _LOGGER.info(
@@ -568,6 +602,7 @@ class AccumulatedMap:
                 for cx, cy in _rotate_cells_fine(_rotate_cells(floor, quarter), fine)
             }
 
+        self.rejects = 0
         if session_name:
             self.alignments[session_name] = (
                 (quarter, dx, dy, fine) if self.walls else (0, 0, 0, 0.0)
