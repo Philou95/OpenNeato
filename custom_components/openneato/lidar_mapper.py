@@ -97,7 +97,15 @@ MAX_MOVE_DURING_SCAN_M = 0.12
 # `min()` means a tight move limit discards scans the turn limit had kept.
 MAX_TURN_DURING_SCAN_DEG = 5.0
 
-ROBOT_RADIUS_M = 0.165       # Botvac D6, for stamping visited floor
+# What the robot actually cleans is 319 mm wide -- its own width, not the
+# 280 mm of the main brush: the side brush exists precisely to sweep the strip
+# beyond the main brush into its path. Measured on Philou's D6.
+CLEAN_WIDTH_M = 0.319
+CLEAN_HALF_M = CLEAN_WIDTH_M / 2
+# Beyond this, two consecutive poses cannot be joined by a straight swath: the
+# robot had time to turn, and painting the chord would invent cleaned floor.
+MAX_SWATH_M = 1.5
+ROBOT_RADIUS_M = CLEAN_HALF_M   # kept for callers that want a footprint radius
 
 # The turret sits at the BACK of the robot while the wheels are on a central
 # axle, so the LIDAR is not on the centre of rotation and a scan does not
@@ -173,17 +181,51 @@ def project_scan(
     return out
 
 
-def stamp_floor(x: float, y: float) -> list[tuple[int, int]]:
-    """Grid cells covered by the robot's footprint at a pose."""
+def stamp_swath(
+    x0: float, y0: float, x1: float, y1: float
+) -> list[tuple[int, int]]:
+    """Grid cells swept between two consecutive poses.
+
+    A disc stamped at each pose leaves gaps: poses are 178 mm apart in the
+    median but 294 mm at the 90th percentile and up to 1.2 m, so any disc
+    narrow enough to be honest about the cleaned width is too narrow to join
+    them. Measured on a real run, a 280 mm disc left a gap on 16% of intervals
+    while the shipped 450 mm one still left 4%.
+
+    Painting the band the robot swept between the two poses removes that
+    trade-off entirely: it is continuous whatever the sampling interval, which
+    is also what makes the health throttle harmless.
+    """
     inv = 1.0 / CELL_M
-    r = math.ceil(ROBOT_RADIUS_M * inv)
-    cx, cy = round(x * inv), round(y * inv)
-    return [
-        (cx + dx, cy + dy)
-        for dx in range(-r, r + 1)
-        for dy in range(-r, r + 1)
-        if dx * dx + dy * dy <= r * r
-    ]
+    if math.hypot(x1 - x0, y1 - y0) > MAX_SWATH_M:
+        # Too far to join honestly; paint the endpoint only.
+        x0, y0 = x1, y1
+    half = CLEAN_HALF_M
+    lo_i = math.floor((min(x0, x1) - half) * inv)
+    hi_i = math.ceil((max(x0, x1) + half) * inv)
+    lo_j = math.floor((min(y0, y1) - half) * inv)
+    hi_j = math.ceil((max(y0, y1) + half) * inv)
+    dx, dy = x1 - x0, y1 - y0
+    length2 = dx * dx + dy * dy
+    out: list[tuple[int, int]] = []
+    for i in range(lo_i, hi_i + 1):
+        px = (i + 0.5) * CELL_M
+        for j in range(lo_j, hi_j + 1):
+            py = (j + 0.5) * CELL_M
+            if length2 <= 0.0:
+                dist = math.hypot(px - x0, py - y0)
+            else:
+                t = ((px - x0) * dx + (py - y0) * dy) / length2
+                t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                dist = math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+            if dist <= half:
+                out.append((i, j))
+    return out
+
+
+def stamp_floor(x: float, y: float) -> list[tuple[int, int]]:
+    """Grid cells covered by the robot at a single pose."""
+    return stamp_swath(x, y, x, y)
 
 
 def _rotate_cells(cells: Iterable[tuple[int, int]], quarter: int) -> list[tuple[int, int]]:
@@ -634,6 +676,7 @@ def build_session_grids(
     dx = dy = dtheta = 0.0
     matching = match
     placed = 0
+    prev: tuple[float, float] | None = None
     for capture in captures:
         x, y, theta, points = capture[:4]
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
@@ -652,7 +695,13 @@ def build_session_grids(
                 x, y, theta = mx, my, mtheta
         for cell in project_scan(x, y, theta, points):
             walls[cell] = walls.get(cell, 0.0) + weight
-        floor.update(stamp_floor(x, y))
+        # Paint from the previous corrected pose, so the cleaned band follows
+        # the path the matcher settled on rather than raw odometry.
+        if prev is None:
+            floor.update(stamp_floor(x, y))
+        else:
+            floor.update(stamp_swath(prev[0], prev[1], x, y))
+        prev = (x, y)
         placed += 1
     return walls, floor
 
