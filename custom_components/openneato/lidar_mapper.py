@@ -172,6 +172,16 @@ MAX_CONSECUTIVE_REJECTS = 3
 FINE_SPAN_DEG = 8.0
 FINE_STEP_DEG = 0.5
 FINE_SEARCH_CELLS = 4
+# A tilt has to *earn* its place. Two cleanings never cover quite the same
+# ground, so the overlap they can reach is capped by that difference rather
+# than by any misalignment, and inside that noise a fraction of a degree can
+# look like an improvement. Turning a session that did not need turning is how
+# a run ends up drawn a couple of degrees off the walls -- seen once, with the
+# path crossing 41 wall cells at the angle the sweep chose and none at all
+# unturned. A real misalignment is not subtle: the measured corrections ran
+# from a 1.24x gain to nearly 4x, so asking for 2% keeps every one of them and
+# rejects the noise.
+FINE_MIN_GAIN = 0.02
 
 
 # ── geometry ────────────────────────────────────────────────────────
@@ -350,6 +360,8 @@ def align_to_reference(
     quarter, dx, dy, score = best
     base = _rotate_cells(new_walls, quarter)
     best_fine = 0.0
+    # Beat the untilted fit by a clear margin, not by a rounding error.
+    floor_score = score * (1.0 + FINE_MIN_GAIN)
     steps = int(FINE_SPAN_DEG / FINE_STEP_DEG)
     for step in range(-steps, steps + 1):
         fine = step * FINE_STEP_DEG
@@ -367,7 +379,7 @@ def align_to_reference(
                         if (cx + ddx, cy + ddy) in ref:
                             hit += 1
                     value = hit / min(len(turned), len(ref))
-                    if value > score:
+                    if value > max(score, floor_score):
                         score, dx, dy, best_fine = value, ddx, ddy, fine
     return quarter, dx, dy, score, best_fine
 

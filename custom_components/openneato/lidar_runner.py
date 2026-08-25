@@ -352,9 +352,13 @@ class LidarMapRunner:
             return
 
         await self._store.async_save(self._map.as_dict())
+        # The carve counts are the only sign free-space evidence did anything;
+        # without them a chair fading off the map looks like nothing happened.
         _LOGGER.info(
-            "LIDAR map updated: %d wall cells after %d cleanings",
+            "LIDAR map updated: %d wall cells after %d cleanings "
+            "(%d cells driven through, %d faded out)",
             report.get("total_walls", 0), report.get("sessions", 0),
+            report.get("carved", 0), report.get("faded", 0),
         )
 
     @staticmethod
