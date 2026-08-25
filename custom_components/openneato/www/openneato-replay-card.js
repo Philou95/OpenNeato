@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.1.0";
+const CARD_VERSION = "2.2.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -21,6 +21,8 @@ const MAP_PAD = 8;
 // period. The reference plan works out at a period of 3 px with a 1 px gutter,
 // so a third; a quarter reads the same and leaves more colour in the square.
 const GRID_GUTTER_RATIO = 0.28;
+// How far off the square a map may be before its angle is kept as measured.
+const SQUARE_SNAP_DEG = 3;
 // Floor for `height: fill`, so a short column cannot squeeze the map to
 // nothing.
 const FILL_MIN_HEIGHT = 220;
@@ -1447,8 +1449,25 @@ class OpenNeatoReplayCard extends HTMLElement {
         return Number(configured) || 0;
     }
 
+    // Straightening angle, snapped to the square when it is nearly there.
+    //
+    // The cell grid steps by `period` device pixels, and period is a whole
+    // number. At 90.55 deg a step of one cell is (-0.06, 6.00) pixels, not
+    // (0, 6): rounding each cell's position then makes some gaps five pixels
+    // and others six, and at low zoom that is a fifth of a cell -- the grid
+    // stops looking regular. Snapping the last half-degree makes every step
+    // exactly (0, period), so the grid is perfect at every zoom.
+    //
+    // What it costs is the half-degree itself: walls run at 0.55 deg across
+    // the cell grid and staircase by about one cell over the whole map. That
+    // is a cell and a half on this floor, against an irregular grid
+    // everywhere, so it is the better trade. A map genuinely off-square by
+    // more than SQUARE_SNAP_DEG keeps its angle -- there the slant is real and
+    // reads as a rotated grid rather than a defect.
     _rotationDeg() {
-        return this._baseRotationDeg() + (this._autoQuarter || 0);
+        const raw = this._baseRotationDeg() + (this._autoQuarter || 0);
+        const quarter = Math.round(raw / 90) * 90;
+        return Math.abs(raw - quarter) <= SQUARE_SNAP_DEG ? quarter : raw;
     }
 
     // Quarter turn that makes the map fill the card.
