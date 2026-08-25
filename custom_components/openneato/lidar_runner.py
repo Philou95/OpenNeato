@@ -147,11 +147,8 @@ class LidarMapRunner:
         self._collect_start = time.monotonic()
         self._health_start = time.monotonic()
         self._health_ref = self._recording_session()
-        # Remember which file this run is writing to, so the alignment worked
-        # out at merge time can be stored against it and replayed in the same
-        # frame as the map. Captured at the start because by the time the run
-        # ends the robot has stopped reporting it as recording.
-        self._session_name = (self._health_ref or {}).get("name")
+        self._session_name = None
+        self._note_session_name()
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -233,8 +230,33 @@ class LidarMapRunner:
         finally:
             self._busy = False
 
+        self._note_session_name()
+
         if time.monotonic() - self._last_health >= HEALTH_EVERY:
             self._check_health()
+
+    def _note_session_name(self) -> None:
+        """Learn which file this run is writing to, retrying until it is known.
+
+        The alignment worked out at merge time is stored against this name so
+        the card can replay the run in the same frame as the map. It cannot be
+        read at the end -- by then the robot no longer reports the file as
+        recording -- but reading it once at the start does not work either: the
+        coordinator refreshes its history every 30 s, so at the moment
+        collection begins its cached copy usually predates the session file and
+        the name comes back empty. It worked by timing luck often enough to
+        look fine, and when it missed the run was merged with no alignment
+        stored and the card drew it a quarter turn off the walls.
+
+        So ask on every tick until the answer arrives, then stop asking. This
+        reads the coordinator's cache, not the robot, so it costs nothing.
+        """
+        if self._session_name:
+            return
+        name = (self._recording_session() or {}).get("name")
+        if name:
+            self._session_name = name
+            _LOGGER.debug("LIDAR mapping: session file is %s", name)
 
     def _recording_session(self) -> dict[str, Any] | None:
         for item in (self.coordinator.data or {}).get("history") or ():
