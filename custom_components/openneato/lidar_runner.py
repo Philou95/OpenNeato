@@ -34,6 +34,7 @@ from .lidar_mapper import (
     parse_pose,
     MAX_CONSECUTIVE_REJECTS,
     RENDER_PX_PER_M,
+    alignment_key,
     render_plan,
     scan_points,
 )
@@ -406,7 +407,7 @@ class LidarMapRunner:
         """
         if not self._map:
             return None
-        return self._map.alignments.get(session_name)
+        return self._map.alignments.get(alignment_key(session_name))
 
     def view_rotation(self, user_offset: float = 0.0) -> float:
         """Rotation that stands the map upright, plus the user's offset."""

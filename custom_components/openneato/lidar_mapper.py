@@ -638,7 +638,7 @@ class AccumulatedMap:
 
         self.rejects = 0
         if session_name:
-            self.alignments[session_name] = (
+            self.alignments[alignment_key(session_name)] = (
                 (quarter, dx, dy, fine) if self.walls else (0, 0, 0, 0.0)
             )
 
@@ -682,6 +682,19 @@ class AccumulatedMap:
         wall_cells = [c for c, n in self.walls.items() if n >= threshold]
         skew = manhattan_angle(wall_cells)
         return round((-skew) + self.quarter_lock * 90 + user_offset, 2) % 360
+
+
+def alignment_key(name: str) -> str:
+    """Session name with the compression suffix stripped.
+
+    A session is `<epoch>.jsonl` while the robot is recording it and becomes
+    `<epoch>.jsonl.hs` once the firmware compresses it, minutes later. The
+    alignment is worked out at merge time, under the recording name, but every
+    later request comes in under the compressed one -- so the lookup missed
+    every time and the card drew each finished run unaligned, a quarter turn
+    off the walls. Key on the part that does not change.
+    """
+    return name.removesuffix(".hs")
 
 
 def _key(raw: str) -> tuple[int, int]:
