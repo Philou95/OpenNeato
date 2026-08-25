@@ -149,6 +149,12 @@ MAX_GRID_CELLS = 200_000
 # only 35%. Anything below this is far more likely to be a bad fit than a
 # genuine discovery, and merging it would corrupt the accumulated map.
 MERGE_MIN_OVERLAP = 0.55
+# Fine angle sweep around the winning quarter turn. +-8 deg covers a dock the
+# robot has shoved out of true; 0.5 deg leaves 3.5 cm of residual error 4 m out,
+# below what a 5 cm grid can express anyway.
+FINE_SPAN_DEG = 8.0
+FINE_STEP_DEG = 0.5
+FINE_SEARCH_CELLS = 4
 
 
 # ── geometry ────────────────────────────────────────────────────────
@@ -216,7 +222,7 @@ def stamp_swath(
                 dist = math.hypot(px - x0, py - y0)
             else:
                 t = ((px - x0) * dx + (py - y0) * dy) / length2
-                t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                t = min(max(t, 0.0), 1.0)
                 dist = math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
             if dist <= half:
                 out.append((i, j))
@@ -240,23 +246,47 @@ def _rotate_cells(cells: Iterable[tuple[int, int]], quarter: int) -> list[tuple[
     return [(cy, -cx) for cx, cy in cells]
 
 
+def _rotate_cells_fine(
+    cells: Iterable[tuple[int, int]], degrees: float
+) -> list[tuple[int, int]]:
+    """Rotate cells by an arbitrary angle about the grid origin."""
+    if not degrees:
+        return list(cells)
+    rad = math.radians(degrees)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return [
+        (round(cx * cos_a - cy * sin_a), round(cx * sin_a + cy * cos_a))
+        for cx, cy in cells
+    ]
+
+
 def align_to_reference(
     new_walls: dict[tuple[int, int], int],
     ref_walls: dict[tuple[int, int], int],
     search_cells: int = 8,
-) -> tuple[int, int, int, float]:
+) -> tuple[int, int, int, float, float]:
     """Fit a new session's walls onto the accumulated map.
 
-    Tries the four quarter turns, each with a small translation search, and
-    returns (quarter, dx, dy, overlap). Overlap is the share of the new
-    session's wall cells that coincide with the reference, so 1.0 is perfect.
+    Tries the four quarter turns, each with a small translation search, then
+    refines the angle, and returns (quarter, dx, dy, overlap, fine_deg).
+    Overlap is the share of the new session's wall cells that coincide with the
+    reference, so 1.0 is perfect.
 
-    A quarter turn is the only rotation considered on purpose: the frame moves
-    because the dock heading reference is re-zeroed, which lands on right
-    angles, and searching arbitrary angles would invite false matches.
+    A quarter turn is not enough on its own. The dock is never square with the
+    wall and the robot nudges it while cleaning, so each session also starts a
+    few degrees off -- a continuous error, not a right angle. Measured on a real
+    map, the quarter-only search accepted 1 deg at 0.70 overlap (merging 7 cm of
+    error at 4 m into the map for good) and *rejected* everything past about
+    1.5 deg, which freezes the map: every later session compares against the
+    same stale reference and is refused in turn.
+
+    So the quarter search is followed by a fine sweep of +-FINE_SPAN_DEG around
+    it. It stays a refinement, never a free rotation hunt -- the original worry
+    about false matches was about searching all angles, and that is still not
+    what happens.
     """
     if not ref_walls or not new_walls:
-        return 0, 0, 0, 0.0
+        return 0, 0, 0, 0.0, 0.0
 
     ref = set(ref_walls)
     fcx = sum(c[0] for c in ref) / len(ref)
@@ -288,7 +318,33 @@ def align_to_reference(
                     score = hit / min(len(rotated), len(ref))
                     if score > best[3]:
                         best = (quarter, dx, dy, score)
-    return best
+
+    # Refine the angle around the winning quarter. The translation is searched
+    # again but narrowly: rotating about the grid origin shifts a distant map
+    # bodily, and that shift has to be absorbed rather than counted as error.
+    quarter, dx, dy, score = best
+    base = _rotate_cells(new_walls, quarter)
+    best_fine = 0.0
+    steps = int(FINE_SPAN_DEG / FINE_STEP_DEG)
+    for step in range(-steps, steps + 1):
+        fine = step * FINE_STEP_DEG
+        if not fine:
+            continue
+        turned = _rotate_cells_fine(base, fine)
+        tcx = sum(c[0] for c in turned) / len(turned)
+        tcy = sum(c[1] for c in turned) / len(turned)
+        seeds = {(dx, dy), (round(fcx - tcx), round(fcy - tcy))}
+        for sx, sy in seeds:
+            for ddx in range(sx - FINE_SEARCH_CELLS, sx + FINE_SEARCH_CELLS + 1):
+                for ddy in range(sy - FINE_SEARCH_CELLS, sy + FINE_SEARCH_CELLS + 1):
+                    hit = 0
+                    for cx, cy in turned:
+                        if (cx + ddx, cy + ddy) in ref:
+                            hit += 1
+                    value = hit / min(len(turned), len(ref))
+                    if value > score:
+                        score, dx, dy, best_fine = value, ddx, ddy, fine
+    return quarter, dx, dy, score, best_fine
 
 
 def manhattan_angle(cells: Iterable[tuple[int, int]]) -> float:
@@ -483,8 +539,10 @@ class AccumulatedMap:
         report: dict[str, Any] = {"session_walls": len(walls), "realigned": False}
 
         if self.walls:
-            quarter, dx, dy, overlap = align_to_reference(walls, self.walls)
-            report.update(quarter=quarter, dx=dx, dy=dy, overlap=round(overlap, 3))
+            quarter, dx, dy, overlap, fine = align_to_reference(walls, self.walls)
+            report.update(
+                quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3)
+            )
             if overlap < MERGE_MIN_OVERLAP:
                 # Nothing lines up. Rather than corrupt a good map with a bad
                 # fit, keep what we have and say so.
@@ -494,23 +552,26 @@ class AccumulatedMap:
                     "map; refusing to merge it", 100 * overlap,
                 )
                 return report
-            if quarter or dx or dy:
+            if quarter or dx or dy or fine:
                 report["realigned"] = True
                 _LOGGER.info(
-                    "LIDAR map: session re-aligned by %d deg and (%d, %d) cells "
+                    "LIDAR map: session re-aligned by %.1f deg and (%d, %d) cells "
                     "before merging (%.0f%% overlap)",
-                    quarter * 90, dx, dy, 100 * overlap,
+                    quarter * 90 + fine, dx, dy, 100 * overlap,
                 )
+            turned = _rotate_cells_fine(_rotate_cells(walls, quarter), fine)
             walls = {
-                (cx + dx, cy + dy): n
-                for (cx, cy), n in zip(_rotate_cells(walls, quarter), walls.values())
+                (cx + dx, cy + dy): n for (cx, cy), n in zip(turned, walls.values())
             }
             floor = {
-                (cx + dx, cy + dy) for cx, cy in _rotate_cells(floor, quarter)
+                (cx + dx, cy + dy)
+                for cx, cy in _rotate_cells_fine(_rotate_cells(floor, quarter), fine)
             }
 
         if session_name:
-            self.alignments[session_name] = (quarter, dx, dy) if self.walls else (0, 0, 0)
+            self.alignments[session_name] = (
+                (quarter, dx, dy, fine) if self.walls else (0, 0, 0, 0.0)
+            )
 
         for cell, n in walls.items():
             self.walls[cell] = self.walls.get(cell, 0) + n

@@ -262,10 +262,13 @@ def _apply_alignment(
 ) -> list[tuple[float, float, float, float]]:
     """Rotate and shift a run onto the accumulated map's frame.
 
-    `align` is (quarter, dx, dy) exactly as align_to_reference() returned it:
-    quarter turns counter-clockwise, then a shift in *cells*.
+    `align` is (quarter, dx, dy, fine) exactly as align_to_reference() returned
+    it: quarter turns counter-clockwise, then a fine angle, then a shift in
+    *cells*. Alignments stored before the fine sweep existed carry three fields
+    and mean fine = 0.
     """
-    quarter, dx, dy = align
+    quarter, dx, dy = align[0], align[1], align[2]
+    fine = align[3] if len(align) > 3 else 0.0
     quarter %= 4
     shift_x = dx * HISTORY_CELL_SIZE_M
     shift_y = dy * HISTORY_CELL_SIZE_M
@@ -277,7 +280,13 @@ def _apply_alignment(
             x, y = -x, -y
         elif quarter == 3:
             x, y = y, -x
-        out.append((x + shift_x, y + shift_y, (t + quarter * 90.0) % 360.0, ts))
+        if fine:
+            rad = math.radians(fine)
+            cos_a, sin_a = math.cos(rad), math.sin(rad)
+            x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
+        out.append(
+            (x + shift_x, y + shift_y, (t + quarter * 90.0 + fine) % 360.0, ts)
+        )
     return out
 
 
