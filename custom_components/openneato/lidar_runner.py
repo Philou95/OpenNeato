@@ -32,6 +32,8 @@ from .lidar_mapper import (
     MAX_TURN_DURING_SCAN_DEG,
     build_session_grids,
     parse_pose,
+    MAX_CONSECUTIVE_REJECTS,
+    RENDER_PX_PER_M,
     render_plan,
     scan_points,
 )
@@ -358,12 +360,35 @@ class LidarMapRunner:
 
     # ── output ──────────────────────────────────────────────────────
 
+    def _stale_notice(self) -> list[str] | None:
+        """Watermark for a map that has stopped taking new cleanings.
+
+        A refused merge used to reach nobody: the map simply stopped changing
+        and the only trace was a log line. Written across the plan itself, it
+        is seen -- and it says what to check, because a dock knocked out of
+        true is the usual reason.
+        """
+        if not self._map or not self._map.rejects:
+            return None
+        # Unaccented on purpose: Pillow's default bitmap font has no Latin-1
+        # glyphs, and "ACTUALISÉE" comes out as "ACTUALIS<box>E". Verified by
+        # rendering both. Restoring the accents needs a real font file first.
+        return [
+            "CARTE NON ACTUALISEE",
+            "Verifier que la base n'a pas bouge",
+            (
+                f"Tentative {self._map.rejects} sur "
+                f"{MAX_CONSECUTIVE_REJECTS} avant reinitialisation"
+            ),
+        ]
+
     async def async_render(self) -> tuple[bytes, dict[str, float]] | None:
         """Render the accumulated map, or None if nothing is mapped yet."""
         if not self._map or not self._map.walls:
             return None
         return await self.hass.async_add_executor_job(
-            render_plan, self._map.walls, self._map.floor
+            render_plan, self._map.walls, self._map.floor,
+            RENDER_PX_PER_M, self._stale_notice(),
         )
 
     def calibration(self) -> dict[str, float] | None:

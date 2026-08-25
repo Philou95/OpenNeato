@@ -38,7 +38,7 @@ import logging
 import math
 from typing import Any, Iterable
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -396,10 +396,41 @@ def manhattan_angle(cells: Iterable[tuple[int, int]]) -> float:
 
 
 
+NOTICE_RGBA = (210, 120, 120, 90)   # faint enough to read the plan through
+
+
+def _draw_notice(img: Image.Image, lines: list[str]) -> None:
+    """Write a watermark across the plan.
+
+    Pillow's default font is a small bitmap and its scalable loader is not old
+    enough to rely on here, so each line is drawn at native size and enlarged.
+    Nearest-neighbour on purpose: the card rescales this image again, and a
+    smoothed enlargement turns to mush when it does.
+    """
+    font = ImageFont.load_default()
+    scratch = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    target = img.width * 0.78
+    sized = []
+    for text in lines:
+        left, top, right, bottom = scratch.textbbox((0, 0), text, font=font)
+        w, h = max(1, right - left), max(1, bottom - top)
+        tile = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((-left, -top), text, font=font, fill=NOTICE_RGBA)
+        scale = max(1, int(target / w))
+        sized.append(tile.resize((w * scale, h * scale), Image.NEAREST))
+    gap = max(4, img.height // 60)
+    total = sum(t.height for t in sized) + gap * (len(sized) - 1)
+    y = (img.height - total) // 2
+    for tile in sized:
+        img.alpha_composite(tile, ((img.width - tile.width) // 2, max(0, y)))
+        y += tile.height + gap
+
+
 def render_plan(
     walls: dict[tuple[int, int], int],
     floor: set[tuple[int, int]],
     px_per_m: int = RENDER_PX_PER_M,
+    notice: list[str] | None = None,
 ) -> tuple[bytes, dict[str, float]] | None:
     """Draw the plan in the robot's frame; return (png, calibration).
 
@@ -452,6 +483,9 @@ def render_plan(
     # scattered strokes.
     for cx, cy in wall_cells:
         draw.rectangle(box(cx, cy), fill=WALL_RGBA)
+
+    if notice:
+        _draw_notice(img, notice)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
