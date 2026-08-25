@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.0.0";
+const CARD_VERSION = "2.1.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1262,7 +1262,29 @@ class OpenNeatoReplayCard extends HTMLElement {
                 });
             }
         }
-        return out.length ? out : null;
+        if (!out.length) return null;
+
+        // Close single-cell gaps. A wall met at a grazing angle drops the odd
+        // cell, and drawing the cells faithfully -- which is the whole point --
+        // shows those gaps where the old re-sampling used to dilate them shut.
+        // Only a hole with wall on BOTH sides along one axis is filled, so
+        // nothing is invented at a wall's end or around a corner.
+        const at = (i, j) => i + "," + j;
+        const have = new Set(out.map((c) => at(c.i, c.j)));
+        const gaps = [];
+        for (const c of out) {
+            for (const [di, dj] of [[1, 0], [0, 1]]) {
+                if (have.has(at(c.i + di, c.j + dj))) continue;
+                if (!have.has(at(c.i + 2 * di, c.j + 2 * dj))) continue;
+                gaps.push({ i: c.i + di, j: c.j + dj, c: c.c });
+            }
+        }
+        for (const g of gaps) {
+            if (have.has(at(g.i, g.j))) continue;
+            have.add(at(g.i, g.j));
+            out.push(g);
+        }
+        return out;
     }
 
     _planContentBounds(img, fp) {
@@ -1935,6 +1957,12 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._tf.zoom.toFixed(3),
             ax.toFixed(1),
             ay.toFixed(1),
+            // The cells themselves. cellSize can arrive after the image, and
+            // the cells are then re-read on a different grid; without this the
+            // first layer built survived that and the map came up wrong until
+            // something else -- a zoom, usually -- moved the key.
+            this._floorplanCellM,
+            this._floorplanCells ? this._floorplanCells.length : 0,
         ].join("|");
         if (this._planKey === key && this._planCanvas) return this._planCanvas;
 
