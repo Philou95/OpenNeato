@@ -316,14 +316,14 @@ class LidarMapRunner:
             )
             return
 
-        walls, floor = await self.hass.async_add_executor_job(
+        walls, floor, free = await self.hass.async_add_executor_job(
             # Whole captures now, not c[:4]: the builder weighs each scan by
             # the movement measured during it, which lives in the trailing
             # fields the truncation used to throw away.
             build_session_grids, captures
         )
         report = await self.hass.async_add_executor_job(
-            self._map.merge_session, walls, floor, self._session_name
+            self._map.merge_session, walls, floor, self._session_name, free
         )
         self.last_report = report
         if report.get("rejected"):

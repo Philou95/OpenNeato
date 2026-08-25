@@ -105,6 +105,15 @@ CLEAN_HALF_M = CLEAN_WIDTH_M / 2
 # Beyond this, two consecutive poses cannot be joined by a straight swath: the
 # robot had time to turn, and painting the chord would invent cleaned floor.
 MAX_SWATH_M = 1.5
+# Free-space evidence. Where the robot's *centre* went there can be nothing, so
+# a narrow band around the path is proof a cell is empty -- unlike the 319 mm
+# swath, which laps onto any wall the robot follows. Wall counts on those cells
+# are scaled down rather than cleared: a real wall seen hundreds of times shrugs
+# off one stray crossing, while a chair seen once is gone. Applied at most once
+# per cell per cleaning, so a run that crosses the same spot repeatedly cannot
+# compound its way through a wall.
+CARVE_HALF_M = 0.05
+CARVE_FACTOR = 0.5
 ROBOT_RADIUS_M = CLEAN_HALF_M   # kept for callers that want a footprint radius
 
 # The turret sits at the BACK of the robot while the wheels are on a central
@@ -196,7 +205,7 @@ def project_scan(
 
 
 def stamp_swath(
-    x0: float, y0: float, x1: float, y1: float
+    x0: float, y0: float, x1: float, y1: float, half: float | None = None
 ) -> list[tuple[int, int]]:
     """Grid cells swept between two consecutive poses.
 
@@ -214,7 +223,8 @@ def stamp_swath(
     if math.hypot(x1 - x0, y1 - y0) > MAX_SWATH_M:
         # Too far to join honestly; paint the endpoint only.
         x0, y0 = x1, y1
-    half = CLEAN_HALF_M
+    if half is None:
+        half = CLEAN_HALF_M
     lo_i = math.floor((min(x0, x1) - half) * inv)
     hi_i = math.ceil((max(x0, x1) + half) * inv)
     lo_j = math.floor((min(y0, y1) - half) * inv)
@@ -240,6 +250,13 @@ def stamp_swath(
 def stamp_floor(x: float, y: float) -> list[tuple[int, int]]:
     """Grid cells covered by the robot at a single pose."""
     return stamp_swath(x, y, x, y)
+
+
+def carve_swath(
+    x0: float, y0: float, x1: float, y1: float
+) -> list[tuple[int, int]]:
+    """Cells the robot's centre passed through: proof they are empty."""
+    return stamp_swath(x0, y0, x1, y1, half=CARVE_HALF_M)
 
 
 def _rotate_cells(cells: Iterable[tuple[int, int]], quarter: int) -> list[tuple[int, int]]:
@@ -578,6 +595,7 @@ class AccumulatedMap:
         walls: dict[tuple[int, int], int],
         floor: set[tuple[int, int]],
         session_name: str | None = None,
+        free: set[tuple[int, int]] | None = None,
     ) -> dict[str, Any]:
         """Fold one cleaning into the accumulated map, re-aligning it first."""
         report: dict[str, Any] = {"session_walls": len(walls), "realigned": False}
@@ -635,6 +653,13 @@ class AccumulatedMap:
                 (cx + dx, cy + dy)
                 for cx, cy in _rotate_cells_fine(_rotate_cells(floor, quarter), fine)
             }
+            if free:
+                free = {
+                    (cx + dx, cy + dy)
+                    for cx, cy in _rotate_cells_fine(
+                        _rotate_cells(free, quarter), fine
+                    )
+                }
 
         self.rejects = 0
         if session_name:
@@ -644,6 +669,26 @@ class AccumulatedMap:
 
         for cell, n in walls.items():
             self.walls[cell] = self.walls.get(cell, 0) + n
+
+        # Then let this run's free space push back on what earlier runs saw.
+        # Anything the robot drove through is not there any more, and without
+        # this the only way a removed chair leaves the map is by the adaptive
+        # threshold slowly outgrowing it -- measured at eleven cleanings.
+        if free:
+            faded = 0
+            for cell in free:
+                previous = self.walls.get(cell)
+                if previous is None:
+                    continue
+                reduced = previous * CARVE_FACTOR
+                if reduced < WALL_MIN_HITS:
+                    del self.walls[cell]
+                    faded += 1
+                else:
+                    self.walls[cell] = reduced
+            report["carved"] = len(free)
+            report["faded"] = faded
+
         self.floor |= floor
         self.sessions += 1
 
@@ -798,7 +843,7 @@ def match_pose(
 def build_session_grids(
     captures: list[tuple[float, ...]],
     match: bool = True,
-) -> tuple[dict[tuple[int, int], float], set[tuple[int, int]]]:
+) -> tuple[dict[tuple[int, int], float], set[tuple[int, int]], set[tuple[int, int]]]:
     """Turn a run's captures into wall hit counts and traversed floor.
 
     Captures may carry the movement measured during the scan as two extra
@@ -814,6 +859,7 @@ def build_session_grids(
     """
     walls: dict[tuple[int, int], float] = {}
     floor: set[tuple[int, int]] = set()
+    free: set[tuple[int, int]] = set()
     # Running correction: drift accumulates, so each scan starts from the
     # previous scan's answer rather than from raw odometry again.
     dx = dy = dtheta = 0.0
@@ -842,11 +888,16 @@ def build_session_grids(
         # the path the matcher settled on rather than raw odometry.
         if prev is None:
             floor.update(stamp_floor(x, y))
+            free.update(carve_swath(x, y, x, y))
         else:
             floor.update(stamp_swath(prev[0], prev[1], x, y))
+            free.update(carve_swath(prev[0], prev[1], x, y))
         prev = (x, y)
         placed += 1
-    return walls, floor
+    # A cell this run saw as wall is not carved by this run: the robot skirting
+    # a wall must not undo the scans that just found it.
+    free -= walls.keys()
+    return walls, floor, free
 
 
 def parse_pose(raw: str) -> tuple[float, float, float, float] | None:
