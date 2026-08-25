@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "1.3.0";
+const CARD_VERSION = "1.4.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1809,7 +1809,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         for (let y0 = firstY; y0 < height; y0 += period) {
             for (let x0 = firstX; x0 < width; x0 += period) {
                 // Sample the square's centre — the same rule the coverage
-                // layer uses in _resolveToLattice().
+                // coverage layer uses.
                 //
                 // This used to light the square if *any* pixel in it was
                 // wall. That made sense while the plan carried a floor tint
@@ -2011,29 +2011,6 @@ class OpenNeatoReplayCard extends HTMLElement {
     // Resolve one patch of a continuous shape onto the lattice: a square is
     // lit when the shape covers its centre. Only the given box is looked at,
     // so this is a small read even though the layers are canvas-sized.
-    _resolveToLattice(rctx, lctx, layer, period, size, x0, y0, x1, y1, phaseX = 0, phaseY = 0) {
-        // Same phase as the plan's lattice, or the two layers would drift
-        // against each other by up to a square as the view is panned.
-        const align = (v, phase) => {
-            let b = Math.floor((v - phase) / period) * period + Math.round(phase);
-            while (b < 0) b += period;
-            return b;
-        };
-        const bx = align(x0, phaseX);
-        const by = align(y0, phaseY);
-        const bw = Math.min(layer.width, Math.ceil(x1 / period) * period + period) - bx;
-        const bh = Math.min(layer.height, Math.ceil(y1 / period) * period + period) - by;
-        if (bw <= 0 || bh <= 0) return;
-
-        const src = rctx.getImageData(bx, by, bw, bh).data;
-        const mid = size >> 1;
-        for (let gy = 0; gy + size <= bh; gy += period) {
-            for (let gx = 0; gx + size <= bw; gx += period) {
-                if (src[((gy + mid) * bw + gx + mid) * 4 + 3] < 128) continue;
-                lctx.fillRect(bx + gx, by + gy, size, size);
-            }
-        }
-    }
 
     // Coverage is the expensive part — tens of thousands of cells. Because
     // it only ever grows as the playhead advances, it is drawn once into an
@@ -2056,87 +2033,65 @@ class OpenNeatoReplayCard extends HTMLElement {
         if (this._cov.sig !== sig || !layer) {
             const w = Math.round(displayW * dpr);
             const h = Math.round(displayH * dpr);
-            // Two layers. `raw` holds the cleaned area as a continuous shape,
-            // drawn through the ordinary transform; `canvas` is that shape
-            // resolved onto the lattice.
+            // One layer now, filled a square per cell.
             //
-            // Snapping each cell's centre to the nearest square instead —
-            // which is what this did — beats itself against the lattice: a
-            // cell is 3.77 device pixels and a square 4, so roughly one cell
-            // in seventeen finds no square of its own, and those misses line
-            // up into the pale criss-cross that appeared over the floor. No
-            // integer period can fix it either, because the map is turned a
-            // couple of degrees and the cell grid does not run square to the
-            // screen. Sampling a continuous shape has no such beat: the
-            // squares are decided by area, not by hitting a point.
-            const raw = document.createElement("canvas");
-            raw.width = w;
-            raw.height = h;
+            // This used to draw the cleaned area as a continuous shape and
+            // sample that raster onto the lattice, because snapping each
+            // cell's centre beat against it: a cell was 3.77 device pixels
+            // and a square 4, so about one cell in seventeen found no square
+            // of its own and the misses lined up into a pale criss-cross.
+            // That beat is gone -- the period is now one cell by definition
+            // and the zoom is snapped so it lands on a whole pixel, so cell
+            // and square are the same size by construction.
+            //
+            // Sampling a raster had its own cost, which is what replaced the
+            // criss-cross with a shape that changed between zoom levels:
+            // measured on the real card, the same patch of floor drew 623
+            // squares at 1.1x and 509 at 2.0x. Drawing the cells makes the
+            // shape the data, as it already is for the plan.
             layer = document.createElement("canvas");
             layer.width = w;
             layer.height = h;
-            this._cov.raw = raw;
-            this._cov.rawCtx = raw.getContext("2d", { willReadFrequently: true });
             this._cov.canvas = layer;
             this._cov.ctx = layer.getContext("2d");
             this._cov.sig = sig;
             this._cov.cursor = 0;
             this._cov.time = -1;
-            this._applyTransform(this._cov.rawCtx, dpr, displayW, displayH);
-            // Recapture it here, or the next frame reuses the matrix of the
-            // view we just replaced.
-            this._cov.matrix = this._cov.rawCtx.getTransform();
-            this._cov.rawCtx.fillStyle = "#000";
+            // Capture the view matrix, then draw in device pixels. Recaptured
+            // here, or the next frame reuses the matrix of the view we just
+            // replaced.
+            this._applyTransform(this._cov.ctx, dpr, displayW, displayH);
+            this._cov.matrix = this._cov.ctx.getTransform();
+            this._cov.ctx.setTransform(1, 0, 0, 1, 0, 0);
             this._cov.ctx.fillStyle = COVERAGE_COLOR;
         }
 
         const lctx = this._cov.ctx;
-        const rctx = this._cov.rawCtx;
         if (tNow < this._cov.time) {
-            // Seeking backwards. The raw layer still carries the world
-            // transform, so clear it in device space and put it back.
-            rctx.save();
-            rctx.setTransform(1, 0, 0, 1, 0, 0);
-            rctx.clearRect(0, 0, layer.width, layer.height);
-            rctx.restore();
+            // Seeking backwards: start the layer over.
             lctx.clearRect(0, 0, layer.width, layer.height);
             this._cov.cursor = 0;
         }
 
-        // Append the newly cleaned cells to the continuous shape, keeping the
-        // device-space box they touched so only that part has to be resolved
-        // onto the lattice afterwards. The robot covers very little ground
-        // between two frames, so this stays a small patch.
+        // Append the newly cleaned cells, a square each. The cursor only ever
+        // moves forward, so a frame costs the handful of cells the robot has
+        // covered since the last one.
         const { period, size, phaseX, phaseY } = this._lattice(dpr, proj);
-        const matrix = this._cov.matrix || rctx.getTransform();
-        this._cov.matrix = matrix;
+        const matrix = this._cov.matrix;
         const cells = session.coverage;
-        const cellPx = session.cellSize * proj.scale;
-        const half = cellPx / 2;
-        const reach = (cellPx * this._tf.zoom * dpr) / 2 + period;
+        const ox = Math.round(phaseX);
+        const oy = Math.round(phaseY);
+        const point = new DOMPoint();
         let i = this._cov.cursor;
         const n = session.cellCount;
-        let x0 = Infinity;
-        let y0 = Infinity;
-        let x1 = -Infinity;
-        let y1 = -Infinity;
         while (i < n && cells[i * 3 + 2] <= tNow) {
-            const wx = cells[i * 3] * session.cellSize;
-            const wy = cells[i * 3 + 1] * session.cellSize;
-            const cxp = proj.toX(wx);
-            const cyp = proj.toY(wy);
-            rctx.fillRect(cxp - half, cyp - half, cellPx, cellPx);
-            const p = matrix.transformPoint(new DOMPoint(cxp, cyp));
-            if (p.x - reach < x0) x0 = p.x - reach;
-            if (p.y - reach < y0) y0 = p.y - reach;
-            if (p.x + reach > x1) x1 = p.x + reach;
-            if (p.y + reach > y1) y1 = p.y + reach;
+            point.x = proj.toX(cells[i * 3] * session.cellSize);
+            point.y = proj.toY(cells[i * 3 + 1] * session.cellSize);
+            const p = matrix.transformPoint(point);
+            const gx = Math.round((p.x - ox) / period) * period + ox;
+            const gy = Math.round((p.y - oy) / period) * period + oy;
+            lctx.fillRect(gx, gy, size, size);
             i++;
-        }
-        if (i > this._cov.cursor) {
-            this._resolveToLattice(
-                rctx, lctx, layer, period, size, x0, y0, x1, y1, phaseX, phaseY,
-            );
         }
         this._cov.cursor = i;
         this._cov.time = tNow;
