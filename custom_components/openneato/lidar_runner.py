@@ -316,6 +316,19 @@ class LidarMapRunner:
         ratio = grown / expected
 
         before = self._interval
+        if grown <= 0:
+            # The robot logged nothing at all this window. The premise of this
+            # check is that thin logging means our polling is stealing serial
+            # bandwidth -- but at exactly zero the robot is not logging for
+            # some other reason entirely, and backing off does not help.
+            # Observed 2026-08-25: three windows of 0% at the end of a run
+            # while the bridge was timing out, which ratcheted sampling 4 -> 6
+            # -> 9 -> 12 s for the last quarter of an hour. Hold instead.
+            _LOGGER.debug(
+                "LIDAR mapping: no pose logging at all over %.0fs, holding %.0fs",
+                window, self._interval,
+            )
+            return
         if ratio < BACKOFF_RATIO:
             self._interval = min(MAX_INTERVAL, self._interval * 1.5)
         elif ratio > RECOVER_RATIO:
