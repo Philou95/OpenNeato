@@ -42,9 +42,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 _LOGGER = logging.getLogger(__name__)
 
-CELL_M = 0.05                # grid resolution
+# 2.5 cm, measured rather than chosen: the LIDAR is faithful to about a
+# centimetre standing still and the reconstructed map to two or two and a half,
+# so a finer grid would only draw pose noise. Against the 50 x 29 cm box the
+# same captures render 60 x 35 at 5 cm and 55 x 38 at 2.5, halving the
+# quantisation on every measurement. Cells cost the square of this, so the grid
+# is four times denser -- about 16 000 wall cells and 32 000 floor against a
+# MAX_GRID_CELLS of 200 000.
+CELL_M = 0.025               # grid resolution
 MAX_RANGE_M = 3.5            # returns beyond this are noisy and grazing
-WALL_MIN_HITS = 12           # floor, and the whole rule for a young map.
+# Scales with the cell: a return lands in exactly one cell whatever the grid,
+# so quartering the cell area quarters the hits each one collects. Left at 12
+# this floor alone would have hidden every wall of a young map.
+WALL_MIN_HITS = 3            # floor, and the whole rule for a young map.
                              # Swept over the stored map: at 5 a wall is a
                              # 3571-cell smear, at 20 it thins until it breaks
                              # into pieces. 12 is where the outline is still

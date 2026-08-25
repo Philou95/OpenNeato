@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.3.0";
+const CARD_VERSION = "2.4.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -23,6 +23,11 @@ const MAP_PAD = 8;
 const GRID_GUTTER_RATIO = 0.28;
 // How far off the square a map may be before its angle is kept as measured.
 const SQUARE_SNAP_DEG = 3;
+// Smallest square worth drawing, in device pixels. Below this the map reads as
+// a dither rather than a grid, so several map cells are grouped into one
+// square instead -- the data stays as fine as it is, and zooming in takes the
+// grouping back down until one square is one cell again.
+const MIN_SQUARE_PX = 5;
 // Floor for `height: fill`, so a short column cannot squeeze the map to
 // nothing.
 const FILL_MIN_HEIGHT = 220;
@@ -1543,7 +1548,10 @@ class OpenNeatoReplayCard extends HTMLElement {
     // displacement on screen is the pan turned by that angle.
     _lattice(dpr, proj) {
         const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
-        const period = Math.max(2, Math.round(cellM * proj.scale * this._tf.zoom * dpr));
+        const raw = cellM * proj.scale * this._tf.zoom * dpr;
+        // How many cells share a square, so a square is never too small to read.
+        const group = Math.max(1, Math.ceil(MIN_SQUARE_PX / Math.max(raw, 0.001)));
+        const period = Math.max(2, Math.round(raw * group));
         // Cap the gutter as well as flooring it: at the smallest periods a
         // 28% gutter leaves a single lit pixel against a single dark one, and
         // the whole map reads as hatching instead of squares.
@@ -1559,6 +1567,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         const wrap = (v) => ((v % period) + period) % period;
         return {
             period,
+            group,
             size: Math.max(1, period - gutter),
             phaseX: wrap(sx),
             phaseY: wrap(sy),
@@ -1632,12 +1641,16 @@ class OpenNeatoReplayCard extends HTMLElement {
         const lat = this._lattice(dpr, proj);
         const at = (mx, my) =>
             matrix.transformPoint(new DOMPoint(proj.toX(mx), proj.toY(my)));
+        // One step is a whole group of cells, so the vectors below carry the
+        // grouping as well as the rotation and the zoom.
+        const step = cellM * lat.group;
         const o = at(0, 0);
-        const ux = at(cellM, 0);
-        const uy = at(0, cellM);
+        const ux = at(step, 0);
+        const uy = at(0, step);
         return {
             period: lat.period,
             size: lat.size,
+            group: lat.group,
             cellM,
             ox: o.x, oy: o.y,
             ax: ux.x - o.x, ay: ux.y - o.y,
@@ -1648,6 +1661,12 @@ class OpenNeatoReplayCard extends HTMLElement {
     // Cell index of a world coordinate, on the same grid the robot uses.
     static _cellIndex(v, cellM) {
         return Math.floor(v / cellM + 0.5);
+    }
+
+    // Which drawn square a cell belongs to. Math.floor, not a division, so
+    // negative indices group the same way positive ones do.
+    static _squareIndex(cell, group) {
+        return group > 1 ? Math.floor(cell / group) : cell;
     }
 
     _applyTransform(ctx, dpr, displayW, displayH) {
@@ -1796,8 +1815,10 @@ class OpenNeatoReplayCard extends HTMLElement {
         const px = (i) => session.path[i * 4];
         const py = (i) => session.path[i * 4 + 1];
         const lay = (x, y) => {
-            const ci = OpenNeatoReplayCard._cellIndex(x, g.cellM);
-            const cj = OpenNeatoReplayCard._cellIndex(y, g.cellM);
+            const ci = OpenNeatoReplayCard._squareIndex(
+                OpenNeatoReplayCard._cellIndex(x, g.cellM), g.group);
+            const cj = OpenNeatoReplayCard._squareIndex(
+                OpenNeatoReplayCard._cellIndex(y, g.cellM), g.group);
             const k = cj * 100000 + ci;
             if (painted.has(k)) return;
             painted.add(k);
@@ -1816,7 +1837,7 @@ class OpenNeatoReplayCard extends HTMLElement {
             const ay = py(i - 1);
             const dx = px(i) - ax;
             const dy = py(i) - ay;
-            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (g.cellM / 2)));
+            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (g.cellM * g.group / 2)));
             for (let s = 1; s <= steps; s++) {
                 lay(ax + (dx * s) / steps, ay + (dy * s) / steps);
             }
@@ -1861,8 +1882,10 @@ class OpenNeatoReplayCard extends HTMLElement {
         const oldest = tNow - TRAIL_SECONDS;
         const strongest = new Map();
         const mark = (x, y, weight) => {
-            const ci = OpenNeatoReplayCard._cellIndex(x, g.cellM);
-            const cj = OpenNeatoReplayCard._cellIndex(y, g.cellM);
+            const ci = OpenNeatoReplayCard._squareIndex(
+                OpenNeatoReplayCard._cellIndex(x, g.cellM), g.group);
+            const cj = OpenNeatoReplayCard._squareIndex(
+                OpenNeatoReplayCard._cellIndex(y, g.cellM), g.group);
             const k = cj * 100000 + ci;
             const prev = strongest.get(k);
             if (prev === undefined || weight > prev.w) {
@@ -1891,7 +1914,7 @@ class OpenNeatoReplayCard extends HTMLElement {
             const tail = at(i - 1);
             const dx = tail.x - head.x;
             const dy = tail.y - head.y;
-            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (g.cellM / 2)));
+            const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (g.cellM * g.group / 2)));
             for (let s = 0; s <= steps; s++) {
                 mark(head.x + (dx * s) / steps, head.y + (dy * s) / steps, weight);
             }
@@ -2025,8 +2048,10 @@ class OpenNeatoReplayCard extends HTMLElement {
             cx.setTransform(1, 0, 0, 1, 0, 0);
             const g = this._cellGrid(proj, dpr, view);
             for (const cell of cells) {
-                const gx = Math.round(g.ox + cell.i * g.ax + cell.j * g.bx);
-                const gy = Math.round(g.oy + cell.i * g.ay + cell.j * g.by);
+                const si = OpenNeatoReplayCard._squareIndex(cell.i, g.group);
+                const sj = OpenNeatoReplayCard._squareIndex(cell.j, g.group);
+                const gx = Math.round(g.ox + si * g.ax + sj * g.bx);
+                const gy = Math.round(g.oy + si * g.ay + sj * g.by);
                 if (gx < -g.period || gy < -g.period ||
                     gx > c.width || gy > c.height) continue;
                 cx.fillStyle = cell.c;
@@ -2195,8 +2220,8 @@ class OpenNeatoReplayCard extends HTMLElement {
         let i = this._cov.cursor;
         const n = session.cellCount;
         while (i < n && cells[i * 3 + 2] <= tNow) {
-            const ci = cells[i * 3];
-            const cj = cells[i * 3 + 1];
+            const ci = OpenNeatoReplayCard._squareIndex(cells[i * 3], g.group);
+            const cj = OpenNeatoReplayCard._squareIndex(cells[i * 3 + 1], g.group);
             lctx.fillRect(
                 Math.round(g.ox + ci * g.ax + cj * g.bx),
                 Math.round(g.oy + ci * g.ay + cj * g.by),
