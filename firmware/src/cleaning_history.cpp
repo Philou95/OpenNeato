@@ -131,22 +131,9 @@ void CleaningHistory::checkState() {
         bool wasCleaning = isCleaningState(prevUiState);
         bool nowCleaning = isCleaningState(state.uiState);
 
-        // On the dock, charging, and meaning to carry on — treat as active.
-        //
-        // Two shapes, and only the first was recognised. CLEANINGSUSPENDED with
-        // Charging_Cleaning is the documented one. This D6 produces another:
-        // it goes flat, returns to base, and sits in STARTHOUSECLEANING with a
-        // robotState of plain ST_C_Standby — no CLEANINGSUSPENDED anywhere, no
-        // Charging_Cleaning. Observed 2026-08-25, a run that covered 19 m2
-        // against the 27 it needs and then waited to finish.
-        //
-        // `collecting` is what tells the two apart. STARTHOUSECLEANING with a
-        // session already open can only be a clean that was interrupted; a
-        // fresh start reaches it with nothing open, because stopCollection()
-        // has closed the last one.
-        bool isMidCleanRecharge =
-                (isSuspendedState(state.uiState) && state.robotState.indexOf("Charging_Cleaning") >= 0) ||
-                (collecting && state.uiState.indexOf("STARTHOUSECLEANING") >= 0);
+        // CLEANINGSUSPENDED + Charging_Cleaning means the robot is on the dock
+        // recharging mid-clean and will resume automatically — treat as active
+        bool isMidCleanRecharge = isSuspendedState(state.uiState) && state.robotState.indexOf("Charging_Cleaning") >= 0;
 
         // First poll after boot: if the robot is idle, finalize any orphan sessions
         // left by a previous crash/reboot so they don't get merged into the next clean
@@ -811,16 +798,7 @@ void CleaningHistory::collectSnapshot() {
             // (already on the dock and charging). Both combined with the
             // Charging_Cleaning robot state indicate a recharge-and-resume cycle.
             //
-            // STARTHOUSECLEANING is a third shape, and the one this D6 actually
-            // produces: flat, back on the dock, waiting to finish, with a
-            // robotState of plain ST_C_Standby. Without it the fall-through
-            // below reads "not cleaning, not docking, not suspended" and closes
-            // the session outright -- so a run cut short by a flat battery ends
-            // there and resumes as a separate one, splitting a single clean in
-            // two. Reaching this line at all means a session is open, so there
-            // is no fresh start to confuse it with.
-            bool isWaitingToResume = state.uiState.indexOf("STARTHOUSECLEANING") >= 0;
-            if (((isDocking || isSuspended) && isChargingMidClean) || isWaitingToResume) {
+            if ((isDocking || isSuspended) && isChargingMidClean) {
                 if (!recharging) {
                     recharging = true;
                     rechargeCount++;
