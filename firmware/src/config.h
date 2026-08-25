@@ -207,6 +207,10 @@ enum CommandStatus {
 #define NOTIF_INTERVAL_IDLE_MS 30000 // Check state every 30s when robot is idle
 
 // Cleaning history
+// A serial reply that never arrives must not stop history collection for the
+// rest of the run. Well past any healthy round trip, so a slow reply is never
+// cut off; short enough that the loss is a snapshot or two.
+#define HISTORY_FETCH_TIMEOUT_MS 20000
 #define HISTORY_INTERVAL_IDLE_MS 30000 // Poll state every 30s when idle (detect cleaning start)
 #define HISTORY_INTERVAL_ACTIVE_MS 2000 // Poll state/pose every 2s during active cleaning (~0.6m resolution at 300mm/s)
 #define HISTORY_FLUSH_INTERVAL_MS 30000 // Flush buffered pose snapshots to disk every 30 seconds

@@ -88,8 +88,19 @@ void CleaningHistory::tick() {
         return;
     }
 
-    if (fetchPending)
-        return;
+    if (fetchPending) {
+        // Watchdog. A serial reply that never comes leaves this latched, and
+        // tick() then returns here for the rest of the session: collection
+        // stops dead, the file is never closed, and nothing says so. Seen
+        // 2026-08-25 — a run wrote its last pose at 20:47 and sat open, still
+        // flagged as recording, 35 minutes later. Long enough that no healthy
+        // reply can be waiting, short enough to lose only a snapshot or two.
+        if (millis() - fetchStartedMs < HISTORY_FETCH_TIMEOUT_MS)
+            return;
+        LOG("HIST", "Fetch stuck for %lums — releasing", millis() - fetchStartedMs);
+        dataLogger.logGenericEvent("history_fetch_timeout", {{"ms", String(millis() - fetchStartedMs), FIELD_INT}});
+        fetchPending = false;
+    }
 
     if (collecting) {
         // Periodically flush buffered pose snapshots to disk. Faster while a
@@ -111,6 +122,7 @@ void CleaningHistory::tick() {
 
 void CleaningHistory::checkState() {
     fetchPending = true;
+    fetchStartedMs = millis();
     neato.getState([this](bool ok, const RobotState& state) {
         fetchPending = false;
         if (!ok)
@@ -770,6 +782,7 @@ void CleaningHistory::finalizeOrphanSessions() {
 
 void CleaningHistory::collectSnapshot() {
     fetchPending = true;
+    fetchStartedMs = millis();
 
     neato.getState([this](bool stateOk, const RobotState& state) {
         if (stateOk) {

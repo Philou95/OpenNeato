@@ -108,6 +108,7 @@ private:
     bool collecting = false;
     bool recharging = false;
     bool fetchPending = false;
+    unsigned long fetchStartedMs = 0;
     bool recoveryAttempted = false; // Only try orphan recovery once after boot
     size_t snapshotCount = 0;
 

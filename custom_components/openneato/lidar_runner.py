@@ -317,15 +317,21 @@ class LidarMapRunner:
 
         before = self._interval
         if grown <= 0:
-            # The robot logged nothing at all this window. The premise of this
-            # check is that thin logging means our polling is stealing serial
-            # bandwidth -- but at exactly zero the robot is not logging for
-            # some other reason entirely, and backing off does not help.
-            # Observed 2026-08-25: three windows of 0% at the end of a run
-            # while the bridge was timing out, which ratcheted sampling 4 -> 6
-            # -> 9 -> 12 s for the last quarter of an hour. Hold instead.
-            _LOGGER.debug(
-                "LIDAR mapping: no pose logging at all over %.0fs, holding %.0fs",
+            # The robot logged nothing at all this window, and that is a
+            # different thing from logging thinly. This check exists on the
+            # premise that thin logging means our polling is stealing serial
+            # bandwidth, so easing off gives it back -- at exactly zero the
+            # robot has stopped writing for a reason easing off cannot touch,
+            # and the run loses the rest of its resolution for nothing.
+            #
+            # It is also worth saying out loud. On 2026-08-25 three such
+            # windows were the only warning that the bridge's own collection
+            # had latched on a serial reply that never came: the session wrote
+            # its last pose at 20:47 and sat open, still flagged as recording,
+            # 35 minutes later. Reading that as a quiet hold cost the evidence.
+            _LOGGER.warning(
+                "LIDAR mapping: the robot logged no pose at all over %.0fs — "
+                "holding at %.0fs. Its own collection may have stalled.",
                 window, self._interval,
             )
             return
