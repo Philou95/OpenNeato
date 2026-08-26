@@ -17,6 +17,7 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
 from .const import (
+    CELL_SIZE_M,
     CONF_MAP_ROTATION_OFFSET,
     DOMAIN,
     MAP_DEFAULT_ROTATION_OFFSET,
@@ -95,6 +96,14 @@ def _floorplan_payload(hass: HomeAssistant, entry_id: str) -> dict[str, Any] | N
                 "originY": cal["origin_y"],
                 "rotation": 0.0,
                 "scale": cal["scale"],
+                # The grid this plan was drawn on, stated rather than inferred.
+                # The card used to read the plan back on the *session's* cell
+                # size, which is a different number that merely happened to
+                # agree: when the map halved to 2.5 cm and the replay had not,
+                # the card sampled every other cell of the plan and drew every
+                # wall perforated. Two things that need not agree should not be
+                # made to agree by hand.
+                "cellSize": CELL_SIZE_M,
                 "viewRotation": mapper.view_rotation(offset),
                 "generated": True,
                 "sessions": mapper.sessions,

@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.4.1";
+const CARD_VERSION = "2.4.2";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1064,7 +1064,7 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._floorplan = fp;
         // cellSize can arrive after the image does, and the cells were read on
         // a grid derived from it, so a change has to force a re-read.
-        const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+        const cellM = this._planCellM(fp);
         if (this._floorplanKey === fp.url && this._floorplanImg) {
             if (this._floorplanCellM !== cellM) {
                 this._floorplanCells = this._planCells(this._floorplanImg, fp);
@@ -1278,8 +1278,17 @@ class OpenNeatoReplayCard extends HTMLElement {
     // cells out once and drawing them makes the shape data rather than a
     // sampling accident: the same cells are drawn at every zoom, and only
     // their pixel positions move.
+    /* The grid the plan picture was drawn on. The plan states it; the
+       session's own cell size is only a fallback for a plan taped before it
+       did, and they are not the same number -- reading the plan on the
+       session's grid is what drew every wall perforated when the map halved
+       to 2.5 cm and the replay had not yet. */
+    _planCellM(fp) {
+        return (fp && fp.cellSize) || (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+    }
+
     _planCells(img, fp) {
-        const cellM = (this._session && this._session.cellSize) || DEFAULT_CELL_M;
+        const cellM = this._planCellM(fp);
         const cellPx = cellM * fp.scale;
         if (!(cellPx >= 1) || !img.width || !img.height) return null;
         let data;

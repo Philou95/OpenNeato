@@ -141,8 +141,28 @@ ROBOT_RADIUS_M = CLEAN_HALF_M   # kept for callers that want a footprint radius
 # the robot faced. On the calibration box that is most of the error: with the
 # 5 deg fade alone it renders 85 x 55 cm, and with this offset as well, 65 x 50.
 LIDAR_BEHIND_M = 0.103
-RENDER_PX_PER_M = 100
+# Requested render scale. Both the calibration and the drawing snap it to a
+# whole number of pixels per cell -- see plan_step() -- so this is a wish, not
+# a guarantee, and 120 is the wish that lands exactly on 3 px at a 2.5 cm grid.
+#
+# It used to be 100, and that was silently right only while a cell was 5 cm:
+# 0.05 x 100 = 5.0 px, so cells laid out in world coordinates happened to
+# abut. Halving the grid made a cell 2.5 px, drawn 2 px wide while the next
+# one started 2.5 px along -- three of every five boundaries lost a pixel, and
+# a wall 82 cells long came out as dashes of at most three. The plan looked
+# riddled with holes that were not in the data at all.
+RENDER_PX_PER_M = 120
 RENDER_PAD_M = 0.3
+
+
+def plan_step(px_per_m: float) -> int:
+    """Whole pixels per cell at this scale -- the plan's unit of layout.
+
+    Everything the plan draws is placed as a multiple of this, from cell
+    indices, so cells abut by construction at any scale instead of by the
+    arithmetic happening to come out even.
+    """
+    return max(1, round(CELL_M * px_per_m))
 
 # The map carries exactly three states, and the palette says so plainly:
 # black is wall, blue is cleaned floor, and whatever is neither — the gaps in
@@ -489,23 +509,24 @@ def render_plan(
     # hard enough to make Home Assistant look like it was restarting.
     threshold = wall_threshold(walls)
     wall_cells = {c for c, n in walls.items() if n >= threshold}
-    min_x, min_y = cal["origin_x"], cal["origin_y"]
     width, height = cal["width"], cal["height"]
-    max_y = min_y + height / px_per_m
+    min_cx, max_cy = cal["min_cx"], cal["max_cy"]
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    step = max(1, round(CELL_M * px_per_m))
+    step = plan_step(px_per_m)
 
     def box(cx: int, cy: int):
         # World Y grows up, image rows grow down.
         #
-        # Rounded to whole pixels, and exactly `step` of them: the card reads
-        # this image back cell by cell, and float coordinates put the odd cell
-        # a pixel across a boundary -- 8 of 1220 went missing that way. PIL's
-        # rectangle includes both ends, hence the -1.
-        x0 = round((cx * CELL_M - min_x) * px_per_m)
-        y0 = round((max_y - (cy + 1) * CELL_M) * px_per_m)
+        # Placed from the cell's own index, times a whole number of pixels, so
+        # neighbouring cells abut whatever the scale. Deriving the corner from
+        # metres instead is what dashed the plan: at 2.5 cm and 100 px/m a cell
+        # is 2.5 px, drawn 2 px wide while the next one starts 2.5 px along, so
+        # three boundaries in five lost a pixel and every wall came out
+        # perforated. PIL's rectangle includes both ends, hence the -1.
+        x0 = (cx - min_cx) * step
+        y0 = (max_cy - cy - 1) * step
         return [x0, y0, x0 + step - 1, y0 + step - 1]
 
     # Walls only — the floor is deliberately left out.
@@ -554,25 +575,37 @@ def plan_calibration(
     if not wall_cells:
         return None
 
+    # In cells, not metres. The image is a whole number of cells across and
+    # each one a whole number of pixels, so the frame cannot land half a cell
+    # off the grid the card reads it back on.
     cells = wall_cells | floor
-    min_x = min(c[0] for c in cells) * CELL_M - RENDER_PAD_M
-    max_x = (max(c[0] for c in cells) + 1) * CELL_M + RENDER_PAD_M
-    min_y = min(c[1] for c in cells) * CELL_M - RENDER_PAD_M
-    max_y = (max(c[1] for c in cells) + 1) * CELL_M + RENDER_PAD_M
+    pad = max(1, round(RENDER_PAD_M / CELL_M))
+    min_cx = min(c[0] for c in cells) - pad
+    max_cx = max(c[0] for c in cells) + 1 + pad
+    min_cy = min(c[1] for c in cells) - pad
+    max_cy = max(c[1] for c in cells) + 1 + pad
 
-    width = max(1, round((max_x - min_x) * px_per_m))
-    height = max(1, round((max_y - min_y) * px_per_m))
+    step = plan_step(px_per_m)
+    width = max(1, (max_cx - min_cx) * step)
+    height = max(1, (max_cy - min_cy) * step)
     if width > 4096 or height > 4096:
         _LOGGER.warning("Generated plan too large (%dx%d); skipping", width, height)
         return None
     return {
-        "scale": float(px_per_m),
-        "origin_x": round(min_x, 3),
-        "origin_y": round(min_y, 3),
+        # The scale the image was actually drawn at, which is the snapped one:
+        # reporting the requested scale would put the card's cell-by-cell read
+        # a fraction of a pixel out per cell and drift it across the plan.
+        "scale": step / CELL_M,
+        "origin_x": round(min_cx * CELL_M, 3),
+        "origin_y": round(min_cy * CELL_M, 3),
         "width": width,
         "height": height,
         "wall_cells": len(wall_cells),
         "floor_cells": len(floor),
+        # Cell index of the frame's left and top edges, so the drawing places
+        # every cell from its own index instead of re-deriving it from metres.
+        "min_cx": min_cx,
+        "max_cy": max_cy,
     }
 
 
