@@ -116,6 +116,10 @@ void CleaningHistory::sampleScan() {
     scanPending = true;
     scanStartedMs = millis();
     // Pose first: the cheap half, so its timestamp sits closest to the scan.
+    // Forced fresh, here and after the scan: the pose cache holds for a second
+    // and a scan takes most of one, so the pair would otherwise be the same
+    // reading twice and the scan would look perfectly still.
+    neato.invalidateRobotPos();
     neato.getRobotPos(true, [this](bool posOk, const RobotPosData& pos) {
         float t = 0;
         scanX1 = scanY1 = scanT1 = 0.0f;
@@ -140,6 +144,7 @@ void CleaningHistory::sampleScan() {
             }
             // A second pose, to bracket the scan: the pose kept is the midpoint
             // and the movement between the two is what grades it.
+            neato.invalidateRobotPos();
             neato.getRobotPos(true, [this](bool ok2, const RobotPosData& p2) {
                 scanPending = false;
                 float x2 = scanX1, y2 = scanY1, th2 = scanT1, t2 = 0;

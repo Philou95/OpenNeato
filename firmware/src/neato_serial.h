@@ -99,6 +99,12 @@ public:
     // so the next poll fetches fresh data instead of returning stale cache.
 
     void invalidateState();
+    // Drop only the pose. The two reads that bracket a LIDAR scan have to be
+    // genuinely distinct: the scan takes about 800 ms and the pose cache holds
+    // for 1 000, so the second read was a cache hit and returned the first --
+    // measured, 416 of 563 scans reported moving exactly zero, which handed
+    // every one of them full weight and disabled the smear grading.
+    void invalidateRobotPos();
     void invalidateAll();
 
     // -- Manual clean state override -----------------------------------------
