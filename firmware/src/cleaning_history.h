@@ -149,6 +149,13 @@ private:
     uint32_t nScanOk = 0, nScanFail = 0, nPoseFail = 0, nPose2Fail = 0;
     uint32_t nSkipPending = 0, nSkipInterval = 0, nSkipDrain = 0, nCalls = 0;
     uint32_t nReleased = 0;
+    // Assembled here, not on a callback stack. 752 bytes is far too much to
+    // put on an ESP32 callback stack, and capturing a copy of it into a nested
+    // std::function doubles it -- that combination rebooted the bridge every
+    // thirty seconds. The member costs the same RAM once, permanently, and
+    // reduces every capture to `this`.
+    BufferedScan pendingScan;
+    float scanX1 = 0.0f, scanY1 = 0.0f, scanT1 = 0.0f;
 
     std::deque<BufferedScan> scanRing;   // oldest first
     uint32_t scanSeq = 0;                // last sequence number handed out

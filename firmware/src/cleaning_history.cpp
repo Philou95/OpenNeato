@@ -115,50 +115,50 @@ void CleaningHistory::sampleScan() {
     lastScanMs = millis();
     scanPending = true;
     scanStartedMs = millis();
-    // Pose first: it is the cheap half, so its timestamp sits closest to the
-    // scan, and capturing four floats beats capturing a 5 760-byte scan.
+    // Pose first: the cheap half, so its timestamp sits closest to the scan.
     neato.getRobotPos(true, [this](bool posOk, const RobotPosData& pos) {
-        float x = 0, y = 0, theta = 0, t = 0;
+        float t = 0;
+        scanX1 = scanY1 = scanT1 = 0.0f;
         if (posOk)
-            parsePose(pos.raw, x, y, theta, t);
+            parsePose(pos.raw, scanX1, scanY1, scanT1, t);
         else
             nPoseFail++;
-        neato.getLdsScan([this, x, y, theta, t](bool ok, const LdsScanData& scan) {
+        pendingScan = BufferedScan();
+        pendingScan.ts = static_cast<uint32_t>(t);
+        neato.getLdsScan([this](bool ok, const LdsScanData& scan) {
             if (!ok) {
                 nScanFail++;
                 scanPending = false;
                 return;
             }
-            BufferedScan b;
-            b.seq = ++scanSeq;
-            b.ts = static_cast<uint32_t>(t);
-            b.rpm = scan.rotationSpeed;
+            pendingScan.rpm = scan.rotationSpeed;
             for (int i = 0; i < scan.validPoints && i < 360; i++) {
                 int a = scan.points[i].angleDeg;
                 long d = scan.points[i].distMM;
                 if (a >= 0 && a < 360 && d > 0 && d < 65535)
-                    b.dist[a] = static_cast<uint16_t>(d);
+                    pendingScan.dist[a] = static_cast<uint16_t>(d);
             }
-            // A second pose, to bracket the scan. The pose recorded is the
-            // midpoint and the movement between the two is what grades it --
-            // the same thing the integration was doing over HTTP.
-            neato.getRobotPos(true, [this, b, x, y, theta](bool ok2, const RobotPosData& p2) mutable {
+            // A second pose, to bracket the scan: the pose kept is the midpoint
+            // and the movement between the two is what grades it.
+            neato.getRobotPos(true, [this](bool ok2, const RobotPosData& p2) {
                 scanPending = false;
-                float x2 = x, y2 = y, th2 = theta, t2 = 0;
+                float x2 = scanX1, y2 = scanY1, th2 = scanT1, t2 = 0;
                 if (ok2)
                     parsePose(p2.raw, x2, y2, th2, t2);
                 else
                     nPose2Fail++;
-                b.moved = sqrtf((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
-                float d = fmodf(th2 - theta + 180.0f, 360.0f);
+                pendingScan.seq = ++scanSeq;
+                pendingScan.moved = sqrtf((x2 - scanX1) * (x2 - scanX1) +
+                                          (y2 - scanY1) * (y2 - scanY1));
+                float d = fmodf(th2 - scanT1 + 180.0f, 360.0f);
                 if (d < 0)
                     d += 360.0f;
-                b.turned = fabsf(d - 180.0f);
-                b.x = (x + x2) / 2.0f;
-                b.y = (y + y2) / 2.0f;
-                b.theta = theta + (d - 180.0f) / 2.0f;
+                pendingScan.turned = fabsf(d - 180.0f);
+                pendingScan.x = (scanX1 + x2) / 2.0f;
+                pendingScan.y = (scanY1 + y2) / 2.0f;
+                pendingScan.theta = scanT1 + (d - 180.0f) / 2.0f;
                 nScanOk++;
-                pushScan(b);
+                pushScan(pendingScan);
             });
         });
     });
