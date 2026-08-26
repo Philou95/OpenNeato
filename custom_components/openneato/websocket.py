@@ -211,13 +211,29 @@ async def ws_get_session(
     entry_id, data = resolved
     name = msg["name"]
 
+    # Serve the run in the map's frame, not the robot's frame of the day.
+    # Read before the cache, because it is part of what identifies a parse.
+    runner = data.get("mapper")
+    align = runner.alignment(name) if runner is not None else None
+
     # Key the cache on the name the compression cannot change, so a run
     # fetched while it was recording is still a hit once the firmware has
     # renamed it -- and so the card cannot make us download it twice.
-    cache: dict[tuple[str, str], dict[str, Any]] = hass.data.setdefault(DOMAIN, {}).setdefault(
-        CACHE_KEY, {}
-    )
-    cached = cache.get((entry_id, alignment_key(name)))
+    #
+    # And on the alignment, because it is an input to the parse and it
+    # *appears late*. A run stops recording a minute or so before the map
+    # merges it, and a card polling through that window gets a parse made
+    # with no alignment at all. Keyed on the name alone that parse is served
+    # for good, and the cleaned area sits a hand's width off the walls
+    # forever after -- 4.0% of its cells on top of a wall against 1.7% once
+    # aligned, measured on the 2026-08-26 run. Until the stable-name key
+    # existed the rename to `.hs` happened to flush it; nothing does now, so
+    # say what the parse depended on instead of relying on an accident.
+    cache: dict[tuple[str, str, Any], dict[str, Any]] = hass.data.setdefault(
+        DOMAIN, {}
+    ).setdefault(CACHE_KEY, {})
+    cache_key = (entry_id, alignment_key(name), align)
+    cached = cache.get(cache_key)
     if cached is not None:
         connection.send_result(msg["id"], {**cached, "floorplan": _floorplan_payload(hass, entry_id)})
         return
@@ -240,10 +256,6 @@ async def ws_get_session(
         connection.send_error(msg["id"], "fetch_failed", str(err))
         return
 
-    # Serve the run in the map's frame, not the robot's frame of the day.
-    runner = data.get("mapper")
-    align = runner.alignment(resolved) if runner is not None else None
-
     # Coverage-grid construction is CPU-bound; keep it off the event loop.
     try:
         parsed = await hass.async_add_executor_job(
@@ -262,7 +274,7 @@ async def ws_get_session(
     if not _is_recording(data["coordinator"], resolved):
         if len(cache) >= _CACHE_MAX:
             cache.pop(next(iter(cache)))
-        cache[(entry_id, alignment_key(resolved))] = parsed
+        cache[cache_key] = parsed
 
     connection.send_result(msg["id"], {**parsed, "floorplan": _floorplan_payload(hass, entry_id)})
 
@@ -321,8 +333,11 @@ async def ws_delete_session(
 
     # Drop it from the parsed-session cache so a later request cannot serve
     # a session the robot no longer has.
+    # Every parse of it, under whichever alignment it was made with.
     cache = hass.data.setdefault(DOMAIN, {}).setdefault(CACHE_KEY, {})
-    cache.pop((entry_id, alignment_key(name)), None)
+    key = alignment_key(name)
+    for stale in [k for k in cache if k[0] == entry_id and k[1] == key]:
+        cache.pop(stale, None)
 
     # Refresh so the picker's next listing no longer offers it.
     await data["coordinator"].async_request_refresh()
