@@ -50,6 +50,8 @@ POLL_INTERVAL = 4.0          # seconds between captures
 # file's own existence is the switch: it is written once and then never again,
 # so this costs a single run. About 1.5 MB for a full cycle; the cap is only a
 # runaway guard and a normal run is well under it.
+# Entre deux sauvegardes des captures en cours. Voir _persist_captures().
+CAPTURE_PERSIST_S = 300.0
 CAPTURE_DUMP_NAME = "openneato_captures.json"
 CAPTURE_DUMP_MAX = 3000
 # A scan is only geometry if the laser was actually sweeping. Rather than pin a
@@ -102,6 +104,14 @@ class LidarMapRunner:
         self.api = api
         self.coordinator = coordinator
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_map")
+        # Les captures d'un run en cours, pour qu'un redemarrage de Home
+        # Assistant ne les emporte pas : elles ne vivaient qu'en memoire.
+        self._cap_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_captures")
+        # Une copie de la carte juste avant une fusion qui la remplacerait.
+        self._bak_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_map_backup")
+        self._pending_captures: list | None = None
+        self._pending_session: str | None = None
+        self._last_persist = 0.0
         self._map: AccumulatedMap | None = None
         self._captures: list[tuple[float, float, float, list[tuple[int, int]]]] = []
         self._collecting = False
@@ -128,6 +138,14 @@ class LidarMapRunner:
                 "LIDAR map restored: %d wall cells from %d cleanings",
                 len(self._map.walls), self._map.sessions,
             )
+        saved = await self._cap_store.async_load()
+        if saved and saved.get("captures"):
+            self._pending_captures = saved["captures"]
+            self._pending_session = saved.get("session")
+            _LOGGER.info(
+                "LIDAR mapping: %d scans recovered from an interrupted run (%s)",
+                len(self._pending_captures), self._pending_session,
+            )
         self._unsub_coordinator = self.coordinator.async_add_listener(self._handle_update)
 
     @callback
@@ -151,6 +169,7 @@ class LidarMapRunner:
     def _start(self) -> None:
         self._collecting = True
         self._captures = []
+        self._last_persist = time.monotonic()
         self._interval = POLL_INTERVAL
         self._last_health = time.monotonic()
         self._collect_start = time.monotonic()
@@ -158,6 +177,23 @@ class LidarMapRunner:
         self._health_ref = self._recording_session()
         self._session_name = None
         self._note_session_name()
+        # Meme session qu'un run que Home Assistant a interrompu : on reprend
+        # ou on en etait au lieu de repartir de zero. Le nom vient du fichier
+        # que le robot est en train d'ecrire, donc l'egalite suffit a dire que
+        # c'est le meme nettoyage et pas le suivant.
+        if self._pending_captures and self._pending_session == self._session_name:
+            self._captures = [tuple(c) for c in self._pending_captures]
+            _LOGGER.info(
+                "LIDAR mapping: resuming %s with %d scans already collected",
+                self._session_name, len(self._captures),
+            )
+        elif self._pending_captures:
+            _LOGGER.info(
+                "LIDAR mapping: dropping %d scans from %s — this is a different run",
+                len(self._pending_captures), self._pending_session,
+            )
+        self._pending_captures = None
+        self._pending_session = None
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -266,6 +302,7 @@ class LidarMapRunner:
                         self._rssi(),
                     )
                 )
+                await self._persist_captures()
         except Exception as err:  # noqa: BLE001 -- one bad read must never end a run
             _LOGGER.debug("LIDAR mapping: sample failed (%s)", err)
         finally:
@@ -407,6 +444,12 @@ class LidarMapRunner:
             # fields the truncation used to throw away.
             build_session_grids, captures
         )
+        # La carte telle qu'elle est avant la fusion. merge_session peut la
+        # jeter entierement -- au troisieme refus d'affilee il considere que
+        # c'est elle qui ne correspond plus a la realite -- et cette decision
+        # est irreversible une fois ecrite. Cinq nettoyages de murs accumules
+        # meritent une copie avant d'etre effaces sur un jugement automatique.
+        before = self._map.as_dict()
         report = await self.hass.async_add_executor_job(
             self._map.merge_session, walls, floor, self._session_name, free,
             correction,
@@ -415,7 +458,18 @@ class LidarMapRunner:
         if report.get("rejected"):
             return
 
+        if report.get("reset"):
+            await self._bak_store.async_save(before)
+            _LOGGER.warning(
+                "LIDAR map: the stored map was discarded — a copy of the "
+                "previous one (%d cells, %d cleanings) is in %s_lidar_map_backup",
+                len(before.get("walls") or {}), before.get("sessions", 0), DOMAIN,
+            )
+
         await self._store.async_save(self._map.as_dict())
+        # Integrees : la copie de travail n'a plus de raison d'etre, et la
+        # laisser ferait reprendre un run deja fusionne au prochain demarrage.
+        await self._cap_store.async_remove()
         # The carve counts are the only sign free-space evidence did anything;
         # without them a chair fading off the map looks like nothing happened.
         _LOGGER.info(
@@ -448,6 +502,25 @@ class LidarMapRunner:
             "%d of %d scans below -75",
             median, worst, weak, len(vals),
         )
+
+    async def _persist_captures(self) -> None:
+        """Poser les captures sur le disque de temps en temps.
+
+        Elles ne vivaient qu'en memoire : un redemarrage de Home Assistant au
+        milieu d'un nettoyage emportait l'heure de collecte, et le run ne
+        laissait aucune trace dans la carte. Le firmware ne conserve jamais un
+        scan, donc rien ne pouvait le rattraper apres coup.
+
+        Espacees, parce qu'un run pese pres de deux megaoctets et que Home
+        Assistant ecrit souvent sur une carte SD. Le pire cas devient quelques
+        minutes de scans perdus au lieu de la totalite.
+        """
+        now = time.monotonic()
+        if now - self._last_persist < CAPTURE_PERSIST_S:
+            return
+        self._last_persist = now
+        payload = {"session": self._session_name, "captures": self._captures}
+        self._cap_store.async_delay_save(lambda: payload, 1.0)
 
     def _rssi(self) -> float:
         """Signal strength from the coordinator's last poll, or 0 if unknown."""
