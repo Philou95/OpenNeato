@@ -128,6 +128,41 @@ def _mappable(state: str) -> bool:
     )
 
 
+def _parse_scans(text: str) -> tuple[list[tuple], int]:
+    """NDJSON from the bridge -> capture tuples. CPU-bound; run in the executor.
+
+    Returns the scans worth keeping and the highest sequence number seen --
+    including the ones dropped for smear, or the bridge would resend them for
+    ever.
+    """
+    out: list[tuple] = []
+    high = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        high = max(high, int(rec.get("seq", 0)))
+        moved = float(rec.get("mv", 0.0))
+        turned = float(rec.get("tn", 0.0))
+        if moved > MAX_MOVE_DURING_SCAN_M or turned > MAX_TURN_DURING_SCAN_DEG:
+            # Smeared across two positions: worse than no scan at all, because
+            # it lays walls that were never there.
+            continue
+        points = [(a, v) for a, v in enumerate(rec.get("d") or []) if v]
+        if not points:
+            continue
+        out.append((
+            float(rec.get("x", 0.0)), float(rec.get("y", 0.0)),
+            float(rec.get("t", 0.0)), points, float(rec.get("rpm", 0.0)),
+            moved, turned,
+        ))
+    return out, high
+
+
 class LidarMapRunner:
     """Collects scans during a clean and maintains the accumulated map."""
 
@@ -617,29 +652,14 @@ class LidarMapRunner:
                     )
                 self._buffer_ok = False
                 return None
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                moved = float(rec.get("mv", 0.0))
-                turned = float(rec.get("tn", 0.0))
-                self._last_seq = max(self._last_seq, int(rec.get("seq", 0)))
-                if moved > MAX_MOVE_DURING_SCAN_M or turned > MAX_TURN_DURING_SCAN_DEG:
-                    # Smeared across two positions: worse than no scan at all,
-                    # because it lays walls that were never there.
-                    continue
-                points = [(a, v) for a, v in enumerate(rec.get("d") or []) if v]
-                if not points:
-                    continue
-                self._captures.append((
-                    float(rec.get("x", 0.0)), float(rec.get("y", 0.0)),
-                    float(rec.get("t", 0.0)), points,
-                    float(rec.get("rpm", 0.0)), moved, turned, self._rssi(),
-                ))
+            # Parsed off the event loop. Each record carries 360 distances, and
+            # a catch-up tick can bring two dozen of them: building those lists
+            # inline is CPU work in the middle of Home Assistant's loop, which
+            # is exactly what makes the rest of the house feel slow.
+            scans, high = await self.hass.async_add_executor_job(_parse_scans, text)
+            self._last_seq = max(self._last_seq, high)
+            for x, y, t, points, rpm, moved, turned in scans:
+                self._captures.append((x, y, t, points, rpm, moved, turned, self._rssi()))
                 total += 1
                 if self._buffer_ok is None:
                     self._buffer_ok = True
