@@ -1112,9 +1112,27 @@ def build_session_grids(
     # One cell of margin closes every one of them and returns 163 wall cells,
     # for three cells of phantom kept a little longer. Two cells of margin buys
     # no further holes closed and costs more, so the margin is exactly one.
+    # ...but "saw as wall" has to mean more than one grazing return.
+    #
+    # A cell at the tip of a wall is hit from every direction the robot can
+    # walk around it, and passed through by the beams that go by on their way
+    # to something further off. Protecting it on a single return let the map
+    # draw a wall 20 cm thick and 10 cm too long where the navigation says the
+    # real one tapers from 9 cm to nothing -- Philou's "the end of the wall
+    # looks much thicker than the rest".
+    #
+    # So a cell keeps its protection only while this run's returns are worth at
+    # least as much as the times it was seen through. Measured over the
+    # 2026-08-27 run: the tip falls from 20.0 cm to 12.5, the median wall from
+    # 10.0 to 7.5 against a real 9.4, the box's outer edge from 35 to 32 cm --
+    # and there are *fewer* isolated cells than before, so this trims smear
+    # rather than punching holes.
+    strong = {
+        cell for cell, hits in walls.items() if hits >= seen_through.get(cell, 0)
+    }
     free -= {
         (cx + dx, cy + dy)
-        for cx, cy in walls
+        for cx, cy in strong
         for dx in (-1, 0, 1)
         for dy in (-1, 0, 1)
     }
