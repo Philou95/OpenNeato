@@ -391,9 +391,10 @@ class LidarMapRunner:
         # without them a chair fading off the map looks like nothing happened.
         _LOGGER.info(
             "LIDAR map updated: %d wall cells after %d cleanings "
-            "(%d cells driven through, %d faded out)",
+            "(%d cells known empty, %d weakened, %d faded out)",
             report.get("total_walls", 0), report.get("sessions", 0),
-            report.get("carved", 0), report.get("faded", 0),
+            report.get("carved", 0), report.get("weakened", 0),
+            report.get("faded", 0),
         )
 
     @staticmethod

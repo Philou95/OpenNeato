@@ -77,21 +77,35 @@ WALL_MIN_HITS = 3            # floor, and the whole rule for a young map.
 # contradicts. At four sessions it demands 48 hits and leaves 1157 cells --
 # the outline breaks apart.
 #
-# A quantile is self-calibrating: it keeps a stable *share* of the map however
-# many cleanings pile up, and rises on its own as noise accumulates. At four
-# sessions the 75th percentile lands on 19 -- which is where an earlier
-# by-eye sweep had put the threshold after two sessions, so the rule agrees
-# with the judgement it replaces.
-WALL_KEEP_QUANTILE = 0.75
+# A quantile was tried first and had to go. It keeps a stable *share* of the
+# map, which self-calibrates only while the map's shape stays the same -- and
+# it does not: three quarters of the cells were strays, so the 75th percentile
+# was really measuring the noise floor, not the walls. The moment
+# scan_free_cells() started deleting those strays the same rule cut into the
+# walls instead. Simulated on this map: the outline dropped to 65% of its
+# cells after one cleaning, undoing the perforation fixed the same day.
+#
+# Anchor on the signal instead. A cell counts as wall at a fixed fraction of
+# what the best-seen walls score, so the bar rises with the session count --
+# which is what the quantile was for -- while how much junk sits underneath
+# stops mattering. Simulated over the same three cleanings, the outline holds
+# at 90% instead of 65%, and what it does drop is stray.
+#
+# p95 rather than the maximum: one wildly over-seen cell must not set the bar
+# for the map. The fraction is calibrated to agree with the rule it replaces
+# on the map as it stands -- 0.209 there -- so today's plan is unchanged and
+# only the failure mode differs.
+WALL_STRONG_QUANTILE = 0.95
+WALL_KEEP_FRACTION = 0.21
 
 
-def wall_threshold(walls: dict[Any, int]) -> int:
+def wall_threshold(walls: dict[Any, int]) -> float:
     """Hit count a cell must reach to count as wall, for this map."""
     if not walls:
         return WALL_MIN_HITS
     counts = sorted(walls.values())
-    idx = min(len(counts) - 1, int(len(counts) * WALL_KEEP_QUANTILE))
-    return max(WALL_MIN_HITS, counts[idx])
+    strong = counts[min(len(counts) - 1, int(len(counts) * WALL_STRONG_QUANTILE))]
+    return max(WALL_MIN_HITS, WALL_KEEP_FRACTION * strong)
 
 
 # Movement tolerated between the poses bracketing a scan. Past these the scan
@@ -126,6 +140,22 @@ MAX_SWATH_M = 1.5
 # compound its way through a wall.
 CARVE_HALF_M = 0.05
 CARVE_FACTOR = 0.5
+# Free space read off the beams themselves -- see scan_free_cells().
+#
+# The guard keeps a beam from rubbing out the surface it just found, and it is
+# deliberately one cell and no more. The things worth forgetting are things
+# left against a wall, which by definition stand a few centimetres off its
+# face: on Philou's map the planks' echo sits 2.5 to 7.5 cm above the wall's
+# real face, so a 5 cm guard would shelter the exact band it needs to clear.
+# One cell absorbs the quantisation of a single beam, and the real protection
+# is elsewhere -- every cell any beam of this run landed on is exempt, and a
+# wall face is landed on hundreds of times per run.
+FREE_ENDPOINT_GUARD_M = CELL_M
+# How many separate scans must see through a cell before its wall count is
+# reduced. One stray beam from a bad pose crosses a wall once or twice; real
+# open floor is crossed by dozens, so this costs nothing and rules the strays
+# out. A cell this run also saw as wall is exempt whatever the count.
+FREE_MIN_SCANS = 3
 ROBOT_RADIUS_M = CLEAN_HALF_M   # kept for callers that want a footprint radius
 
 # The turret sits at the BACK of the robot while the wheels are on a central
@@ -243,6 +273,52 @@ def project_scan(
         wx = ox + d * (c * ct - s * st)
         wy = oy + d * (s * ct + c * st)
         out.append((math.floor(wx * inv), math.floor(wy * inv)))
+    return out
+
+
+def scan_free_cells(
+    x: float, y: float, theta_deg: float, points: Iterable[tuple[int, int]]
+) -> set[tuple[int, int]]:
+    """Cells this scan proves are empty: the ones its beams passed through.
+
+    `project_scan` keeps only where each beam *stopped*. Everything it crossed
+    on the way is evidence just as strong and was being thrown away, and that
+    is why the map had no working memory of removal. The only other free-space
+    evidence was the 10 cm band around the robot's centre -- but the centre
+    never comes within 16 cm of a surface, so an 11 cm ring around every wall
+    could never be revisited. Measured on Philou's map: that band reached
+    7 wall cells out of 4587. Anything parked against a wall and later taken
+    away stayed drawn for good, and a wall with planks against it kept the
+    planks' face instead of its own.
+
+    A beam stops 5 cm short here. Its endpoint is a surface found to within
+    the pose error, and without the guard a scan would rub out the very wall
+    it just measured.
+
+    A return past MAX_RANGE_M still proves the near 3.5 m empty even though
+    `project_scan` discards it as too grazing to place, so it is cast too. A
+    *missing* return proves nothing -- dark and glancing surfaces read as
+    zero -- and is skipped.
+    """
+    tr = math.radians(theta_deg)
+    ct, st = math.cos(tr), math.sin(tr)
+    ox = x - LIDAR_BEHIND_M * ct
+    oy = y - LIDAR_BEHIND_M * st
+    inv = 1.0 / CELL_M
+    out: set[tuple[int, int]] = set()
+    for angle, dist_mm in points:
+        if dist_mm <= 0:
+            continue
+        d = min(dist_mm / 1000.0 - FREE_ENDPOINT_GUARD_M, MAX_RANGE_M)
+        if d <= 0:
+            continue
+        ar = math.radians(angle)
+        c, s = math.cos(ar), math.sin(ar)
+        ux = c * ct - s * st
+        uy = s * ct + c * st
+        for k in range(int(d / CELL_M)):
+            t = k * CELL_M
+            out.add((math.floor((ox + t * ux) * inv), math.floor((oy + t * uy) * inv)))
     return out
 
 
@@ -737,7 +813,7 @@ class AccumulatedMap:
         # this the only way a removed chair leaves the map is by the adaptive
         # threshold slowly outgrowing it -- measured at eleven cleanings.
         if free:
-            faded = 0
+            faded = weakened = 0
             for cell in free:
                 previous = self.walls.get(cell)
                 if previous is None:
@@ -748,8 +824,13 @@ class AccumulatedMap:
                     faded += 1
                 else:
                     self.walls[cell] = reduced
+                    weakened += 1
             report["carved"] = len(free)
             report["faded"] = faded
+            # The ones still on the map but weaker are what a thing recently
+            # taken away looks like on its way out; without this the log shows
+            # nothing at all until the cell finally drops off.
+            report["weakened"] = weakened
 
         self.floor |= floor
         self.sessions += 1
@@ -922,6 +1003,9 @@ def build_session_grids(
     walls: dict[tuple[int, int], float] = {}
     floor: set[tuple[int, int]] = set()
     free: set[tuple[int, int]] = set()
+    # How many scans saw through each cell. Counted rather than unioned so a
+    # single stray beam cannot clear a wall on its own.
+    seen_through: dict[tuple[int, int], int] = {}
     # Running correction: drift accumulates, so each scan starts from the
     # previous scan's answer rather than from raw odometry again.
     dx = dy = dtheta = 0.0
@@ -946,6 +1030,8 @@ def build_session_grids(
                 x, y, theta = mx, my, mtheta
         for cell in project_scan(x, y, theta, points):
             walls[cell] = walls.get(cell, 0.0) + weight
+        for cell in scan_free_cells(x, y, theta, points):
+            seen_through[cell] = seen_through.get(cell, 0) + 1
         # Paint from the previous corrected pose, so the cleaned band follows
         # the path the matcher settled on rather than raw odometry.
         if prev is None:
@@ -956,8 +1042,14 @@ def build_session_grids(
             free.update(carve_swath(prev[0], prev[1], x, y))
         prev = (x, y)
         placed += 1
+    # Everything the beams saw through often enough joins what the robot drove
+    # over. This is the half that reaches: driving proves a 10 cm band around a
+    # path that never comes near a wall, while looking reaches everything in
+    # the room the robot can see, which is where anything removed used to be.
+    free |= {cell for cell, n in seen_through.items() if n >= FREE_MIN_SCANS}
     # A cell this run saw as wall is not carved by this run: the robot skirting
-    # a wall must not undo the scans that just found it.
+    # a wall must not undo the scans that just found it, and a beam grazing
+    # along a wall must not either.
     free -= walls.keys()
     return walls, floor, free
 
