@@ -321,6 +321,16 @@ class LidarMapRunner:
                 self._collect_start, time.monotonic() - HEALTH_GRACE
             )
             return
+        # Before the sampling block, and deliberately so: both of these used to
+        # sit after it, and collecting from the bridge's buffer returns early
+        # from the try -- so the moment that path started working, the session
+        # name was never learned and the health window never advanced. The run
+        # of 2026-08-27 merged with no alignment stored at all, which is what
+        # draws a replay a quarter turn off the walls.
+        self._note_session_name()
+        if time.monotonic() - self._last_health >= HEALTH_EVERY:
+            self._check_health()
+
         self._busy = True
         try:
             # Prefer what the bridge kept for us. It samples on its own loop
@@ -424,10 +434,7 @@ class LidarMapRunner:
         finally:
             self._busy = False
 
-        self._note_session_name()
 
-        if time.monotonic() - self._last_health >= HEALTH_EVERY:
-            self._check_health()
 
     def _note_session_name(self) -> None:
         """Learn which file this run is writing to, retrying until it is known.
