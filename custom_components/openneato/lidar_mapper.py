@@ -734,6 +734,7 @@ class AccumulatedMap:
         floor: set[tuple[int, int]],
         session_name: str | None = None,
         free: set[tuple[int, int]] | None = None,
+        correction: tuple[float, float] = (0.0, 0.0),
     ) -> dict[str, Any]:
         """Fold one cleaning into the accumulated map, re-aligning it first."""
         report: dict[str, Any] = {"session_walls": len(walls), "realigned": False}
@@ -801,8 +802,16 @@ class AccumulatedMap:
 
         self.rejects = 0
         if session_name:
+            # The correction rides with the alignment because it is the other
+            # half of the same journey: raw log -> corrected frame -> map.
+            # In cells, like dx and dy, and applied before the rotation
+            # because that is where scan matching applied it.
+            cx = correction[0] / CELL_M
+            cy = correction[1] / CELL_M
             self.alignments[alignment_key(session_name)] = (
-                (quarter, dx, dy, fine) if self.walls else (0, 0, 0, 0.0)
+                (quarter, dx, dy, fine, cx, cy)
+                if self.walls
+                else (0, 0, 0, 0.0, cx, cy)
             )
 
         for cell, n in walls.items():
@@ -986,7 +995,12 @@ def match_pose(
 def build_session_grids(
     captures: list[tuple[float, ...]],
     match: bool = True,
-) -> tuple[dict[tuple[int, int], float], set[tuple[int, int]], set[tuple[int, int]]]:
+) -> tuple[
+    dict[tuple[int, int], float],
+    set[tuple[int, int]],
+    set[tuple[int, int]],
+    tuple[float, float],
+]:
     """Turn a run's captures into wall hit counts and traversed floor.
 
     Captures may carry the movement measured during the scan as two extra
@@ -997,6 +1011,12 @@ def build_session_grids(
     Each scan is also matched onto the map built from the ones before it,
     which is what stops odometry drift accumulating across a run. Pass
     match=False for the raw-odometry behaviour.
+
+    Also returns the mean pose correction scan matching applied, in metres.
+    The walls come out in the corrected frame; the replay's path and coverage
+    are read from the robot's own log and are still in the raw one, so
+    whoever serves them has to be told the difference. Leaving it out put the
+    cleaned area 8 cm off the walls on the 2026-08-26 run.
 
     CPU-bound; call it from the executor.
     """
@@ -1011,6 +1031,7 @@ def build_session_grids(
     dx = dy = dtheta = 0.0
     matching = match
     placed = 0
+    sum_dx = sum_dy = 0.0
     prev: tuple[float, float] | None = None
     for capture in captures:
         x, y, theta, points = capture[:4]
@@ -1042,6 +1063,8 @@ def build_session_grids(
             free.update(carve_swath(prev[0], prev[1], x, y))
         prev = (x, y)
         placed += 1
+        sum_dx += dx
+        sum_dy += dy
     # Everything the beams saw through often enough joins what the robot drove
     # over. This is the half that reaches: driving proves a 10 cm band around a
     # path that never comes near a wall, while looking reaches everything in
@@ -1051,7 +1074,8 @@ def build_session_grids(
     # a wall must not undo the scans that just found it, and a beam grazing
     # along a wall must not either.
     free -= walls.keys()
-    return walls, floor, free
+    correction = (sum_dx / placed, sum_dy / placed) if placed else (0.0, 0.0)
+    return walls, floor, free, correction
 
 
 def parse_pose(raw: str) -> tuple[float, float, float, float] | None:

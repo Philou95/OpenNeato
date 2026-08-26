@@ -262,18 +262,30 @@ def _apply_alignment(
 ) -> list[tuple[float, float, float, float]]:
     """Rotate and shift a run onto the accumulated map's frame.
 
-    `align` is (quarter, dx, dy, fine) exactly as align_to_reference() returned
-    it: quarter turns counter-clockwise, then a fine angle, then a shift in
-    *cells*. Alignments stored before the fine sweep existed carry three fields
-    and mean fine = 0.
+    `align` is (quarter, dx, dy, fine, cx, cy) as merge_session stored it:
+    first the pose correction scan matching applied during the run, then a
+    quarter turn counter-clockwise, then a fine angle, then a shift -- all the
+    offsets in *cells*. Older alignments carry three or four fields and mean
+    fine = 0 and no correction.
+
+    The correction comes first because that is where it was applied: the map's
+    walls were built from poses scan matching had already moved, while this
+    path is the robot's own log, untouched. Skipping it leaves the cleaned area
+    beside the walls by whatever the run drifted -- 8 cm on 2026-08-26, and in
+    the opposite direction from forgetting the shift, which is how it was
+    spotted.
     """
     quarter, dx, dy = align[0], align[1], align[2]
     fine = align[3] if len(align) > 3 else 0.0
+    corr_x = align[4] * HISTORY_CELL_SIZE_M if len(align) > 5 else 0.0
+    corr_y = align[5] * HISTORY_CELL_SIZE_M if len(align) > 5 else 0.0
     quarter %= 4
     shift_x = dx * HISTORY_CELL_SIZE_M
     shift_y = dy * HISTORY_CELL_SIZE_M
     out = []
     for x, y, t, ts in norm:
+        x += corr_x
+        y += corr_y
         if quarter == 1:
             x, y = -y, x
         elif quarter == 2:
