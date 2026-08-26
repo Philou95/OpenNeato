@@ -26,6 +26,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 from datetime import timedelta
 
+from .api import OpenNeatoApiError
 from .const import CELL_SIZE_M, DOMAIN
 from .lidar_mapper import (
     plan_calibration,
@@ -52,6 +53,10 @@ POLL_INTERVAL = 4.0          # seconds between captures
 # runaway guard and a normal run is well under it.
 # Entre deux sauvegardes des captures en cours. Voir _persist_captures().
 CAPTURE_PERSIST_S = 300.0
+# Batches collected per tick. The bridge sends a few scans at a time on
+# purpose, so catching up after an outage is spread over several ticks rather
+# than blocking one of them.
+DRAIN_MAX_BATCHES = 6
 CAPTURE_DUMP_NAME = "openneato_captures.json"
 CAPTURE_DUMP_MAX = 3000
 # A scan is only geometry if the laser was actually sweeping. Rather than pin a
@@ -156,6 +161,10 @@ class LidarMapRunner:
         self._health_ref: dict[str, Any] | None = None
         self._session_name: str | None = None
         self._contributes = True
+        # Collecting from the bridge's own buffer: None until we find out,
+        # False on a bridge too old to have one.
+        self._buffer_ok: bool | None = None
+        self._last_seq = 0
         self.last_report: dict[str, Any] = {}
 
     async def async_load(self) -> None:
@@ -269,6 +278,13 @@ class LidarMapRunner:
             return
         self._busy = True
         try:
+            # Prefer what the bridge kept for us. It samples on its own loop
+            # while cleaning, so a WiFi outage no longer costs the scans taken
+            # during it -- and there is no HTTP round trip per scan competing
+            # with the firmware's own pose journal for the serial link.
+            if self._buffer_ok is not False:
+                if await self._drain_buffer() is not None:
+                    return
             # Pose first -- the scan read is the slow half, so this timestamp
             # sits closest to the scan's own instant.
             raw = await self.api.send_serial_command("GetRobotPos Smooth")
@@ -563,6 +579,59 @@ class LidarMapRunner:
         self._last_persist = now
         payload = {"session": self._session_name, "captures": self._captures}
         self._cap_store.async_delay_save(lambda: payload, 1.0)
+
+    async def _drain_buffer(self) -> int | None:
+        """Collect the scans the bridge buffered. None if it has no buffer.
+
+        Repeats until the bridge says it has nothing more, bounded so one tick
+        cannot run away: after a long outage there may be dozens waiting, and
+        catching up over several ticks is fine.
+        """
+        total = 0
+        for _ in range(DRAIN_MAX_BATCHES):
+            try:
+                text = await self.api.get_lidar_buffer(self._last_seq)
+            except OpenNeatoApiError as err:
+                if "404" not in str(err):
+                    raise
+                if self._buffer_ok is None:
+                    _LOGGER.info(
+                        "LIDAR mapping: this bridge has no scan buffer — sampling directly"
+                    )
+                self._buffer_ok = False
+                return None
+            if self._buffer_ok is None:
+                self._buffer_ok = True
+                _LOGGER.info("LIDAR mapping: collecting from the bridge's own buffer")
+            if not text.strip():
+                break
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                moved = float(rec.get("mv", 0.0))
+                turned = float(rec.get("tn", 0.0))
+                self._last_seq = max(self._last_seq, int(rec.get("seq", 0)))
+                if moved > MAX_MOVE_DURING_SCAN_M or turned > MAX_TURN_DURING_SCAN_DEG:
+                    # Smeared across two positions: worse than no scan at all,
+                    # because it lays walls that were never there.
+                    continue
+                points = [(a, v) for a, v in enumerate(rec.get("d") or []) if v]
+                if not points:
+                    continue
+                self._captures.append((
+                    float(rec.get("x", 0.0)), float(rec.get("y", 0.0)),
+                    float(rec.get("t", 0.0)), points,
+                    float(rec.get("rpm", 0.0)), moved, turned, self._rssi(),
+                ))
+                total += 1
+        if total:
+            await self._persist_captures()
+        return total
 
     def _rssi(self) -> float:
         """Signal strength from the coordinator's last poll, or 0 if unknown."""

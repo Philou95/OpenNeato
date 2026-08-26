@@ -255,9 +255,45 @@ class OpenNeatoApiClient:
         """Get cleaning history sessions."""
         return await self._get("/api/history")  # type: ignore[return-value]
 
+    async def get_lidar_buffer(self, after: int) -> str:
+        """Collect the scans the bridge buffered while cleaning.
+
+        Returns NDJSON, one scan per line, or an empty string when there is
+        nothing new. `after` is the highest sequence number already held; the
+        bridge drops everything up to it, which is what clears the buffer.
+
+        Raises OpenNeatoApiError with status 404 on a bridge too old to have
+        the endpoint, which is the caller's signal to sample the old way.
+        """
+        return await self._get_text(f"/api/lidar/buffer?after={int(after)}")
+
     async def get_lidar(self) -> dict[str, Any]:
         """Get the latest LDS LIDAR scan (360 points)."""
         return await self._get("/api/lidar")
+
+    async def _get_text(self, path: str) -> str:
+        """GET returning raw text, drained to EOF like a session download."""
+        url = f"{self._base_url}{path}"
+        try:
+            async with timeout(TIMEOUT):
+                async with self._session.get(url) as response:
+                    response.raise_for_status()
+                    buf = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        buf.extend(chunk)
+                        if len(buf) > MAX_HISTORY_RESPONSE_BYTES:
+                            raise OpenNeatoApiError(f"{path} exceeds the size cap")
+                    return bytes(buf).decode("utf-8", errors="replace")
+        except aiohttp.ClientConnectionError as err:
+            raise OpenNeatoConnectionError(
+                f"Unable to connect to OpenNeato at {self._host}: {err}"
+            ) from err
+        except aiohttp.ClientResponseError as err:
+            raise OpenNeatoApiError(f"API error from {path}: {err.status} {err.message}") from err
+        except TimeoutError as err:
+            raise OpenNeatoConnectionError(
+                f"Timeout connecting to OpenNeato at {self._host}"
+            ) from err
 
     async def get_history_session(self, filename: str) -> str:
         """Download the raw JSONL data for a specific cleaning session.

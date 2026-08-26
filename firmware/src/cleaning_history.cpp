@@ -56,7 +56,193 @@ void CleaningHistory::notifyCleanStart() {
     setInterval(HISTORY_INTERVAL_ACTIVE_MS);
 }
 
+// Defined further down, next to the snapshot code it was written for.
+static bool parsePose(const String& raw, float& x, float& y, float& theta, float& time);
+
+// -- LIDAR delivery buffer ---------------------------------------------------
+//
+// Strict FIFO with a RAM window over a flash queue: the ring holds the head,
+// and once it is full everything newer is appended to a spill file. Refilling
+// takes from the file's head, which is always newer than anything still in the
+// ring, so appending it to the back keeps the order.
+
+void CleaningHistory::sampleScan() {
+    if (scanPending || fetchPending)
+        return; // the snapshot chain owns the serial link; do not fight it
+    if (millis() - lastScanMs < LIDAR_SCAN_INTERVAL_MS)
+        return;
+    // Nobody is collecting. Sampling would only burn serial time and, once the
+    // ring filled, flash. Home Assistant asking for a batch turns this back on.
+    if (lastDrainMs == 0 || millis() - lastDrainMs > LIDAR_DRAIN_IDLE_MS)
+        return;
+
+    lastScanMs = millis();
+    scanPending = true;
+    // Pose first: it is the cheap half, so its timestamp sits closest to the
+    // scan, and capturing four floats beats capturing a 5 760-byte scan.
+    neato.getRobotPos(true, [this](bool posOk, const RobotPosData& pos) {
+        float x = 0, y = 0, theta = 0, t = 0;
+        if (posOk)
+            parsePose(pos.raw, x, y, theta, t);
+        neato.getLdsScan([this, x, y, theta, t](bool ok, const LdsScanData& scan) {
+            if (!ok) {
+                scanPending = false;
+                return;
+            }
+            BufferedScan b;
+            b.seq = ++scanSeq;
+            b.ts = static_cast<uint32_t>(t);
+            b.rpm = scan.rotationSpeed;
+            for (int i = 0; i < scan.validPoints && i < 360; i++) {
+                int a = scan.points[i].angleDeg;
+                long d = scan.points[i].distMM;
+                if (a >= 0 && a < 360 && d > 0 && d < 65535)
+                    b.dist[a] = static_cast<uint16_t>(d);
+            }
+            // A second pose, to bracket the scan. The pose recorded is the
+            // midpoint and the movement between the two is what grades it --
+            // the same thing the integration was doing over HTTP.
+            neato.getRobotPos(true, [this, b, x, y, theta](bool ok2, const RobotPosData& p2) mutable {
+                scanPending = false;
+                float x2 = x, y2 = y, th2 = theta, t2 = 0;
+                if (ok2)
+                    parsePose(p2.raw, x2, y2, th2, t2);
+                b.moved = sqrtf((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
+                float d = fmodf(th2 - theta + 180.0f, 360.0f);
+                if (d < 0)
+                    d += 360.0f;
+                b.turned = fabsf(d - 180.0f);
+                b.x = (x + x2) / 2.0f;
+                b.y = (y + y2) / 2.0f;
+                b.theta = theta + (d - 180.0f) / 2.0f;
+                pushScan(b);
+            });
+        });
+    });
+}
+
+void CleaningHistory::pushScan(const BufferedScan& scan) {
+    if (!spilling && scanRing.size() < LIDAR_BUFFER_SCANS) {
+        scanRing.push_back(scan);
+        return;
+    }
+    // The ring is full, so the outage has outlasted it. Only now does the
+    // flash get involved -- which is why a normal run never writes here.
+    if (!spilling) {
+        spilling = true;
+        spillReadOffset = 0;
+        SPIFFS.remove(LIDAR_SPILL_PATH);
+        LOG("HIST", "LIDAR buffer full - spilling to flash");
+    }
+    if (!appendSpill(scan))
+        LOG("HIST", "LIDAR spill full - dropping scan %u", scan.seq);
+}
+
+bool CleaningHistory::appendSpill(const BufferedScan& scan) {
+    // Bounded twice: by its own cap, and by what the filesystem can spare. The
+    // pose journal is the only record of where the robot went, and it must
+    // never be the thing that runs out of room.
+    size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+    if (freeBytes < LIDAR_SPILL_MIN_FREE)
+        return false;
+    File f = SPIFFS.open(LIDAR_SPILL_PATH, FILE_APPEND);
+    if (!f)
+        return false;
+    if (f.size() + sizeof(BufferedScan) > LIDAR_SPILL_MAX_BYTES) {
+        f.close();
+        return false;
+    }
+    bool ok = f.write(reinterpret_cast<const uint8_t *>(&scan), sizeof(scan)) == sizeof(scan);
+    f.close();
+    return ok;
+}
+
+void CleaningHistory::refillFromSpill() {
+    File f = SPIFFS.open(LIDAR_SPILL_PATH, FILE_READ);
+    if (!f) {
+        spilling = false;
+        spillReadOffset = 0;
+        return;
+    }
+    size_t total = f.size();
+    while (scanRing.size() < LIDAR_BUFFER_SCANS && spillReadOffset + sizeof(BufferedScan) <= total) {
+        f.seek(spillReadOffset);
+        BufferedScan b;
+        if (f.read(reinterpret_cast<uint8_t *>(&b), sizeof(b)) != sizeof(b))
+            break;
+        spillReadOffset += sizeof(BufferedScan);
+        scanRing.push_back(b);
+    }
+    bool drained = spillReadOffset + sizeof(BufferedScan) > total;
+    f.close();
+    if (drained) {
+        // Fully read back: deleted here, on the loop task, never from a
+        // handler. This is the "cleared on each transmission" half.
+        SPIFFS.remove(LIDAR_SPILL_PATH);
+        spilling = false;
+        spillReadOffset = 0;
+        LOG("HIST", "LIDAR spill drained and removed");
+    }
+}
+
+void CleaningHistory::buildBatch() {
+    String out;
+    out.reserve(LIDAR_BATCH_SCANS * 2200);
+    size_t n = 0;
+    for (const BufferedScan& b: scanRing) {
+        if (n >= LIDAR_BATCH_SCANS)
+            break;
+        if (n == 0)
+            batchFirstSeq = b.seq;
+        batchLastSeq = b.seq;
+        out += "{\"seq\":" + String(b.seq) + ",\"ts\":" + String(b.ts);
+        out += ",\"x\":" + String(b.x, 3) + ",\"y\":" + String(b.y, 3);
+        out += ",\"t\":" + String(b.theta, 1) + ",\"rpm\":" + String(b.rpm, 2);
+        out += ",\"mv\":" + String(b.moved, 4) + ",\"tn\":" + String(b.turned, 2);
+        out += ",\"d\":[";
+        for (int i = 0; i < 360; i++) {
+            if (i)
+                out += ',';
+            out += String(b.dist[i]);
+        }
+        out += "]}\n";
+        n++;
+    }
+    batchJson = out;
+}
+
+void CleaningHistory::serviceScanBuffer() {
+    uint32_t ack = ackedSeq;
+    while (!scanRing.empty() && scanRing.front().seq <= ack)
+        scanRing.pop_front();
+    if (batchLastSeq && ack >= batchLastSeq) {
+        batchJson = "";
+        batchFirstSeq = 0;
+        batchLastSeq = 0;
+    }
+    if (spilling && scanRing.size() < LIDAR_BUFFER_SCANS)
+        refillFromSpill();
+    if (batchJson.isEmpty() && !scanRing.empty())
+        buildBatch();
+}
+
+String CleaningHistory::takeScanBatch(uint32_t after) {
+    // Runs on the AsyncTCP task. Touches no file and no container the loop task
+    // mutates: it reads a finished String and writes one integer.
+    lastDrainMs = millis();
+    ackedSeq = after;
+    if (batchJson.isEmpty() || batchFirstSeq <= after)
+        return String();
+    return batchJson;
+}
+
 void CleaningHistory::tick() {
+    // Before any early return: a reader must be able to drain the buffer even
+    // while the session is compressing or a serial fetch is latched.
+    serviceScanBuffer();
+    if (collecting)
+        sampleScan();
+
     // Refresh the cached /api/history listing here rather than in the HTTP
     // handler, so all SPIFFS enumeration stays on the loop task. Skipped
     // while compressing: the source and destination files are in flux.

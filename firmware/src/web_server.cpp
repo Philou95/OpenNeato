@@ -91,6 +91,22 @@ void WebServer::registerApiRoutes() {
             {});
     registerGetRoute("/api/state", neato, &NeatoSerial::getState, {});
     registerGetRoute("/api/error", neato, &NeatoSerial::getErr, {});
+    // Registered before /api/lidar: ESPAsyncWebServer matches routes by prefix,
+    // so the shorter path would otherwise swallow this one.
+    //
+    // Collects the scans the bridge buffered while cleaning. `after` is the
+    // highest sequence number the caller already holds; everything up to it is
+    // dropped. Pure RAM on this task -- the batch was built on the loop task,
+    // because reading SPIFFS here is what truncated /api/history.
+    server.on("/api/lidar/buffer", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        unsigned long startMs = millis();
+        uint32_t after = 0;
+        if (request->hasParam("after"))
+            after = strtoul(request->getParam("after")->value().c_str(), nullptr, 10);
+        String body = historyMgr.takeScanBatch(after);
+        logger.logRequest(HTTP_GET, "/api/lidar/buffer", 200, millis() - startMs);
+        request->send(200, "application/x-ndjson", body);
+    });
     registerGetRoute("/api/lidar", neato, &NeatoSerial::getLdsScan, {});
     registerGetRoute("/api/user-settings", neato, &NeatoSerial::getUserSettings, {});
     registerGetRoute("/api/sensors", neato,

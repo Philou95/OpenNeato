@@ -228,6 +228,21 @@ enum CommandStatus {
 #define HISTORY_MAX_FILES 20 // Maximum number of archived session files to keep
 #define HISTORY_AREA_CELL_M 0.5f // Coarse grid cell size in meters for visited-area estimation
 #define HISTORY_MIN_SNAPSHOTS 3 // Discard sessions with fewer snapshots (too short to render a useful map)
+// -- LIDAR delivery buffer ---------------------------------------------------
+// The bridge samples the LIDAR itself while cleaning and holds the scans until
+// Home Assistant collects them. Nobody else records a scan -- the firmware
+// never persisted one -- so an outage used to cost exactly the scans taken
+// during it.
+#define LIDAR_SCAN_INTERVAL_MS 4000 // One scan every 4 s, the rate HA polled at
+#define LIDAR_BUFFER_SCANS 34 // 34 x 744 B ~ 25 KB of RAM, about two minutes
+#define LIDAR_BATCH_SCANS 4 // Per delivery: ~8 KB of JSON, bounded on purpose
+#define LIDAR_SPILL_PATH "/lidar_spill.bin"
+#define LIDAR_SPILL_MAX_BYTES 200000 // ~270 scans, about 18 minutes
+#define LIDAR_SPILL_MIN_FREE 120000 // Never crowd out the pose journal
+// Buffering only runs while someone is actually collecting. A bridge flashed
+// ahead of the integration must not fill its flash for a reader never coming.
+#define LIDAR_DRAIN_IDLE_MS 120000
+
 #define HISTORY_IMPORT_MAX_BYTES 262144 // 256 KB max import file size (2h clean at 2s intervals ~ 180KB)
 
 // Task Watchdog Timer (TWDT) — hardware watchdog that resets the ESP32 if

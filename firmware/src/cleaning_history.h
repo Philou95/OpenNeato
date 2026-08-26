@@ -2,6 +2,7 @@
 #define CLEANING_HISTORY_H
 
 #include <Arduino.h>
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
@@ -41,6 +42,27 @@ struct HistorySessionInfo {
     String summary; // Raw JSON of last line ({"type":"summary",...}), empty if still recording
 };
 
+// One LIDAR scan held for delivery, compacted.
+//
+// LdsScanData is 5 760 bytes -- 360 points of four ints -- and almost all of
+// it is waste for this purpose: the angle is the index, the distance fits a
+// uint16, and neither intensity nor errorCode is used to build a map. What is
+// left is 744 bytes, which is what makes a useful buffer fit in RAM at all.
+struct BufferedScan {
+    uint32_t seq = 0;
+    uint32_t ts = 0; // robot clock at the scan
+    float x = 0.0f, y = 0.0f, theta = 0.0f;
+    float rpm = 0.0f;
+    // How far the robot moved and turned *during* the scan. A scan takes
+    // 0.6 to 1.7 s while the robot keeps driving, so the returns are smeared
+    // by whatever it did meanwhile, and the mapper weighs each scan by this.
+    // Without it every scan would count the same and the smear filtering
+    // would be lost.
+    float moved = 0.0f;
+    float turned = 0.0f;
+    uint16_t dist[360] = {0}; // mm, 0 = no return
+};
+
 // Records robot pose data during autonomous cleaning runs and stores each
 // session as a JSONL file on SPIFFS. During collection, raw JSONL lines are
 // buffered and flushed to /history/<epoch>.jsonl. When cleaning ends, the
@@ -74,6 +96,21 @@ public:
     // Last completed session stats (for notification enrichment)
     const LastCleanStats& getLastCleanStats() const { return lastCleanStats; }
 
+    // -- LIDAR delivery buffer -----------------------------------------------
+    //
+    // The bridge samples the LIDAR itself while cleaning and holds the scans
+    // until Home Assistant collects them, so a WiFi outage costs nothing:
+    // nobody but us records a scan, and the firmware never persisted one.
+    //
+    // Pure RAM, like getListJson(): the batch is built on the loop task and
+    // the handler only hands over the finished String. Reading SPIFFS from the
+    // AsyncTCP task is what truncated /api/history.
+    //
+    // `after` is the highest sequence number the caller already has; every
+    // scan up to it is dropped. Idempotent -- repeating a request re-sends the
+    // same batch, and a scan delivered twice only doubles one weight.
+    String takeScanBatch(uint32_t after);
+
     // Called by WebServer when a clean command is sent via API.
     // Switches to active polling so collection starts immediately
     // instead of waiting for the next idle-interval tick.
@@ -94,6 +131,30 @@ public:
 
 private:
     void tick() override;
+
+    // -- LIDAR delivery buffer ----------------------------------------------
+    void sampleScan();          // loop task: ask the robot for a scan
+    void serviceScanBuffer();   // loop task: drop acked, refill, build the batch
+    void pushScan(const BufferedScan& scan);  // loop task: into RAM, or flash
+    bool appendSpill(const BufferedScan& scan); // loop task: write one record
+    void refillFromSpill();     // loop task: flash -> RAM when there is room
+    void buildBatch();          // loop task: the next batch, as NDJSON
+    bool scanPending = false;
+
+    std::deque<BufferedScan> scanRing;   // oldest first
+    uint32_t scanSeq = 0;                // last sequence number handed out
+    unsigned long lastScanMs = 0;
+    // Buffering only starts once someone has actually collected a batch, and
+    // stops again if nobody does. A bridge flashed ahead of the integration
+    // must not fill its flash for a reader that never comes.
+    unsigned long lastDrainMs = 0;
+    bool spilling = false;               // overflowing to flash
+    size_t spillReadOffset = 0;
+    // Handed to the HTTP task, built here.
+    String batchJson;
+    uint32_t batchFirstSeq = 0;
+    uint32_t batchLastSeq = 0;
+    volatile uint32_t ackedSeq = 0;
 
     NeatoSerial& neato;
     DataLogger& dataLogger;
