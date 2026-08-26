@@ -65,6 +65,22 @@ def _try_repair_pose(line: str) -> dict[str, float] | None:
 # spin-up. Kept as a threshold rather than "> 0" so a coasting brush does not
 # register as a cleaned stripe.
 BRUSH_RUNNING_RPM = 200
+# How far the robot has to actually get, brush stopped, before that stretch
+# counts as going somewhere rather than working where it stands.
+#
+# The brush stops for two quite different reasons and only one of them means
+# the floor was missed. Driving home it is off for the whole way, and painting
+# that would lay a clean stripe across rooms the robot only crossed. But it
+# also stops when the robot stalls and shuffles to free itself, and there the
+# machine is still standing on that floor with its suction running -- turning a
+# minute of that into a dark hole says the spot was never reached, which is
+# what Philou could see was wrong.
+#
+# Net displacement separates them by an order of magnitude. Measured over the
+# 2026-08-26 run's 33 brush-off stretches: the drive home moved 5.18 m, and the
+# largest of the other 32 moved 0.54 m. Five robot widths sits three times
+# clear of both.
+BRUSH_OFF_TRANSIT_M = HISTORY_ROBOT_DIAMETER_M * 5
 
 # Firmware samples poses every ~2s; anything past 15x that is a real pause
 # (docking, charging) rather than jitter between snapshots.
@@ -302,6 +318,46 @@ def _apply_alignment(
     return out
 
 
+def _brush_off_transits(
+    norm: list[tuple[float, float, float, float]],
+    brush: list[Any] | None,
+) -> set[int]:
+    """Pose indices to leave uncleaned: brush off *and* actually going places.
+
+    A brush-off stretch is judged whole rather than pose by pose, because what
+    tells a drive home from a stall is the distance covered over the stretch,
+    which no single pose knows. A missing brush reading means a session taped
+    before the firmware recorded one; those keep their old behaviour and count
+    as cleaning throughout.
+    """
+    if brush is None:
+        return set()
+    off = [
+        i
+        for i in range(len(norm))
+        if i < len(brush)
+        and brush[i] is not None
+        and float(brush[i]) < BRUSH_RUNNING_RPM
+    ]
+    if not off:
+        return set()
+    transits: set[int] = set()
+    start = prev = off[0]
+    for i in off[1:] + [None]:
+        if i == prev + 1:
+            prev = i
+            continue
+        net = math.hypot(
+            norm[prev][0] - norm[start][0], norm[prev][1] - norm[start][1]
+        )
+        if net > BRUSH_OFF_TRANSIT_M:
+            transits.update(range(start, prev + 1))
+        if i is None:
+            break
+        start = prev = i
+    return transits
+
+
 def _coverage_cells(
     norm: list[tuple[float, float, float, float]],
     brush: list[Any] | None = None,
@@ -365,12 +421,12 @@ def _coverage_cells(
     # Beyond this two poses cannot be joined by a straight band: the robot had
     # time to turn, and the chord would invent cleaned floor.
     max_join = HISTORY_ROBOT_DIAMETER_M * 5
+    transits = _brush_off_transits(norm, brush)
     prev: tuple[float, float, float] | None = None
     for i, (x, y, _t, ts) in enumerate(norm):
-        b = brush[i] if brush is not None and i < len(brush) else None
-        if b is not None and float(b) < BRUSH_RUNNING_RPM:
-            # Not cleaning here: keep the path continuous for the next
-            # segment, but lay nothing down.
+        if i in transits:
+            # Going somewhere with the brush off: keep the path continuous for
+            # the next segment, but lay nothing down.
             prev = (x, y, ts)
             continue
         if prev is not None and math.hypot(x - prev[0], y - prev[1]) <= max_join:
