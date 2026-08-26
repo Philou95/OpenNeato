@@ -57,6 +57,10 @@ CAPTURE_PERSIST_S = 300.0
 # purpose, so catching up after an outage is spread over several ticks rather
 # than blocking one of them.
 DRAIN_MAX_BATCHES = 6
+# Empty answers in a row before deciding the bridge has stopped buffering. It
+# produces a scan every four seconds and this ticks at the same rate, so one or
+# two empty answers are just the two clocks sliding past each other.
+DRAIN_QUIET_TICKS = 5
 CAPTURE_DUMP_NAME = "openneato_captures.json"
 CAPTURE_DUMP_MAX = 3000
 # A scan is only geometry if the laser was actually sweeping. Rather than pin a
@@ -200,6 +204,7 @@ class LidarMapRunner:
         # False on a bridge too old to have one.
         self._buffer_ok: bool | None = None
         self._last_seq = 0
+        self._empty_drains = 0
         self.last_report: dict[str, Any] = {}
 
     async def async_load(self) -> None:
@@ -317,12 +322,31 @@ class LidarMapRunner:
             # while cleaning, so a WiFi outage no longer costs the scans taken
             # during it -- and there is no HTTP round trip per scan competing
             # with the firmware's own pose journal for the serial link.
-            # Only skip our own sampling when the buffer actually delivered
-            # something. An empty answer must fall through and sample directly:
-            # returning on it meant a bridge that buffers nothing collected
-            # nothing at all, silently, for a whole run.
-            if self._buffer_ok is not False and await self._drain_buffer():
-                return
+            # Once the bridge is known to buffer, its silence is just "nothing
+            # new yet" -- it samples on its own clock, and this tick asking the
+            # same question again over HTTP is the round trip the buffer exists
+            # to remove. Sampling on every empty answer put *both* paths on the
+            # serial link at once and left /api/lidar timing out mid-run, which
+            # is the opposite of the point.
+            #
+            # An unknown bridge still falls through, and a bridge that goes
+            # quiet for several ticks is treated as one that has stopped
+            # buffering, so a whole run can never be lost to a silent peer.
+            if self._buffer_ok is not False:
+                got = await self._drain_buffer()
+                if got:
+                    self._empty_drains = 0
+                    return
+                if got == 0 and self._buffer_ok:
+                    self._empty_drains += 1
+                    if self._empty_drains < DRAIN_QUIET_TICKS:
+                        return
+                    _LOGGER.warning(
+                        "LIDAR mapping: the bridge has sent nothing for %d ticks — "
+                        "sampling directly again", self._empty_drains,
+                    )
+                    self._buffer_ok = None
+                    self._empty_drains = 0
             # Pose first -- the scan read is the slow half, so this timestamp
             # sits closest to the scan's own instant.
             raw = await self.api.send_serial_command("GetRobotPos Smooth")
