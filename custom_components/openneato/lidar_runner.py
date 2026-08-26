@@ -93,6 +93,28 @@ RECOVER_RATIO = 0.80   # hysteresis band: below 0.55 slow down, above 0.80 speed
 # uiState substrings, matching camera.py.
 CLEANING = ("CLEANINGRUNNING", "CLEANINGPAUSED", "CLEANINGSUSPENDED", "DOCKING")
 ACTIVE = ("CLEANINGRUNNING",)
+# Modes whose geometry must never reach the accumulated map.
+#
+# These are substring tests, and "CLEANINGRUNNING" is contained in
+# "UIMGR_STATE_MANUALCLEANINGRUNNING" -- so a manual clean has been feeding the
+# map all along, without anyone asking for it. Philou drove the robot by hand
+# on 2026-08-26 and bumped it into walls several times; the recorded track ran
+# 1.5 m through a wall the map puts at 1.35 m, because the wheels turned while
+# the chassis did not follow. Odometry taken while a human steers is not
+# evidence about where the walls are, and a map is only worth what its worst
+# session put in it.
+#
+# The robot's own pose journal still records the run, so the replay is
+# unaffected -- this only keeps it out of the accumulated geometry.
+UNMAPPABLE = ("MANUALCLEANING",)
+
+
+def _mappable(state: str) -> bool:
+    """True while the robot is laying down geometry worth keeping."""
+    return (
+        any(s in state for s in CLEANING)
+        and not any(m in state for m in UNMAPPABLE)
+    )
 
 
 class LidarMapRunner:
@@ -160,7 +182,7 @@ class LidarMapRunner:
     @callback
     def _handle_update(self) -> None:
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
-        cleaning = any(s in state for s in CLEANING)
+        cleaning = _mappable(state)
         if cleaning and not self._collecting:
             self._start()
         elif not cleaning and self._collecting:
@@ -214,7 +236,7 @@ class LidarMapRunner:
         if self._busy:
             return
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
-        if not any(s in state for s in ACTIVE):
+        if not any(s in state for s in ACTIVE) or any(m in state for m in UNMAPPABLE):
             # Paused, recharging, or heading for the dock: no new floor is
             # being laid, so spend nothing on the serial link.
             #
