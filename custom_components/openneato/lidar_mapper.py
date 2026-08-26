@@ -1099,10 +1099,25 @@ def build_session_grids(
     # path that never comes near a wall, while looking reaches everything in
     # the room the robot can see, which is where anything removed used to be.
     free |= {cell for cell, n in seen_through.items() if n >= FREE_MIN_SCANS}
-    # A cell this run saw as wall is not carved by this run: the robot skirting
-    # a wall must not undo the scans that just found it, and a beam grazing
-    # along a wall must not either.
-    free -= walls.keys()
+    # A cell this run saw as wall is not carved by this run -- nor is any cell
+    # touching one.
+    #
+    # Exempting only the exact cells a beam landed on was not enough: a wall is
+    # a connected structure, and a cell inside one that this run happened not
+    # to hit head-on was being carved by beams grazing past it. Measured over
+    # the 2026-08-27 run, that punched **28 holes** straight through walls whose
+    # neighbours on both sides stayed drawn -- which is what Philou saw as the
+    # wall losing definition.
+    #
+    # One cell of margin closes every one of them and returns 163 wall cells,
+    # for three cells of phantom kept a little longer. Two cells of margin buys
+    # no further holes closed and costs more, so the margin is exactly one.
+    free -= {
+        (cx + dx, cy + dy)
+        for cx, cy in walls
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+    }
     correction = (sum_dx / placed, sum_dy / placed) if placed else (0.0, 0.0)
     return walls, floor, free, correction
 
