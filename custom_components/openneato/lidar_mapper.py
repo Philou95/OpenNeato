@@ -735,16 +735,38 @@ class AccumulatedMap:
         session_name: str | None = None,
         free: set[tuple[int, int]] | None = None,
         correction: tuple[float, float] = (0.0, 0.0),
+        contribute: bool = True,
     ) -> dict[str, Any]:
-        """Fold one cleaning into the accumulated map, re-aligning it first."""
-        report: dict[str, Any] = {"session_walls": len(walls), "realigned": False}
+        """Fold one cleaning into the accumulated map, re-aligning it first.
+
+        `contribute=False` works out where the session sits and remembers it,
+        but adds none of its geometry. A spot clean is the case: the robot
+        drives itself so its track is trustworthy and worth replaying *on* the
+        map, while a square metre of walls has nothing to teach a map built
+        from whole-house runs. It must not count as a failure either -- a
+        small session naturally overlaps poorly, and three failures in a row
+        discard the map.
+        """
+        report: dict[str, Any] = {
+            "session_walls": len(walls), "realigned": False, "contributed": contribute,
+        }
 
         if self.walls:
             quarter, dx, dy, overlap, fine = align_to_reference(walls, self.walls)
             report.update(
                 quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3)
             )
-            if overlap < MERGE_MIN_OVERLAP:
+            if overlap < MERGE_MIN_OVERLAP and not contribute:
+                # Nothing of it was going into the map anyway, so a poor fit
+                # costs nothing and must not be counted against the map. Keep
+                # the best transform we found: an approximately placed replay
+                # beats one drawn in the robot's own frame.
+                report["poor_fit"] = True
+                _LOGGER.info(
+                    "LIDAR map: session overlaps %.0f%% of the map; placing it "
+                    "there anyway and merging nothing", 100 * overlap,
+                )
+            elif overlap < MERGE_MIN_OVERLAP:
                 self.rejects += 1
                 report["rejects"] = self.rejects
                 if self.rejects < MAX_CONSECUTIVE_REJECTS:
@@ -800,7 +822,8 @@ class AccumulatedMap:
                     )
                 }
 
-        self.rejects = 0
+        if contribute:
+            self.rejects = 0
         if session_name:
             # The correction rides with the alignment because it is the other
             # half of the same journey: raw log -> corrected frame -> map.
@@ -813,6 +836,12 @@ class AccumulatedMap:
                 if self.walls
                 else (0, 0, 0, 0.0, cx, cy)
             )
+
+        if not contribute:
+            # Placed, remembered, and deliberately not merged.
+            report["total_walls"] = len(self.walls)
+            report["sessions"] = self.sessions
+            return report
 
         for cell, n in walls.items():
             self.walls[cell] = self.walls.get(cell, 0) + n

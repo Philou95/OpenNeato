@@ -107,6 +107,12 @@ ACTIVE = ("CLEANINGRUNNING",)
 # The robot's own pose journal still records the run, so the replay is
 # unaffected -- this only keeps it out of the accumulated geometry.
 UNMAPPABLE = ("MANUALCLEANING",)
+# Modes worth replaying on the map but not worth putting into it. A spot clean
+# is driven by the robot, so its track is trustworthy and belongs on screen --
+# but a square metre of walls teaches a whole-house map nothing, and its small
+# footprint naturally overlaps poorly, which would otherwise count as a failed
+# merge. Three of those in a row discard the map.
+NO_CONTRIBUTION = ("SPOTCLEANING",)
 
 
 def _mappable(state: str) -> bool:
@@ -149,6 +155,7 @@ class LidarMapRunner:
         self._health_start = 0.0
         self._health_ref: dict[str, Any] | None = None
         self._session_name: str | None = None
+        self._contributes = True
         self.last_report: dict[str, Any] = {}
 
     async def async_load(self) -> None:
@@ -189,6 +196,10 @@ class LidarMapRunner:
             self.hass.async_create_task(self._finish())
 
     def _start(self) -> None:
+        state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
+        # Decided at the start: by the end the robot says DOCKING and the mode
+        # it was cleaning in is no longer readable anywhere.
+        self._contributes = not any(m in state for m in NO_CONTRIBUTION)
         self._collecting = True
         self._captures = []
         self._last_persist = time.monotonic()
@@ -474,7 +485,7 @@ class LidarMapRunner:
         before = self._map.as_dict()
         report = await self.hass.async_add_executor_job(
             self._map.merge_session, walls, floor, self._session_name, free,
-            correction,
+            correction, self._contributes,
         )
         self.last_report = report
         if report.get("rejected"):
@@ -494,6 +505,15 @@ class LidarMapRunner:
         await self._cap_store.async_remove()
         # The carve counts are the only sign free-space evidence did anything;
         # without them a chair fading off the map looks like nothing happened.
+        if not report.get("contributed", True):
+            _LOGGER.info(
+                "LIDAR map: %s placed on the map but not merged into it — "
+                "%d wall cells left untouched after %d cleanings",
+                self._session_name, report.get("total_walls", 0),
+                report.get("sessions", 0),
+            )
+            return
+
         _LOGGER.info(
             "LIDAR map updated: %d wall cells after %d cleanings "
             "(%d cells known empty, %d weakened, %d faded out)",
