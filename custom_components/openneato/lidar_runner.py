@@ -14,9 +14,11 @@ of its normal rate.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
+from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -24,7 +26,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 from datetime import timedelta
 
-from .const import DOMAIN
+from .const import CELL_SIZE_M, DOMAIN
 from .lidar_mapper import (
     plan_calibration,
     AccumulatedMap,
@@ -43,6 +45,13 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
 POLL_INTERVAL = 4.0          # seconds between captures
+# One run's scans, kept in the config directory so the mapper can be tried
+# against real returns instead of synthetic ones -- see _dump_captures(). The
+# file's own existence is the switch: it is written once and then never again,
+# so this costs a single run. About 1.5 MB for a full cycle; the cap is only a
+# runaway guard and a normal run is well under it.
+CAPTURE_DUMP_NAME = "openneato_captures.json"
+CAPTURE_DUMP_MAX = 3000
 # A scan is only geometry if the laser was actually sweeping. Rather than pin a
 # nominal speed -- the robot reports 5.03 while docked and the field's unit is
 # not documented -- each run is judged against its own median: anything under
@@ -373,6 +382,8 @@ class LidarMapRunner:
             )
             return
 
+        await self.hass.async_add_executor_job(self._dump_captures, captures)
+
         walls, floor, free = await self.hass.async_add_executor_job(
             # Whole captures now, not c[:4]: the builder weighs each scan by
             # the movement measured during it, which lives in the trailing
@@ -396,6 +407,52 @@ class LidarMapRunner:
             report.get("carved", 0), report.get("weakened", 0),
             report.get("faded", 0),
         )
+
+    def _dump_captures(self, captures: list) -> None:
+        """Keep one run's scans on disk, once, so the mapper can be tested.
+
+        The firmware never persists a LIDAR scan and the robot re-serves a
+        frozen frame when it is not cleaning, so nothing about the mapping
+        could ever be tried against real returns -- every change had to be
+        reasoned about, shipped, and judged a cycle later on the one thing it
+        produced. This keeps a single run so the merge can be replayed offline
+        as many times as it takes.
+
+        Writes only if the file is absent, so it costs one run and then stops
+        by itself. Delete the file to arm it again. Never lets a failure reach
+        the merge: this is a convenience, and the map matters more.
+        """
+        path = Path(self.hass.config.path(CAPTURE_DUMP_NAME))
+        try:
+            if path.exists():
+                return
+            if len(captures) > CAPTURE_DUMP_MAX:
+                _LOGGER.debug(
+                    "LIDAR mapping: not dumping %d captures, over the %d cap",
+                    len(captures), CAPTURE_DUMP_MAX,
+                )
+                return
+            payload = {
+                "session": self._session_name,
+                "cell_m": CELL_SIZE_M,
+                "walls_before": len(self._map.walls),
+                "sessions_before": self._map.sessions,
+                # Post rotation-filter: exactly what build_session_grids sees,
+                # so an offline replay reproduces the run rather than resembling
+                # it. (x, y, theta, points, rotationSpeed, moved, turned)
+                "captures": [
+                    [c[0], c[1], c[2], [list(p) for p in c[3]], *c[4:]]
+                    for c in captures
+                ],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _LOGGER.info(
+                "LIDAR mapping: kept %d scans in %s (%.1f MB) for offline testing; "
+                "delete the file to keep another run",
+                len(captures), path, path.stat().st_size / 1e6,
+            )
+        except Exception as err:  # noqa: BLE001 -- diagnostics never break a merge
+            _LOGGER.warning("LIDAR mapping: could not keep the scans (%s)", err)
 
     @staticmethod
     def _drop_slow_scans(captures: list) -> list:
