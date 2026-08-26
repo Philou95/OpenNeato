@@ -67,8 +67,8 @@ static bool parsePose(const String& raw, float& x, float& y, float& theta, float
 // ring, so appending it to the back keeps the order.
 
 void CleaningHistory::sampleScan() {
-    if (scanPending || fetchPending)
-        return; // the snapshot chain owns the serial link; do not fight it
+    if (scanPending)
+        return; // one at a time
     if (millis() - lastScanMs < LIDAR_SCAN_INTERVAL_MS)
         return;
     // Nobody is collecting. Sampling would only burn serial time and, once the
@@ -240,8 +240,6 @@ void CleaningHistory::tick() {
     // Before any early return: a reader must be able to drain the buffer even
     // while the session is compressing or a serial fetch is latched.
     serviceScanBuffer();
-    if (collecting)
-        sampleScan();
 
     // Refresh the cached /api/history listing here rather than in the HTTP
     // handler, so all SPIFFS enumeration stays on the loop task. Skipped
@@ -1060,6 +1058,12 @@ void CleaningHistory::collectSnapshot() {
                 // states nobody has observed yet still come out right.
                 neato.getMotors([this, x, y, theta, time](bool motorsOk, const MotorData& motors) {
                     writeSnapshot(x, y, theta, time, motorsOk ? motors.brushRPM : -1);
+                    // The chain has just let go of the serial link, so this is
+                    // the one moment a scan cannot compete with it. Driving it
+                    // from tick() instead never fired: the chain is four round
+                    // trips on a two second tick, so fetchPending was almost
+                    // never clear and sampleScan() returned every time.
+                    sampleScan();
                 });
             });
         });
