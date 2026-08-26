@@ -282,9 +282,12 @@ class LidarMapRunner:
             # while cleaning, so a WiFi outage no longer costs the scans taken
             # during it -- and there is no HTTP round trip per scan competing
             # with the firmware's own pose journal for the serial link.
-            if self._buffer_ok is not False:
-                if await self._drain_buffer() is not None:
-                    return
+            # Only skip our own sampling when the buffer actually delivered
+            # something. An empty answer must fall through and sample directly:
+            # returning on it meant a bridge that buffers nothing collected
+            # nothing at all, silently, for a whole run.
+            if self._buffer_ok is not False and await self._drain_buffer():
+                return
             # Pose first -- the scan read is the slow half, so this timestamp
             # sits closest to the scan's own instant.
             raw = await self.api.send_serial_command("GetRobotPos Smooth")
