@@ -248,6 +248,22 @@ class LidarMapRunner:
                         # taken standing still.
                         moved,
                         turned,
+                        # Link quality where the robot was standing, read from
+                        # the coordinator's own poll so it costs no extra
+                        # request. The bridge rides on the robot, so this is a
+                        # radio survey of the house taken as it cleans.
+                        #
+                        # Here because of 2026-08-26: one 39 s hole in the
+                        # robot's pose log cost 1.6 m of unpainted floor, and
+                        # the two worst scan-fetch stalls of that run -- 24 s
+                        # and 69 s against a 4 s median -- sat either side of
+                        # it. Philou reads the far end of the room as barely
+                        # reachable even while the link stays up. It did not
+                        # happen again the next run, and the robot's own error
+                        # count and brush-stall share were identical across
+                        # both, so nothing about the robot explains it.
+                        # Without this the next occurrence is just as mute.
+                        self._rssi(),
                     )
                 )
         except Exception as err:  # noqa: BLE001 -- one bad read must never end a run
@@ -382,6 +398,7 @@ class LidarMapRunner:
             )
             return
 
+        self._log_link_quality(captures)
         await self.hass.async_add_executor_job(self._dump_captures, captures)
 
         walls, floor, free, correction = await self.hass.async_add_executor_job(
@@ -408,6 +425,36 @@ class LidarMapRunner:
             report.get("carved", 0), report.get("weakened", 0),
             report.get("faded", 0),
         )
+
+    @staticmethod
+    def _log_link_quality(captures: list) -> None:
+        """Say how well the bridge was reachable while it worked.
+
+        The radio is the one thing that has cost a run resolution without
+        leaving any trace of itself: the pose log simply stops. Stating the
+        spread here means a bad run says so at the time, instead of being
+        reconstructed from a capture dump days later.
+        """
+        vals = [c[7] for c in captures if len(c) > 7 and c[7]]
+        if len(vals) < 5:
+            return
+        vals.sort()
+        worst = vals[0]
+        median = vals[len(vals) // 2]
+        # -75 dBm is where a 2.4 GHz link starts retransmitting in earnest.
+        weak = sum(1 for v in vals if v <= -75)
+        _LOGGER.info(
+            "LIDAR mapping: link over the run — median %.0f dBm, worst %.0f, "
+            "%d of %d scans below -75",
+            median, worst, weak, len(vals),
+        )
+
+    def _rssi(self) -> float:
+        """Signal strength from the coordinator's last poll, or 0 if unknown."""
+        try:
+            return float(((self.coordinator.data or {}).get("system") or {}).get("rssi") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _dump_captures(self, captures: list) -> None:
         """Keep one run's scans on disk, once, so the mapper can be tested.
