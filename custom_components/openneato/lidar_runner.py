@@ -600,11 +600,20 @@ class LidarMapRunner:
                     )
                 self._buffer_ok = False
                 return None
-            if self._buffer_ok is None:
-                self._buffer_ok = True
-                _LOGGER.info("LIDAR mapping: collecting from the bridge's own buffer")
             if not text.strip():
                 break
+            # A bridge without the buffer does not answer 404: ESPAsyncWebServer
+            # matches by prefix, so /api/lidar swallows this path and returns a
+            # single scan object with 200. Detected by shape rather than by
+            # status -- otherwise the fallback never fires and mapping quietly
+            # collects nothing at all.
+            if '"seq"' not in text:
+                if self._buffer_ok is None:
+                    _LOGGER.info(
+                        "LIDAR mapping: this bridge has no scan buffer — sampling directly"
+                    )
+                self._buffer_ok = False
+                return None
             for line in text.splitlines():
                 line = line.strip()
                 if not line:
@@ -629,6 +638,11 @@ class LidarMapRunner:
                     float(rec.get("rpm", 0.0)), moved, turned, self._rssi(),
                 ))
                 total += 1
+                if self._buffer_ok is None:
+                    self._buffer_ok = True
+                    _LOGGER.info(
+                        "LIDAR mapping: collecting from the bridge's own buffer"
+                    )
         if total:
             await self._persist_captures()
         return total
