@@ -98,6 +98,9 @@ void WebServer::registerApiRoutes() {
     // highest sequence number the caller already holds; everything up to it is
     // dropped. Pure RAM on this task -- the batch was built on the loop task,
     // because reading SPIFFS here is what truncated /api/history.
+    server.on("/api/lidar/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        request->send(200, "application/json", historyMgr.scanStatusJson());
+    });
     server.on("/api/lidar/buffer", HTTP_GET, [this](AsyncWebServerRequest *request) {
         unsigned long startMs = millis();
         uint32_t after = 0;

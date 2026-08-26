@@ -111,6 +111,11 @@ public:
     // same batch, and a scan delivered twice only doubles one weight.
     String takeScanBatch(uint32_t after);
 
+    // Why the buffer is or is not filling, counted in RAM. Cheaper and safer
+    // than logging: no SPIFFS write, readable at any moment, and it cannot
+    // perturb the very contention it is there to explain.
+    String scanStatusJson();
+
     // Called by WebServer when a clean command is sent via API.
     // Switches to active polling so collection starts immediately
     // instead of waiting for the next idle-interval tick.
@@ -141,6 +146,9 @@ private:
     void buildBatch();          // loop task: the next batch, as NDJSON
     bool scanPending = false;
     unsigned long scanStartedMs = 0;
+    uint32_t nScanOk = 0, nScanFail = 0, nPoseFail = 0, nPose2Fail = 0;
+    uint32_t nSkipPending = 0, nSkipInterval = 0, nSkipDrain = 0, nCalls = 0;
+    uint32_t nReleased = 0;
 
     std::deque<BufferedScan> scanRing;   // oldest first
     uint32_t scanSeq = 0;                // last sequence number handed out

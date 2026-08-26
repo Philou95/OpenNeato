@@ -66,22 +66,51 @@ static bool parsePose(const String& raw, float& x, float& y, float& theta, float
 // takes from the file's head, which is always newer than anything still in the
 // ring, so appending it to the back keeps the order.
 
+String CleaningHistory::scanStatusJson() {
+    String o = "{";
+    o += "\"calls\":" + String(nCalls);
+    o += ",\"ok\":" + String(nScanOk);
+    o += ",\"scanFail\":" + String(nScanFail);
+    o += ",\"poseFail\":" + String(nPoseFail);
+    o += ",\"pose2Fail\":" + String(nPose2Fail);
+    o += ",\"skipPending\":" + String(nSkipPending);
+    o += ",\"skipInterval\":" + String(nSkipInterval);
+    o += ",\"skipDrain\":" + String(nSkipDrain);
+    o += ",\"released\":" + String(nReleased);
+    o += ",\"ring\":" + String(static_cast<uint32_t>(scanRing.size()));
+    o += ",\"spilling\":" + String(spilling ? 1 : 0);
+    o += ",\"collecting\":" + String(collecting ? 1 : 0);
+    o += ",\"pending\":" + String(scanPending ? 1 : 0);
+    o += ",\"drainAgeMs\":" + String(lastDrainMs ? millis() - lastDrainMs : 0);
+    o += ",\"batchLen\":" + String(static_cast<uint32_t>(batchJson.length()));
+    o += "}";
+    return o;
+}
+
 void CleaningHistory::sampleScan() {
+    nCalls++;
     if (scanPending) {
         // A reply that never comes must not latch this forever. One lost
         // response used to end scanning for the rest of the run, silently --
         // the same trap the snapshot chain already guards against.
-        if (millis() - scanStartedMs < LIDAR_SCAN_TIMEOUT_MS)
+        if (millis() - scanStartedMs < LIDAR_SCAN_TIMEOUT_MS) {
+            nSkipPending++;
             return;
+        }
+        nReleased++;
         LOG("HIST", "LIDAR scan stuck for %lums - releasing", millis() - scanStartedMs);
         scanPending = false;
     }
-    if (millis() - lastScanMs < LIDAR_SCAN_INTERVAL_MS)
+    if (millis() - lastScanMs < LIDAR_SCAN_INTERVAL_MS) {
+        nSkipInterval++;
         return;
+    }
     // Nobody is collecting. Sampling would only burn serial time and, once the
     // ring filled, flash. Home Assistant asking for a batch turns this back on.
-    if (lastDrainMs == 0 || millis() - lastDrainMs > LIDAR_DRAIN_IDLE_MS)
+    if (lastDrainMs == 0 || millis() - lastDrainMs > LIDAR_DRAIN_IDLE_MS) {
+        nSkipDrain++;
         return;
+    }
 
     lastScanMs = millis();
     scanPending = true;
@@ -92,8 +121,11 @@ void CleaningHistory::sampleScan() {
         float x = 0, y = 0, theta = 0, t = 0;
         if (posOk)
             parsePose(pos.raw, x, y, theta, t);
+        else
+            nPoseFail++;
         neato.getLdsScan([this, x, y, theta, t](bool ok, const LdsScanData& scan) {
             if (!ok) {
+                nScanFail++;
                 scanPending = false;
                 return;
             }
@@ -115,6 +147,8 @@ void CleaningHistory::sampleScan() {
                 float x2 = x, y2 = y, th2 = theta, t2 = 0;
                 if (ok2)
                     parsePose(p2.raw, x2, y2, th2, t2);
+                else
+                    nPose2Fail++;
                 b.moved = sqrtf((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
                 float d = fmodf(th2 - theta + 180.0f, 360.0f);
                 if (d < 0)
@@ -123,6 +157,7 @@ void CleaningHistory::sampleScan() {
                 b.x = (x + x2) / 2.0f;
                 b.y = (y + y2) / 2.0f;
                 b.theta = theta + (d - 180.0f) / 2.0f;
+                nScanOk++;
                 pushScan(b);
             });
         });
