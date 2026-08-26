@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.4.0";
+const CARD_VERSION = "2.4.1";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -127,6 +127,15 @@ function formatDate(epoch) {
         hour: "2-digit",
         minute: "2-digit",
     });
+}
+
+/* A session is `<epoch>.jsonl` while the robot records it and `<epoch>.jsonl.hs`
+   once the firmware compresses it, minutes after the run ends. Every name we
+   hold on to has to survive that rename, or the card goes on asking for a file
+   the robot no longer has -- which is exactly what happens to the run it was
+   watching being drawn. Compare on the part compression cannot change. */
+function stableName(name) {
+    return String(name || "").replace(/\.hs$/, "");
 }
 
 function modeLabel(mode) {
@@ -827,6 +836,16 @@ class OpenNeatoReplayCard extends HTMLElement {
 
     /* ---- data loading ---- */
 
+    /* The session we are holding a name for, under whichever name the robot
+       has for it now. Returns undefined once it is genuinely gone. */
+    _matchSession(name) {
+        if (!name) return undefined;
+        const exact = this._sessions.find((s) => s.name === name);
+        if (exact) return exact;
+        const key = stableName(name);
+        return this._sessions.find((s) => stableName(s.name) === key);
+    }
+
     async _loadSessions() {
         try {
             const res = await this._hass.callWS({
@@ -848,10 +867,8 @@ class OpenNeatoReplayCard extends HTMLElement {
             const live = this._sessions.find((s) => s.recording);
             // Follow the robot by default while it is cleaning, but never yank
             // the view away from a session the user chose themselves.
-            const wanted =
-                this._selectedName && this._sessions.some((s) => s.name === this._selectedName)
-                    ? this._selectedName
-                    : (live || this._sessions[0]).name;
+            const held = this._matchSession(this._selectedName);
+            const wanted = held ? held.name : (live || this._sessions[0]).name;
             // A session the robot is still writing to cannot be deleted -- the
             // firmware would be appending to a file we just unlinked, and the
             // websocket command refuses it anyway.
@@ -869,7 +886,7 @@ class OpenNeatoReplayCard extends HTMLElement {
        costs nothing. */
     _scheduleLiveRefresh() {
         clearTimeout(this._liveTimer);
-        const current = this._sessions.find((s) => s.name === this._selectedName);
+        const current = this._matchSession(this._selectedName);
         if (!current || !current.recording) return;
         this._liveTimer = setTimeout(() => this._refreshLive(), LIVE_REFRESH_MS);
     }
@@ -886,10 +903,24 @@ class OpenNeatoReplayCard extends HTMLElement {
             });
             this._sessions = res.sessions || [];
             this._renderPicker();
-            this._picker.value = this._selectedName;
+            // The run we are watching gets renamed under us the moment the
+            // firmware compresses it. Follow it to its new name rather than
+            // going on asking for the old one, which no longer exists.
+            const current = this._matchSession(this._selectedName);
+            if (!current) {
+                // Gone for good -- deleted from another client, most likely.
+                // Fall back to the newest run, as deleting one here does,
+                // instead of leaving the picker pointing at nothing.
+                this._selectedName = null;
+                this._session = null;
+                await this._loadSessions();
+                return;
+            }
+            this._selectedName = current.name;
+            this._picker.value = current.name;
             // Keep the viewer's pan, zoom and scrub position: this is a
             // background refresh, not a fresh selection.
-            await this._selectSession(this._selectedName, { keepView: true });
+            await this._selectSession(current.name, { keepView: true });
         } catch (_err) {
             // A refresh that fails is not worth surfacing -- the next tick
             // will try again, and the map on screen is still valid.
@@ -985,6 +1016,12 @@ class OpenNeatoReplayCard extends HTMLElement {
                 name,
                 ...(this._entryId ? { entry_id: this._entryId } : {}),
             });
+            // The backend resolves the name through the same rename; take
+            // what it served so the next refresh asks for that one.
+            if (raw.name && raw.name !== name) {
+                this._selectedName = raw.name;
+                this._picker.value = raw.name;
+            }
             this._session = new Session(raw);
             if (!keepView) this._tf = { panX: 0, panY: 0, zoom: 1 };
             this._cov.sig = "";
@@ -1001,7 +1038,16 @@ class OpenNeatoReplayCard extends HTMLElement {
 
             if (this._config.autoplay) this._restart(true);
         } catch (err) {
-            this._fail(err.message || String(err));
+            // A background refresh sits on top of a map that is still on
+            // screen and still correct. A bridge timeout, or a session that
+            // was renamed between the listing and the fetch, is a reason to
+            // wait for the next tick -- not to replace the run the user is
+            // watching with an error.
+            if (keepView) {
+                console.debug("openneato-replay-card: live refresh skipped", err);
+            } else {
+                this._fail(err.message || String(err));
+            }
         } finally {
             this._loading = false;
         }

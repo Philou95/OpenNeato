@@ -22,6 +22,7 @@ from .const import (
     MAP_DEFAULT_ROTATION_OFFSET,
 
 )
+from .lidar_mapper import alignment_key
 from .replay import build_replay_session
 
 _LOGGER = logging.getLogger(__name__)
@@ -201,32 +202,46 @@ async def ws_get_session(
     entry_id, data = resolved
     name = msg["name"]
 
+    # Key the cache on the name the compression cannot change, so a run
+    # fetched while it was recording is still a hit once the firmware has
+    # renamed it -- and so the card cannot make us download it twice.
     cache: dict[tuple[str, str], dict[str, Any]] = hass.data.setdefault(DOMAIN, {}).setdefault(
         CACHE_KEY, {}
     )
-    cached = cache.get((entry_id, name))
+    cached = cache.get((entry_id, alignment_key(name)))
     if cached is not None:
         connection.send_result(msg["id"], {**cached, "floorplan": _floorplan_payload(hass, entry_id)})
         return
 
+    resolved = _current_name(data["coordinator"], name)
+    if resolved is None:
+        # Not on the robot and not in the cache. Deleted, or compressed away
+        # while the card was between listings -- neither is a fault, and the
+        # card recovers by relisting, so this must not read as a failure.
+        _LOGGER.debug("Replay: session %s is no longer on the robot", name)
+        connection.send_error(
+            msg["id"], "session_gone", f"Session {name} is no longer on the robot"
+        )
+        return
+
     try:
-        raw = await data["api"].get_history_session(name)
+        raw = await data["api"].get_history_session(resolved)
     except Exception as err:  # noqa: BLE001 -- surface any fetch failure to the card
-        _LOGGER.warning("Replay: failed to fetch session %s: %s", name, err)
+        _LOGGER.warning("Replay: failed to fetch session %s: %s", resolved, err)
         connection.send_error(msg["id"], "fetch_failed", str(err))
         return
 
     # Serve the run in the map's frame, not the robot's frame of the day.
     runner = data.get("mapper")
-    align = runner.alignment(name) if runner is not None else None
+    align = runner.alignment(resolved) if runner is not None else None
 
     # Coverage-grid construction is CPU-bound; keep it off the event loop.
     try:
         parsed = await hass.async_add_executor_job(
-            build_replay_session, raw, name, align
+            build_replay_session, raw, resolved, align
         )
     except Exception as err:  # noqa: BLE001
-        _LOGGER.exception("Replay: failed to parse session %s", name)
+        _LOGGER.exception("Replay: failed to parse session %s", resolved)
         connection.send_error(msg["id"], "parse_failed", str(err))
         return
 
@@ -235,10 +250,10 @@ async def ws_get_session(
         return
 
     # Only completed sessions are worth caching -- a recording one grows.
-    if not _is_recording(data["coordinator"], name):
+    if not _is_recording(data["coordinator"], resolved):
         if len(cache) >= _CACHE_MAX:
             cache.pop(next(iter(cache)))
-        cache[(entry_id, name)] = parsed
+        cache[(entry_id, alignment_key(resolved))] = parsed
 
     connection.send_result(msg["id"], {**parsed, "floorplan": _floorplan_payload(hass, entry_id)})
 
@@ -272,7 +287,13 @@ async def ws_delete_session(
         connection.send_error(msg["id"], "not_found", "No OpenNeato config entry found")
         return
     entry_id, data = resolved
-    name = msg["name"]
+    name = _current_name(data["coordinator"], msg["name"])
+    if name is None:
+        # Already gone. The end state the caller wanted, so refresh and agree
+        # rather than reporting a failure to delete what is not there.
+        await data["coordinator"].async_request_refresh()
+        connection.send_result(msg["id"], {"deleted": msg["name"]})
+        return
 
     # Refuse while the robot is still writing to it: the firmware would be
     # appending to a file we just unlinked.
@@ -292,13 +313,42 @@ async def ws_delete_session(
     # Drop it from the parsed-session cache so a later request cannot serve
     # a session the robot no longer has.
     cache = hass.data.setdefault(DOMAIN, {}).setdefault(CACHE_KEY, {})
-    cache.pop((entry_id, name), None)
+    cache.pop((entry_id, alignment_key(name)), None)
 
     # Refresh so the picker's next listing no longer offers it.
     await data["coordinator"].async_request_refresh()
 
     _LOGGER.info("Replay: deleted session %s", name)
     connection.send_result(msg["id"], {"deleted": name})
+
+
+def _current_name(coordinator: Any, name: str) -> str | None:
+    """What the robot calls this session right now, or None if it has it no more.
+
+    A session is `<epoch>.jsonl` while the robot writes it and becomes
+    `<epoch>.jsonl.hs` once the firmware compresses it, minutes after the run
+    ends. The card holds whichever name the listing gave it, so every request
+    that straddles that rename asks for a file the robot no longer has: the
+    fetch 404s, the card blanks the run it had just watched being drawn, and
+    the log fills with a failure that is really just a rename.
+
+    Match on the part compression cannot change -- the same key the session
+    alignments are stored under.
+    """
+    history = (coordinator.data or {}).get("history")
+    if not isinstance(history, list):
+        # No listing to resolve against; the robot is unreachable. Let the
+        # fetch itself fail rather than declaring a session gone on no evidence.
+        return name
+    names = [
+        str(item["name"])
+        for item in history
+        if isinstance(item, dict) and item.get("name")
+    ]
+    if name in names:
+        return name
+    key = alignment_key(name)
+    return next((n for n in names if alignment_key(n) == key), None)
 
 
 def _is_recording(coordinator: Any, name: str) -> bool:
