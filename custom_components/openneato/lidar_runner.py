@@ -57,10 +57,15 @@ CAPTURE_PERSIST_S = 300.0
 # purpose, so catching up after an outage is spread over several ticks rather
 # than blocking one of them.
 DRAIN_MAX_BATCHES = 6
-# Empty answers in a row before deciding the bridge has stopped buffering. It
-# produces a scan every four seconds and this ticks at the same rate, so one or
-# two empty answers are just the two clocks sliding past each other.
-DRAIN_QUIET_TICKS = 5
+# Empty answers in a row before deciding the bridge has stopped buffering.
+#
+# Generous on purpose. The bridge makes a scan every four to five seconds, this
+# ticks at four, and a batch carries up to four -- so empty answers are the
+# normal case, not a warning, and a run of five happens on its own. Set to five
+# it fired within a minute of a healthy run and dropped back to sampling over
+# HTTP, which is the very thing the buffer removes. A minute of true silence is
+# a bridge that has stopped; anything less is two clocks sliding past.
+DRAIN_QUIET_TICKS = 15
 CAPTURE_DUMP_NAME = "openneato_captures.json"
 CAPTURE_DUMP_MAX = 3000
 # A scan is only geometry if the laser was actually sweeping. Rather than pin a
