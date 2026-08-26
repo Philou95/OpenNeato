@@ -140,6 +140,7 @@ private:
     void refillFromSpill();     // loop task: flash -> RAM when there is room
     void buildBatch();          // loop task: the next batch, as NDJSON
     bool scanPending = false;
+    unsigned long scanStartedMs = 0;
 
     std::deque<BufferedScan> scanRing;   // oldest first
     uint32_t scanSeq = 0;                // last sequence number handed out

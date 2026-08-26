@@ -242,6 +242,16 @@ enum CommandStatus {
 // Buffering only runs while someone is actually collecting. A bridge flashed
 // ahead of the integration must not fill its flash for a reader never coming.
 #define LIDAR_DRAIN_IDLE_MS 120000
+// Watchdog on a scan whose serial reply never comes. Without it one lost reply
+// latches scanPending for the rest of the run and no scan is ever taken again
+// -- the exact failure HISTORY_FETCH_TIMEOUT_MS exists to stop, seen on
+// 2026-08-26 as a buffer that stayed at zero bytes for a whole cycle.
+#define LIDAR_SCAN_TIMEOUT_MS 15000
+// Watchdog on a scan whose serial reply never comes. Without it one lost reply
+// latches scanPending for the rest of the run and no scan is ever taken again
+// -- the exact failure HISTORY_FETCH_TIMEOUT_MS exists to stop, observed on
+// 2026-08-26 as a buffer that stayed at zero bytes for a whole cycle.
+#define LIDAR_SCAN_TIMEOUT_MS 15000
 
 #define HISTORY_IMPORT_MAX_BYTES 262144 // 256 KB max import file size (2h clean at 2s intervals ~ 180KB)
 

@@ -67,8 +67,15 @@ static bool parsePose(const String& raw, float& x, float& y, float& theta, float
 // ring, so appending it to the back keeps the order.
 
 void CleaningHistory::sampleScan() {
-    if (scanPending)
-        return; // one at a time
+    if (scanPending) {
+        // A reply that never comes must not latch this forever. One lost
+        // response used to end scanning for the rest of the run, silently --
+        // the same trap the snapshot chain already guards against.
+        if (millis() - scanStartedMs < LIDAR_SCAN_TIMEOUT_MS)
+            return;
+        LOG("HIST", "LIDAR scan stuck for %lums - releasing", millis() - scanStartedMs);
+        scanPending = false;
+    }
     if (millis() - lastScanMs < LIDAR_SCAN_INTERVAL_MS)
         return;
     // Nobody is collecting. Sampling would only burn serial time and, once the
@@ -78,6 +85,7 @@ void CleaningHistory::sampleScan() {
 
     lastScanMs = millis();
     scanPending = true;
+    scanStartedMs = millis();
     // Pose first: it is the cheap half, so its timestamp sits closest to the
     // scan, and capturing four floats beats capturing a 5 760-byte scan.
     neato.getRobotPos(true, [this](bool posOk, const RobotPosData& pos) {
