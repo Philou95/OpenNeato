@@ -1378,7 +1378,23 @@ class SessionTracker:
             for k in range(n - 1)
         ]
         edges.extend(self._edges)
-        return slam.optimise(self._poses, edges)
+        refined = slam.optimise(self._poses, edges)
+        # Le succes doit se voir autant que l'echec. Sans cette ligne, un
+        # suiveur qui a travaille est indiscernable d'un suiveur qui n'a
+        # jamais ete alimente -- constate sur le run du 27/08 au soir, ou il a
+        # fallu comparer la translation de fusion a un rejeu hors ligne pour
+        # savoir laquelle des deux situations on regardait.
+        moved = sorted(
+            math.hypot(refined[k][0] - self._poses[k][0],
+                       refined[k][1] - self._poses[k][1])
+            for k in range(n)
+        )
+        _LOGGER.info(
+            "SLAM: %d fermetures sur %d candidates fermees pendant le menage ; "
+            "poses deplacees de %.1f cm en median, %.1f cm au pire",
+            self.matched, self.candidates, 100 * moved[n // 2], 100 * moved[-1],
+        )
+        return refined
 
     @property
     def scans(self):
