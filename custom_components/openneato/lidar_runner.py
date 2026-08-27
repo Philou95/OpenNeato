@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -565,7 +566,15 @@ class LidarMapRunner:
             # Whole captures now, not c[:4]: the builder weighs each scan by
             # the movement measured during it, which lives in the trailing
             # fields the truncation used to throw away.
-            build_session_grids, captures
+            #
+            # refine=True : fermeture de boucle sur les poses avant la
+            # projection. Elle coute ~85 s dans l'executeur a la fin d'un
+            # menage d'une heure, et fait passer le recouvrement de fusion de
+            # 67,8 % a 85,3 % sur le run le plus derive, de 65,0 a 74,8 sur
+            # celui du 27/08. Sous MERGE_MIN_OVERLAP la session est refusee et
+            # trois refus effacent la carte : ca n'achete pas seulement de la
+            # nettete, ca eloigne la carte du bord.
+            partial(build_session_grids, captures, refine=True)
         )
         # La carte telle qu'elle est avant la fusion. merge_session peut la
         # jeter entierement -- au troisieme refus d'affilee il considere que

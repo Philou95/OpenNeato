@@ -40,6 +40,7 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import slam
 from .const import CELL_SIZE_M, CLEAN_WIDTH_M as _CLEAN_WIDTH_M
 
 _LOGGER = logging.getLogger(__name__)
@@ -1024,6 +1025,7 @@ def match_pose(
 def build_session_grids(
     captures: list[tuple[float, ...]],
     match: bool = True,
+    refine: bool = False,
 ) -> tuple[
     dict[tuple[int, int], float],
     set[tuple[int, int]],
@@ -1049,19 +1051,21 @@ def build_session_grids(
 
     CPU-bound; call it from the executor.
     """
-    walls: dict[tuple[int, int], float] = {}
-    floor: set[tuple[int, int]] = set()
-    free: set[tuple[int, int]] = set()
-    # How many scans saw through each cell. Counted rather than unioned so a
-    # single stray beam cannot clear a wall on its own.
-    seen_through: dict[tuple[int, int], int] = {}
+    # -- passe 1 : les poses ----------------------------------------------
+    # Le recalage a besoin d'une carte a laquelle se comparer, donc cette passe
+    # construit des murs de travail, jetes ensuite. La projection definitive est
+    # refaite en passe 2 depuis les poses retenues. C'est ce decoupage qui
+    # permet d'inserer la fermeture de boucle entre les deux -- et, quand elle
+    # ne tourne pas, le resultat est identique a l'ancien code puisque la
+    # projection est deterministe a poses donnees.
+    scratch: dict[tuple[int, int], float] = {}
+    scans: list[tuple[float, float, float, Any, float]] = []
     # Running correction: drift accumulates, so each scan starts from the
     # previous scan's answer rather than from raw odometry again.
     dx = dy = dtheta = 0.0
     matching = match
     placed = 0
     sum_dx = sum_dy = 0.0
-    prev: tuple[float, float] | None = None
     for capture in captures:
         x, y, theta, points = capture[:4]
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
@@ -1069,7 +1073,7 @@ def build_session_grids(
             continue
         x, y, theta = x + dx, y + dy, theta + dtheta
         if matching and placed >= MATCH_SEED:
-            mx, my, mtheta = match_pose(walls, x, y, theta, points)
+            mx, my, mtheta = match_pose(scratch, x, y, theta, points)
             dx, dy, dtheta = dx + (mx - x), dy + (my - y), dtheta + (mtheta - theta)
             if math.hypot(dx, dy) > MATCH_MAX_DRIFT_M:
                 # Runaway: stop correcting rather than invent a pose.
@@ -1078,6 +1082,44 @@ def build_session_grids(
                 matching = False
             else:
                 x, y, theta = mx, my, mtheta
+        for cell in project_scan(x, y, theta, points):
+            scratch[cell] = scratch.get(cell, 0.0) + weight
+        scans.append((x, y, theta, points, weight))
+        placed += 1
+        sum_dx += dx
+        sum_dy += dy
+
+    # -- fermeture de boucle, entre les deux passes ------------------------
+    # Elle rend None quand elle n'a rien a dire -- trop peu de scans, aucun
+    # retour sur zone, trop peu de fermetures retenues -- et le dit dans le
+    # log. Une exception ne doit pas couter la carte : une session non
+    # optimisee vaut infiniment mieux qu'une session perdue.
+    if refine and scans:
+        try:
+            better = slam.refine_poses(
+                [(s_[0], s_[1], s_[2], s_[3]) for s_ in scans],
+                [(s_[0], s_[1], math.radians(s_[2])) for s_ in scans],
+                MAX_RANGE_M,
+                LIDAR_BEHIND_M,
+            )
+        except Exception:
+            _LOGGER.exception("SLAM: echec, poses laissees telles quelles")
+            better = None
+        if better is not None:
+            scans = [
+                (better[k][0], better[k][1], math.degrees(better[k][2]), s_[3], s_[4])
+                for k, s_ in enumerate(scans)
+            ]
+
+    # -- passe 2 : la projection -------------------------------------------
+    walls: dict[tuple[int, int], float] = {}
+    floor: set[tuple[int, int]] = set()
+    free: set[tuple[int, int]] = set()
+    # How many scans saw through each cell. Counted rather than unioned so a
+    # single stray beam cannot clear a wall on its own.
+    seen_through: dict[tuple[int, int], int] = {}
+    prev: tuple[float, float] | None = None
+    for x, y, theta, points, weight in scans:
         for cell in project_scan(x, y, theta, points):
             walls[cell] = walls.get(cell, 0.0) + weight
         for cell in scan_free_cells(x, y, theta, points):
@@ -1091,9 +1133,6 @@ def build_session_grids(
             floor.update(stamp_swath(prev[0], prev[1], x, y))
             free.update(carve_swath(prev[0], prev[1], x, y))
         prev = (x, y)
-        placed += 1
-        sum_dx += dx
-        sum_dy += dy
     # Everything the beams saw through often enough joins what the robot drove
     # over. This is the half that reaches: driving proves a 10 cm band around a
     # path that never comes near a wall, while looking reaches everything in
