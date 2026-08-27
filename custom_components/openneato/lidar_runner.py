@@ -817,14 +817,20 @@ class LidarMapRunner:
         produced. This keeps a single run so the merge can be replayed offline
         as many times as it takes.
 
-        Writes only if the file is absent, so it costs one run and then stops
-        by itself. Delete the file to arm it again. Never lets a failure reach
-        the merge: this is a convenience, and the map matters more.
+        Ecrit a CHAQUE run, en remplacant le precedent. Le fichier ne
+        s'ecrivait auparavant que s'il etait absent -- une facon d'economiser un
+        peu de disque, mais qui achetait un piege : le 27/08 le dump d'un run
+        bloquait celui du suivant, et rien n'aurait signale qu'on rejouait
+        l'ancien en croyant analyser le nouveau. 1,4 Mo ne valent pas un
+        resultat perime indiscernable d'un resultat frais.
+
+        Pour garder un run en particulier, le renommer : le suivant ne le
+        touchera pas. Ne laisse jamais un echec atteindre la fusion : c'est une
+        commodite, et la carte compte davantage.
         """
         path = Path(self.hass.config.path(CAPTURE_DUMP_NAME))
         try:
-            if path.exists():
-                return
+            replaced = path.exists()
             if len(captures) > CAPTURE_DUMP_MAX:
                 _LOGGER.debug(
                     "LIDAR mapping: not dumping %d captures, over the %d cap",
@@ -838,7 +844,8 @@ class LidarMapRunner:
                 "sessions_before": self._map.sessions,
                 # Post rotation-filter: exactly what build_session_grids sees,
                 # so an offline replay reproduces the run rather than resembling
-                # it. (x, y, theta, points, rotationSpeed, moved, turned)
+                # it. (x, y, theta, points, rotationSpeed, moved, turned,
+                # rssi, heap)
                 "captures": [
                     [c[0], c[1], c[2], [list(p) for p in c[3]], *c[4:]]
                     for c in captures
@@ -846,9 +853,11 @@ class LidarMapRunner:
             }
             path.write_text(json.dumps(payload), encoding="utf-8")
             _LOGGER.info(
-                "LIDAR mapping: kept %d scans in %s (%.1f MB) for offline testing; "
-                "delete the file to keep another run",
-                len(captures), path, path.stat().st_size / 1e6,
+                "LIDAR mapping: kept %d scans of %s in %s (%.1f MB) for offline "
+                "testing%s",
+                len(captures), self._session_name or "?", path,
+                path.stat().st_size / 1e6,
+                " — replacing the previous run" if replaced else "",
             )
         except Exception as err:  # noqa: BLE001 -- diagnostics never break a merge
             _LOGGER.warning("LIDAR mapping: could not keep the scans (%s)", err)
