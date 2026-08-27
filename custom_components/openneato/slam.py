@@ -47,6 +47,19 @@ MAX_PAIR_M = 0.25          # rayon d'appariement ICP, et pas de la grille
 ICP_ITERS = 30
 ICP_MIN_PTS = 30           # sous ca l'appariement n'a rien a dire
 
+# Un scan porte ~205 retours, bien plus qu'il n'en faut pour trouver une
+# rotation et une translation. Mesure sur le run du 27/08 au soir, 9 410
+# candidats : a 204 points l'appariement prend 75,7 s pour 69,4 % de
+# recouvrement, a 102 points il prend **34,1 s pour 69,5 %** -- 2,2x plus
+# rapide et une cellule isolee de moins. En descendant plus bas ca coute :
+# 68 points ne rendent plus que 67,0 %, et ce n'est pas le garde-fou
+# ICP_MIN_PTS qui bride (le rendre proportionnel ne recupere que 0,7 point),
+# c'est l'information qui manque. Donc 2, pas 3.
+#
+# Le pas preserve l'etalement angulaire : les retours sont ordonnes par angle
+# sur 360 degres, donc un sur deux couvre toujours le tour complet.
+ICP_POINT_STRIDE = 2
+
 LOOP_MIN_GAP = 40          # scans d'ecart minimum pour parler de retour sur zone
 LOOP_MAX_DIST_M = 1.2      # au-dela les deux scans ne voient pas la meme chose
 
@@ -285,7 +298,7 @@ def clouds(scans, max_range_m, lidar_behind_m):
     rad = math.pi / 180.0
     for scan in scans:
         pts = []
-        for point in scan[3]:
+        for point in scan[3][::ICP_POINT_STRIDE]:
             ang = point[0]
             dist = point[1] / 1000.0
             if dist <= 0.0 or dist > max_range_m:
