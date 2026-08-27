@@ -472,6 +472,7 @@ class LidarMapRunner:
                         # both, so nothing about the robot explains it.
                         # Without this the next occurrence is just as mute.
                         self._rssi(),
+                        self._heap(),
                     )
                 )
                 await self._persist_captures()
@@ -688,6 +689,13 @@ class LidarMapRunner:
         spread here means a bad run says so at the time, instead of being
         reconstructed from a capture dump days later.
         """
+        heaps = sorted(c[8] for c in captures if len(c) > 8 and c[8])
+        if len(heaps) >= 5:
+            _LOGGER.info(
+                "LIDAR mapping: memoire du pont sur le run — median %.0f Ko, "
+                "au plus bas %.0f Ko",
+                heaps[len(heaps) // 2] / 1024, heaps[0] / 1024,
+            )
         vals = [c[7] for c in captures if len(c) > 7 and c[7]]
         if len(vals) < 5:
             return
@@ -762,7 +770,9 @@ class LidarMapRunner:
             scans, high = await self.hass.async_add_executor_job(_parse_scans, text)
             self._last_seq = max(self._last_seq, high)
             for x, y, t, points, rpm, moved, turned in scans:
-                self._captures.append((x, y, t, points, rpm, moved, turned, self._rssi()))
+                self._captures.append(
+                    (x, y, t, points, rpm, moved, turned, self._rssi(), self._heap())
+                )
                 total += 1
                 if self._buffer_ok is None:
                     self._buffer_ok = True
@@ -777,6 +787,23 @@ class LidarMapRunner:
         """Signal strength from the coordinator's last poll, or 0 if unknown."""
         try:
             return float(((self.coordinator.data or {}).get("system") or {}).get("rssi") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _heap(self) -> float:
+        """Memoire libre du pont, du meme sondage que le RSSI -- donc gratuit.
+
+        Enregistree ici parce que le pont s'est redemarre pendant les deux
+        menages du 27/08, et toujours au meme ENDROIT et non au meme moment :
+        a 81 % et 85 % du parcours, la ou la part de scans sous -75 dBm passe
+        de 0-4 % a 15-17 %. L'hypothese est qu'un lien faible fait s'empiler
+        les tampons AsyncTCP jusqu'a ce que le watchdog memoire du firmware
+        tire (sous 16 Ko pendant 30 s). Le heap releve APRES un reboot est
+        toujours sain : c'est celui d'AVANT qu'il faut, et il n'existait
+        nulle part. Apparie au RSSI du meme scan, il tranchera.
+        """
+        try:
+            return float(((self.coordinator.data or {}).get("system") or {}).get("heap") or 0.0)
         except (TypeError, ValueError):
             return 0.0
 
