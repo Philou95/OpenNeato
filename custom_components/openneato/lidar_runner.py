@@ -30,6 +30,7 @@ from datetime import timedelta
 from .api import OpenNeatoApiError
 from .const import CELL_SIZE_M, DOMAIN
 from .lidar_mapper import (
+    SessionTracker,
     plan_calibration,
     AccumulatedMap,
     MAX_MOVE_DURING_SCAN_M,
@@ -192,6 +193,14 @@ class LidarMapRunner:
         self._last_persist = 0.0
         self._map: AccumulatedMap | None = None
         self._captures: list[tuple[float, float, float, list[tuple[int, int]]]] = []
+        # Ferme les boucles au fil du menage plutot qu'en bloc a la fin. Le
+        # nombre de paires candidates croit comme le carre du nombre de scans,
+        # donc l'etaler transforme un cout quadratique en fin de course en un
+        # cout constant par scan -- 5 min 11 s de fusion mesurees sur le
+        # Raspberry Pi 5, contre une vingtaine de secondes ainsi.
+        self._tracker: SessionTracker | None = None
+        self._tracked = 0
+        self._tracking = False
         self._collecting = False
         self._unsub_timer = None
         self._unsub_coordinator = None
@@ -282,6 +291,12 @@ class LidarMapRunner:
             )
         self._pending_captures = None
         self._pending_session = None
+        # Cree apres la reprise eventuelle : le suiveur absorbera les captures
+        # restaurees d'un bloc au premier drain, ce qui est exactement ce qu'il
+        # aurait fait si elles etaient arrivees une a une.
+        self._tracker = SessionTracker()
+        self._tracked = 0
+        self._tracking = False
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -298,9 +313,39 @@ class LidarMapRunner:
 
     # ── sampling ────────────────────────────────────────────────────
 
+    async def _track_new(self) -> None:
+        """Ferme les boucles des scans arrives depuis le dernier passage.
+
+        Le curseur avance AVANT l'attente : un tick concurrent voit alors une
+        tranche vide au lieu de refaire le meme travail. Et si l'executeur
+        echoue, le suiveur est abandonne plutot que laisse incomplet -- un
+        suiveur a trous rendrait des poses fausses, pas approximatives, et la
+        fusion retombe sur le calcul de fin qui, lui, est correct.
+        """
+        if self._tracker is None or self._tracking:
+            return
+        new = self._captures[self._tracked:]
+        if not new:
+            return
+        self._tracked = len(self._captures)
+        self._tracking = True
+        try:
+            await self.hass.async_add_executor_job(self._tracker.add_many, new)
+        except Exception:
+            _LOGGER.exception(
+                "SLAM: suivi au fil de l'eau abandonne — la fusion refera le "
+                "calcul en fin de run"
+            )
+            self._tracker = None
+        finally:
+            self._tracking = False
+
     async def _async_tick(self, _now=None) -> None:
         if self._busy:
             return
+        # Avant tout chemin qui peut sortir tot : c'est du travail qui doit se
+        # faire a chaque tick, quel que soit l'etat du robot.
+        await self._track_new()
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
         if not any(s in state for s in ACTIVE) or any(m in state for m in UNMAPPABLE):
             # Paused, recharging, or heading for the dock: no new floor is
@@ -551,7 +596,9 @@ class LidarMapRunner:
             )
             return
 
+        before_filter = len(captures)
         captures = self._drop_slow_scans(captures)
+        dropped = before_filter - len(captures)
         if len(captures) < MIN_CAPTURES:
             _LOGGER.info(
                 "LIDAR mapping: only %d captures left after the rotation filter, "
@@ -562,6 +609,17 @@ class LidarMapRunner:
         self._log_link_quality(captures)
         await self.hass.async_add_executor_job(self._dump_captures, captures)
 
+        # Le suiveur n'est valable que si le filtre de rotation n'a rien
+        # retire : enlever un scan changerait la pose de tous les suivants,
+        # puisque match_pose s'accumule. Cas rare -- une fois sur neuf runs,
+        # deux scans sur 501 -- et on le dit au lieu de le taire.
+        tracker, self._tracker = self._tracker, None
+        if tracker is not None and not tracker.usable(dropped):
+            _LOGGER.info(
+                "SLAM: le filtre de rotation a retire %d scans, le suivi au fil "
+                "de l'eau ne vaut plus — recalcul complet", dropped,
+            )
+            tracker = None
         walls, floor, free, correction = await self.hass.async_add_executor_job(
             # Whole captures now, not c[:4]: the builder weighs each scan by
             # the movement measured during it, which lives in the trailing
@@ -574,7 +632,7 @@ class LidarMapRunner:
             # celui du 27/08. Sous MERGE_MIN_OVERLAP la session est refusee et
             # trois refus effacent la carte : ca n'achete pas seulement de la
             # nettete, ca eloigne la carte du bord.
-            partial(build_session_grids, captures, refine=True)
+            partial(build_session_grids, captures, refine=True, tracker=tracker)
         )
         # La carte telle qu'elle est avant la fusion. merge_session peut la
         # jeter entierement -- au troisieme refus d'affilee il considere que

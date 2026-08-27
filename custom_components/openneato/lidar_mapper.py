@@ -1022,36 +1022,12 @@ def match_pose(
     return bx, by, bt
 
 
-def build_session_grids(
-    captures: list[tuple[float, ...]],
-    match: bool = True,
-    refine: bool = False,
-) -> tuple[
-    dict[tuple[int, int], float],
-    set[tuple[int, int]],
-    set[tuple[int, int]],
-    tuple[float, float],
-]:
-    """Turn a run's captures into wall hit counts and traversed floor.
+def _session_poses(captures, match, refine):
+    """La passe 1 : recaler chaque scan, puis fermer les boucles.
 
-    Captures may carry the movement measured during the scan as two extra
-    fields; when they do, each scan contributes its weight rather than a flat
-    1. Older callers passing only (x, y, theta, points) keep the old
-    behaviour.
-
-    Each scan is also matched onto the map built from the ones before it,
-    which is what stops odometry drift accumulating across a run. Pass
-    match=False for the raw-odometry behaviour.
-
-    Also returns the mean pose correction scan matching applied, in metres.
-    The walls come out in the corrected frame; the replay's path and coverage
-    are read from the robot's own log and are still in the raw one, so
-    whoever serves them has to be told the difference. Leaving it out put the
-    cleaned area 8 cm off the walls on the 2026-08-26 run.
-
-    CPU-bound; call it from the executor.
+    Sortie en fonction pour que `build_session_grids` puisse la court-circuiter
+    quand un `SessionTracker` a deja fait le travail au fil du menage.
     """
-    # -- passe 1 : les poses ----------------------------------------------
     # Le recalage a besoin d'une carte a laquelle se comparer, donc cette passe
     # construit des murs de travail, jetes ensuite. La projection definitive est
     # refaite en passe 2 depuis les poses retenues. C'est ce decoupage qui
@@ -1110,6 +1086,55 @@ def build_session_grids(
                 (better[k][0], better[k][1], math.degrees(better[k][2]), s_[3], s_[4])
                 for k, s_ in enumerate(scans)
             ]
+    correction = (sum_dx / placed, sum_dy / placed) if placed else (0.0, 0.0)
+    return scans, correction
+
+
+def build_session_grids(
+    captures: list[tuple[float, ...]],
+    match: bool = True,
+    refine: bool = False,
+    tracker: SessionTracker | None = None,
+) -> tuple[
+    dict[tuple[int, int], float],
+    set[tuple[int, int]],
+    set[tuple[int, int]],
+    tuple[float, float],
+]:
+    """Turn a run's captures into wall hit counts and traversed floor.
+
+    Captures may carry the movement measured during the scan as two extra
+    fields; when they do, each scan contributes its weight rather than a flat
+    1. Older callers passing only (x, y, theta, points) keep the old
+    behaviour.
+
+    Each scan is also matched onto the map built from the ones before it,
+    which is what stops odometry drift accumulating across a run. Pass
+    match=False for the raw-odometry behaviour.
+
+    Also returns the mean pose correction scan matching applied, in metres.
+    The walls come out in the corrected frame; the replay's path and coverage
+    are read from the robot's own log and are still in the raw one, so
+    whoever serves them has to be told the difference. Leaving it out put the
+    cleaned area 8 cm off the walls on the 2026-08-26 run.
+
+    CPU-bound; call it from the executor.
+    """
+    # -- le suiveur a-t-il deja tout fait pendant le menage ? --------------
+    # Si oui, la passe 1 et l'appariement sont derriere nous : il ne reste que
+    # le graphe et la projection. C'est ce qui fait tomber la fusion de cinq
+    # minutes a une vingtaine de secondes sur un Raspberry Pi 5.
+    if tracker is not None:
+        scans = tracker.scans
+        correction = tracker.correction
+        better = tracker.refined()
+        if better is not None:
+            scans = [
+                (better[k][0], better[k][1], math.degrees(better[k][2]), s_[3], s_[4])
+                for k, s_ in enumerate(scans)
+            ]
+    else:
+        scans, correction = _session_poses(captures, match, refine)
 
     # -- passe 2 : la projection -------------------------------------------
     walls: dict[tuple[int, int], float] = {}
@@ -1175,7 +1200,6 @@ def build_session_grids(
         for dx in (-1, 0, 1)
         for dy in (-1, 0, 1)
     }
-    correction = (sum_dx / placed, sum_dy / placed) if placed else (0.0, 0.0)
     return walls, floor, free, correction
 
 
@@ -1206,3 +1230,179 @@ def scan_points(payload: dict[str, Any]) -> list[tuple[int, int]]:
         for p in payload.get("points", ())
         if p.get("error") == 0 and 0 < p.get("dist", 0) <= MAX_RANGE_M * 1000
     ]
+
+
+class SessionTracker:
+    """Place les scans et ferme les boucles au fil du menage.
+
+    La passe 1 est causale : `match_pose` ne regarde que les murs deja poses,
+    donc la pose d'un scan ne bouge plus une fois placee. L'ICP fait a
+    l'arrivee d'un scan rend donc exactement ce qu'il rendrait a la fin --
+    verifie sur le run du 27/08 : 9 410 paires appariees dans les deux ordres,
+    ecart **0,000000 mm** sur la transformation comme sur le residu.
+
+    L'interet n'est pas seulement d'aller plus vite. Le nombre de paires
+    candidates croit comme le **carre** du nombre de scans : 481 scans en
+    donnent 9 410, mais 750 scans en donneraient six fois plus, et la fusion
+    repasserait a dix minutes sur un Pi 5 -- vingt sur un Pi 4, sur lequel
+    tourne une bonne part des installations. Etale au fil de l'eau, le cout
+    devient **constant par scan** au lieu de quadratique a la fin.
+
+    ⚠ Le suiveur travaille sur *toutes* les captures. `_drop_slow_scans`
+    n'est decide qu'a la fin, sur la mediane du run entier, et retirer un scan
+    changerait les poses de tous les suivants -- `match_pose` s'accumule. Le
+    contrat est donc : le resultat n'est utilisable que si le filtre ne retire
+    rien. C'est le cas quasi systematique (une seule fois sur neuf runs, deux
+    scans sur 501), et `usable()` le dit franchement plutot que de rendre un
+    resultat approximatif.
+    """
+
+    __slots__ = ("_clouds", "_dth", "_dx", "_dy", "_edges", "_matching",
+                 "_placed", "_points", "_poses", "_scratch", "_sum_dx",
+                 "_sum_dy", "_weights", "candidates", "matched")
+
+    def __init__(self) -> None:
+        self._scratch: dict[tuple[int, int], float] = {}
+        self._poses: list[tuple[float, float, float]] = []
+        self._clouds: list[list[tuple[float, float]]] = []
+        self._points: list = []
+        self._weights: list[float] = []
+        self._edges: list[tuple[int, int, tuple[float, float, float], float]] = []
+        self._dx = self._dy = self._dth = 0.0
+        self._matching = True
+        self._placed = 0
+        self._sum_dx = 0.0
+        self._sum_dy = 0.0
+        self.candidates = 0
+        self.matched = 0
+
+    # ── pendant le menage ────────────────────────────────────────────
+
+    def add(self, capture) -> None:
+        """Place un scan et ferme ses retours sur zone avec les precedents.
+
+        Reproduit ligne pour ligne la passe 1 de build_session_grids, puis
+        apparie. Tout ecart ici invaliderait l'equivalence demontree.
+        """
+        x, y, theta, points = capture[:4]
+        weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
+        if weight <= 0:
+            return
+        x, y, theta = x + self._dx, y + self._dy, theta + self._dth
+        if self._matching and self._placed >= MATCH_SEED:
+            mx, my, mtheta = match_pose(self._scratch, x, y, theta, points)
+            self._dx += mx - x
+            self._dy += my - y
+            self._dth += mtheta - theta
+            if math.hypot(self._dx, self._dy) > MATCH_MAX_DRIFT_M:
+                # Runaway: stop correcting rather than invent a pose.
+                _LOGGER.debug(
+                    "scan matching gave up after %.2f m of drift",
+                    math.hypot(self._dx, self._dy),
+                )
+                self._dx = self._dy = self._dth = 0.0
+                self._matching = False
+            else:
+                x, y, theta = mx, my, mtheta
+        for cell in project_scan(x, y, theta, points):
+            self._scratch[cell] = self._scratch.get(cell, 0.0) + weight
+
+        k = len(self._poses)
+        self._poses.append((x, y, math.radians(theta)))
+        self._points.append(points)
+        self._weights.append(weight)
+        self._clouds.append(
+            slam.clouds([(x, y, theta, points)], MAX_RANGE_M, LIDAR_BEHIND_M)[0]
+        )
+        self._placed += 1
+        self._sum_dx += self._dx
+        self._sum_dy += self._dy
+        self._close_loops(k)
+
+    def _close_loops(self, k: int) -> None:
+        """Les retours sur zone que ce scan ferme avec les precedents."""
+        xk, yk = self._poses[k][0], self._poses[k][1]
+        lim = slam.LOOP_MAX_DIST_M * slam.LOOP_MAX_DIST_M
+        for j in range(k - slam.LOOP_MIN_GAP + 1):
+            dx = self._poses[j][0] - xk
+            if dx > slam.LOOP_MAX_DIST_M or dx < -slam.LOOP_MAX_DIST_M:
+                continue
+            dy = self._poses[j][1] - yk
+            if dx * dx + dy * dy > lim:
+                continue
+            self.candidates += 1
+            z0 = slam.relative(self._poses[j], self._poses[k])
+            px, py, pth, res, fit = slam.icp(
+                self._clouds[k], self._clouds[j], z0[0], z0[1], z0[2]
+            )
+            if fit < slam.ACCEPT_MIN_FIT or res > slam.ACCEPT_MAX_RES_M:
+                continue
+            w = min(
+                2.0,
+                (fit / slam.ACCEPT_MIN_FIT)
+                * (slam.ACCEPT_MAX_RES_M / max(res, 1e-3))
+                * 0.25,
+            )
+            self._edges.append((j, k, (px, py, pth), w))
+            self.matched += 1
+
+    # ── a la fin ─────────────────────────────────────────────────────
+
+    def usable(self, dropped: int) -> bool:
+        """Le suiveur ne vaut que si le filtre de rotation n'a rien retire.
+
+        Retirer un scan changerait la pose de tous les suivants, puisque
+        `match_pose` s'accumule -- le resultat serait faux, pas approximatif.
+        Le critere n'est donc PAS un compte de poses (add() ecarte deja les
+        scans de poids nul, ce qui est un autre filtre), mais bien : combien
+        `_drop_slow_scans` a-t-il retire ?
+        """
+        return dropped == 0 and bool(self._poses)
+
+    def refined(self):
+        """Poses optimisees. Rend None -- en disant pourquoi -- s'il n'y a
+        pas de quoi contraindre le graphe."""
+        n = len(self._poses)
+        if n < slam.MIN_SCANS:
+            _LOGGER.debug("SLAM: %d scans, trop peu pour fermer une boucle", n)
+            return None
+        if self.matched < n // 4:
+            _LOGGER.info(
+                "SLAM: %d fermetures retenues sur %d candidates, trop peu pour "
+                "contraindre %d scans -- poses laissees telles quelles",
+                self.matched, self.candidates, n,
+            )
+            return None
+        edges = [
+            (k, k + 1, slam.relative(self._poses[k], self._poses[k + 1]), 1.0)
+            for k in range(n - 1)
+        ]
+        edges.extend(self._edges)
+        return slam.optimise(self._poses, edges)
+
+    @property
+    def scans(self):
+        """(x, y, theta_deg, points, weight) par scan place."""
+        return [
+            (p[0], p[1], math.degrees(p[2]), pts, w)
+            for p, pts, w in zip(self._poses, self._points, self._weights)
+        ]
+
+    def add_many(self, captures) -> None:
+        """Absorbe un lot. Appele depuis l'executeur : un tick de rattrapage
+        peut apporter deux douzaines de scans, et ~83 ms de CPU chacun dans la
+        boucle d'evenements est exactement ce qui rend la maison lente."""
+        for capture in captures:
+            self.add(capture)
+
+    @property
+    def correction(self) -> tuple[float, float]:
+        """Correction moyenne appliquee par le recalage, en metres.
+
+        Meme definition que la passe 1 : la moyenne du decalage accumule, pas
+        du decalage par scan. Le rejeu la reclame pour dessiner le trajet dans
+        le meme repere que les murs.
+        """
+        if not self._placed:
+            return (0.0, 0.0)
+        return (self._sum_dx / self._placed, self._sum_dy / self._placed)
