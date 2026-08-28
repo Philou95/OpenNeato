@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.5.0";
+const CARD_VERSION = "2.5.2";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -297,6 +297,15 @@ class OpenNeatoReplayCard extends HTMLElement {
         // Deadline for the "map being rebuilt" notice, see _watchTick().
         this._mergeUntil = 0;
         this._wasRecording = false;
+        // The robot answered nothing last time we asked. Kept apart from the
+        // merge window because the two say different things and share one
+        // line -- see _updateNotice().
+        this._offline = false;
+        // Listings in a row with nothing being recorded. An unreachable robot
+        // is reported by the backend as "nothing is recording", which is
+        // indistinguishable from a run that just ended, so the end of a run is
+        // only believed once it has been seen twice.
+        this._noLiveTicks = 0;
 
         // Playback state. `_time` is the source of truth and is mutated by
         // the rAF loop directly — putting it in a re-render cycle is what
@@ -1027,7 +1036,10 @@ class OpenNeatoReplayCard extends HTMLElement {
         if (!this._hass || !this.isConnected) return;
         const recording = this._sessions.some((s) => s.recording);
         let delay = IDLE_POLL_MS;
-        if (recording) delay = LIVE_REFRESH_MS;
+        // `_wasRecording` counts too: a run believed to be in progress that
+        // has stopped being listed is either finishing or out of radio range,
+        // and both deserve an answer sooner than twenty seconds.
+        if (recording || this._wasRecording) delay = LIVE_REFRESH_MS;
         else if (Date.now() < this._mergeUntil) delay = MERGE_POLL_MS;
         this._liveTimer = setTimeout(() => this._watchTick(), delay);
     }
@@ -1042,6 +1054,20 @@ class OpenNeatoReplayCard extends HTMLElement {
                 type: "openneato/sessions",
                 ...(this._entryId ? { entry_id: this._entryId } : {}),
             });
+            // The backend says so when the list came out of its own cache
+            // rather than from the robot. Then it carries no news at all: not
+            // "nothing is recording", which is what it looks like, but "we
+            // could not ask". Acting on it would end the run on screen and
+            // start waiting for a merge that is not coming.
+            //
+            // Older backends do not send the field; `!== false` keeps them
+            // behaving exactly as before rather than silently going deaf.
+            if (res.robot_available === false) {
+                this._offline = true;
+                this._updateNotice();
+                this._scheduleWatch();
+                return;
+            }
             this._sessions = res.sessions || [];
             const planSig = planSignature(res.floorplan);
             // No `!== null` guard: going from no map at all to the first one
@@ -1049,19 +1075,25 @@ class OpenNeatoReplayCard extends HTMLElement {
             const planChanged = planSig !== this._planSig;
             this._planSig = planSig;
             const live = this._sessions.find((s) => s.recording);
+            this._noLiveTicks = live ? 0 : this._noLiveTicks + 1;
 
             // ── the robot has just gone out ───────────────────────────
             // Show the run it is writing, unless the viewer is deliberately
             // looking at an older one.
             if (live && !this._wasRecording) {
+                const resumed = stableName(this._selectedName) === stableName(live.name);
                 this._wasRecording = true;
                 this._mergeUntil = 0;
-                this._setNotice(null);
+                this._updateNotice();
                 if (!this._userPicked) {
                     this._selectedName = live.name;
                     this._delBtn.disabled = true;
                     this._renderPicker();
-                    await this._selectSession(live.name);
+                    // `resumed` is the run coming back after the link dropped,
+                    // not a new one: the viewer's pan and zoom are still about
+                    // this very session and throwing them away would punish
+                    // them for the robot having walked behind a wall.
+                    await this._selectSession(live.name, { keepView: resumed });
                     this._scheduleWatch();
                     return;
                 }
@@ -1071,10 +1103,17 @@ class OpenNeatoReplayCard extends HTMLElement {
             // The map is folded in a minute or so later, so keep watching and
             // say what is happening instead of leaving a stale plan up with
             // no explanation.
-            if (!live && this._wasRecording) {
+            //
+            // Waited out over two listings, because an unreachable robot is
+            // reported as "nothing is recording" -- the backend serves the
+            // last list it saw and cannot honestly claim any of it is still
+            // being written. A run ending and the bridge going quiet in the
+            // far corner of the house look identical from here, and only one
+            // of them is followed by a merge.
+            if (!live && this._wasRecording && this._noLiveTicks >= 2) {
                 this._wasRecording = false;
                 this._mergeUntil = Date.now() + MERGE_WAIT_MS;
-                this._setNotice("Rebuilding the map…");
+                this._updateNotice();
             }
 
             this._renderPicker();
@@ -1085,7 +1124,7 @@ class OpenNeatoReplayCard extends HTMLElement {
             // and cleaned area move onto the new walls at the same moment.
             if (planChanged) {
                 this._mergeUntil = 0;
-                this._setNotice(null);
+                this._updateNotice();
                 const now = this._matchSession(this._selectedName);
                 if (now) {
                     await this._selectSession(now.name, { keepView: true });
@@ -1097,7 +1136,7 @@ class OpenNeatoReplayCard extends HTMLElement {
                 // never changes the map, and the notice must not outlive the
                 // wait -- see MERGE_WAIT_MS.
                 this._mergeUntil = 0;
-                this._setNotice(null);
+                this._updateNotice();
             }
 
             // The run we are watching gets renamed under us the moment the
@@ -1123,7 +1162,12 @@ class OpenNeatoReplayCard extends HTMLElement {
             // Only the growing one needs re-reading on every tick; a finished
             // run does not change, and re-parsing it twenty times a minute
             // would be work for nothing.
-            if (current.recording) {
+            //
+            // While the robot is out of reach it is re-read anyway, whatever
+            // it is: the listing is answered from Home Assistant's own cache
+            // and so proves nothing about the radio, and this fetch is the
+            // only thing that does. It is what takes the notice back down.
+            if (current.recording || this._offline) {
                 // Keep the viewer's pan, zoom and scrub position: this is a
                 // background refresh, not a fresh selection.
                 await this._selectSession(current.name, { keepView: true });
@@ -1211,6 +1255,12 @@ class OpenNeatoReplayCard extends HTMLElement {
     // each time would make the map unwatchable.
     async _selectSession(name, { keepView = false } = {}) {
         if (!name || this._loading) return;
+        // Held so a fetch that fails can put back exactly what was on screen.
+        // The robot rides out of radio range in one corner of this house, and
+        // a timeout there is not a reason to replace the run being watched
+        // with an error message.
+        const previous = this._session;
+        const previousName = this._selectedName;
         this._selectedName = name;
         this._picker.value = name;
         this._loading = true;
@@ -1233,6 +1283,8 @@ class OpenNeatoReplayCard extends HTMLElement {
                 this._picker.value = raw.name;
             }
             this._session = new Session(raw);
+            this._offline = false;
+            this._updateNotice();
             if (!keepView) this._tf = { panX: 0, panY: 0, zoom: 1 };
             this._cov.sig = "";
             await this._loadFloorplan(raw.floorplan);
@@ -1253,9 +1305,29 @@ class OpenNeatoReplayCard extends HTMLElement {
             // was renamed between the listing and the fetch, is a reason to
             // wait for the next tick -- not to replace the run the user is
             // watching with an error.
+            this._offline = true;
             if (keepView) {
                 console.debug("openneato-replay-card: live refresh skipped", err);
+                this._updateNotice();
+            } else if (previous) {
+                // A map on screen is never traded for an error. Put back the
+                // run that was showing, say why in the corner, and let the
+                // next tick pick it up when the robot answers again.
+                console.debug("openneato-replay-card: keeping the last map", err);
+                this._session = previous;
+                this._selectedName = previousName;
+                this._loading = false;
+                this._restoreDom();
+                this._updateNotice();
+            } else if (err && err.code === "fetch_failed") {
+                // Nothing to fall back on -- the page was opened while the
+                // robot was out of reach, or while the bridge was cutting the
+                // download short. Say that instead of showing aiohttp's own
+                // words, because it heals itself: the watch loop keeps asking
+                // and the first clean answer draws the map.
+                this._fail("Robot not answering — the map will appear when it does");
             } else {
+                // A real failure: parsed wrong, deleted, no such entry.
                 this._fail(err.message || String(err));
             }
         } finally {
@@ -1339,6 +1411,19 @@ class OpenNeatoReplayCard extends HTMLElement {
     _setOverlay(text) {
         this._overlay.textContent = text || "";
         this._overlay.hidden = !text;
+    }
+
+    /* One line, two things that can be true at once. Losing the robot is the
+       more urgent of the two -- a merge the card is waiting for cannot even be
+       observed while the link is down. */
+    _updateNotice() {
+        if (this._offline) {
+            this._setNotice("Robot not answering — showing the last map");
+        } else if (this._mergeUntil) {
+            this._setNotice("Rebuilding the map…");
+        } else {
+            this._setNotice(null);
+        }
     }
 
     // Kept on the instance as well as in the DOM: _buildDom() throws the DOM

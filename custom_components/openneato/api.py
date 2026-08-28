@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import asyncio
 from asyncio import Task, ensure_future
 from typing import Any
 
@@ -18,6 +19,12 @@ from .const import MAX_HISTORY_RESPONSE_BYTES, SESSION_NAME_PATTERN
 _LOGGER = logging.getLogger(__name__)
 
 TIMEOUT = 30  # seconds — ESP32 can be slow when serial queue is busy
+# Tries at downloading one session before giving up, and the wait between them.
+# The bridge writes a pose to SPIFFS every 2 s while cleaning and that is what
+# cuts the download short, so the gap is set to land the retry in a different
+# phase of that cadence rather than straight back into the same collision.
+HISTORY_ATTEMPTS = 3
+HISTORY_RETRY_S = 1.5
 
 _SESSION_NAME_RE = re.compile(SESSION_NAME_PATTERN)
 
@@ -319,7 +326,45 @@ class OpenNeatoApiClient:
             self._history_inflight.pop(filename, None)
 
     async def _fetch_history_session(self, filename: str) -> str:
-        """Perform the actual HTTP fetch for a session's raw JSONL data.
+        """Fetch a session's raw JSONL, retrying a body the bridge cut short.
+
+        The download races the robot's own pose journal. Serving this endpoint
+        means reading SPIFFS from the AsyncTCP task while `CleaningHistory`
+        writes to it from the loop task every 2 s, with no mutex between them;
+        when they collide ESPAsyncWebServer abandons the body mid-send and
+        aiohttp raises TransferEncodingError. It only happens while a cleaning
+        is running -- at rest the endpoint is solid -- which is exactly when
+        somebody is watching the map, so it reached the card as a raw
+        "Response payload is not completed" where a map should have been.
+
+        A GET is idempotent and the collision is a matter of timing, so asking
+        again a moment later is both safe and usually enough. Deliberately not
+        done for the polled endpoints: retrying those would add requests to a
+        bridge that is already struggling, which is the wrong direction.
+        """
+        last: Exception | None = None
+        for attempt in range(1, HISTORY_ATTEMPTS + 1):
+            try:
+                return await self._fetch_history_once(filename)
+            except aiohttp.ClientPayloadError as err:
+                last = err
+                if attempt < HISTORY_ATTEMPTS:
+                    _LOGGER.debug(
+                        "History fetch for %s came back truncated (%s), "
+                        "attempt %d of %d",
+                        filename, err, attempt, HISTORY_ATTEMPTS,
+                    )
+                    await asyncio.sleep(HISTORY_RETRY_S)
+        _LOGGER.warning(
+            "History fetch for %s was cut short %d times: %s",
+            filename, HISTORY_ATTEMPTS, last,
+        )
+        raise OpenNeatoConnectionError(
+            f"OpenNeato at {self._host} cut the session download short: {last}"
+        ) from last
+
+    async def _fetch_history_once(self, filename: str) -> str:
+        """One attempt at the download.
 
         `filename` originates from the ESP32's /api/history listing and
         is concatenated into the URL, so we validate it against a strict

@@ -174,6 +174,14 @@ async def ws_list_sessions(
         {
             "entry_id": entry_id,
             "sessions": sessions,
+            # Whether any of this came from the robot just now. It has to be
+            # said, because the fallback above cannot honestly claim anything
+            # is still being recorded -- so a bridge that has gone quiet is
+            # reported in exactly the same words as a clean that has just
+            # ended, and the card treats those two very differently. The robot
+            # here rides out of radio range in one corner of the house on
+            # nearly every run, so this is the common case, not the exotic one.
+            "robot_available": isinstance(history, list),
             "floorplan": _floorplan_payload(hass, entry_id),
         },
     )
