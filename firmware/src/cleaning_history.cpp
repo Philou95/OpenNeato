@@ -153,8 +153,7 @@ void CleaningHistory::sampleScan() {
                 else
                     nPose2Fail++;
                 pendingScan.seq = ++scanSeq;
-                pendingScan.moved = sqrtf((x2 - scanX1) * (x2 - scanX1) +
-                                          (y2 - scanY1) * (y2 - scanY1));
+                pendingScan.moved = sqrtf((x2 - scanX1) * (x2 - scanX1) + (y2 - scanY1) * (y2 - scanY1));
                 float d = fmodf(th2 - scanT1 + 180.0f, 360.0f);
                 if (d < 0)
                     d += 360.0f;

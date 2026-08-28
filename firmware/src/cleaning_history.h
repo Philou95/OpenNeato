@@ -138,12 +138,12 @@ private:
     void tick() override;
 
     // -- LIDAR delivery buffer ----------------------------------------------
-    void sampleScan();          // loop task: ask the robot for a scan
-    void serviceScanBuffer();   // loop task: drop acked, refill, build the batch
-    void pushScan(const BufferedScan& scan);  // loop task: into RAM, or flash
+    void sampleScan(); // loop task: ask the robot for a scan
+    void serviceScanBuffer(); // loop task: drop acked, refill, build the batch
+    void pushScan(const BufferedScan& scan); // loop task: into RAM, or flash
     bool appendSpill(const BufferedScan& scan); // loop task: write one record
-    void refillFromSpill();     // loop task: flash -> RAM when there is room
-    void buildBatch();          // loop task: the next batch, as NDJSON
+    void refillFromSpill(); // loop task: flash -> RAM when there is room
+    void buildBatch(); // loop task: the next batch, as NDJSON
     bool scanPending = false;
     unsigned long scanStartedMs = 0;
     uint32_t nScanOk = 0, nScanFail = 0, nPoseFail = 0, nPose2Fail = 0;
@@ -157,14 +157,14 @@ private:
     BufferedScan pendingScan;
     float scanX1 = 0.0f, scanY1 = 0.0f, scanT1 = 0.0f;
 
-    std::deque<BufferedScan> scanRing;   // oldest first
-    uint32_t scanSeq = 0;                // last sequence number handed out
+    std::deque<BufferedScan> scanRing; // oldest first
+    uint32_t scanSeq = 0; // last sequence number handed out
     unsigned long lastScanMs = 0;
     // Buffering only starts once someone has actually collected a batch, and
     // stops again if nobody does. A bridge flashed ahead of the integration
     // must not fill its flash for a reader that never comes.
     unsigned long lastDrainMs = 0;
-    bool spilling = false;               // overflowing to flash
+    bool spilling = false; // overflowing to flash
     size_t spillReadOffset = 0;
     // Handed to the HTTP task, built here.
     String batchJson;
