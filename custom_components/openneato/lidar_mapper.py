@@ -221,6 +221,20 @@ MAX_GRID_CELLS = 200_000
 # only 35%. Anything below this is far more likely to be a bad fit than a
 # genuine discovery, and merging it would corrupt the accumulated map.
 MERGE_MIN_OVERLAP = 0.55
+# Placing the run *in progress* is judged on the margin instead, because the
+# overlap of a partial session is meaningless against a threshold tuned for a
+# whole one. What is being decided is narrower, too: not "is this session good
+# enough to go into the map" but "which of four quarter turns is it in".
+#
+# Measured by replaying runs 8 and 9 of 2026-08-27 scan by scan against the map
+# as it stood before each: from **25 scans** -- about 100 s of cleaning -- the
+# right quarter already led by 0.25 to 0.51 and by 2.2 to 4.0 times, and never
+# changed for the rest of the run. The thresholds sit below the worst of those
+# and far above a coin toss. Both are kept because they fail differently: the
+# ratio catches a run whose scores are all low, the margin a symmetric home
+# where two quarters both fit well.
+LIVE_MIN_MARGIN = 0.15
+LIVE_MIN_RATIO = 1.8
 # After this many cleanings in a row that will not fit the stored map, it is the
 # map that is wrong, not the house: the dock has been moved somewhere the fine
 # sweep cannot reach, or the furniture has changed beyond recognition. Without a
@@ -408,13 +422,24 @@ def align_to_reference(
     new_walls: dict[tuple[int, int], int],
     ref_walls: dict[tuple[int, int], int],
     search_cells: int = 8,
-) -> tuple[int, int, int, float, float]:
+) -> tuple[int, int, int, float, float, tuple[float, float, float, float]]:
     """Fit a new session's walls onto the accumulated map.
 
     Tries the four quarter turns, each with a small translation search, then
-    refines the angle, and returns (quarter, dx, dy, overlap, fine_deg).
+    refines the angle, and returns
+    (quarter, dx, dy, overlap, fine_deg, quarter_scores).
     Overlap is the share of the new session's wall cells that coincide with the
     reference, so 1.0 is perfect.
+
+    `quarter_scores` is what each of the four quarters could reach on the
+    coarse search, kept because it answers a different question from the
+    overlap: the overlap says how well the session matches the map, the spread
+    between the quarters says how sure we are it is *that* quarter and not
+    another. The two come apart on a partial session -- a run a quarter of the
+    way through overlaps only 0.48-0.67 of the map, well under
+    MERGE_MIN_OVERLAP, while still beating the runner-up quarter by 2.2 to 4.0
+    times. That is what lets the run in progress be placed on the map before
+    there is enough of it to merge. See quarter_margin().
 
     A quarter turn is not enough on its own. The dock is never square with the
     wall and the robot nudges it while cleaning, so each session also starts a
@@ -430,12 +455,15 @@ def align_to_reference(
     what happens.
     """
     if not ref_walls or not new_walls:
-        return 0, 0, 0, 0.0, 0.0
+        return 0, 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0)
 
     ref = set(ref_walls)
     fcx = sum(c[0] for c in ref) / len(ref)
     fcy = sum(c[1] for c in ref) / len(ref)
     best = (0, 0, 0, -1.0)
+    # The best each quarter could do, kept so the winner can be compared with
+    # the field rather than only with a threshold.
+    per_quarter = [0.0, 0.0, 0.0, 0.0]
     for quarter in range(4):
         rotated = _rotate_cells(new_walls, quarter)
         rcx = sum(c[0] for c in rotated) / len(rotated)
@@ -460,8 +488,14 @@ def align_to_reference(
                     # the map could never grow past what it first happened
                     # to see.
                     score = hit / min(len(rotated), len(ref))
+                    per_quarter[quarter] = max(per_quarter[quarter], score)
                     if score > best[3]:
                         best = (quarter, dx, dy, score)
+
+    # Handed back as the coarse search left them, before the fine sweep: only
+    # the winner gets refined, and comparing a refined score against unrefined
+    # ones would read as confidence the search never established.
+    scores = (per_quarter[0], per_quarter[1], per_quarter[2], per_quarter[3])
 
     # Refine the angle around the winning quarter. The translation is searched
     # again but narrowly: rotating about the grid origin shifts a distant map
@@ -490,7 +524,23 @@ def align_to_reference(
                     value = hit / min(len(turned), len(ref))
                     if value > max(score, floor_score):
                         score, dx, dy, best_fine = value, ddx, ddy, fine
-    return quarter, dx, dy, score, best_fine
+    return quarter, dx, dy, score, best_fine, scores
+
+
+def quarter_margin(
+    scores: tuple[float, float, float, float], quarter: int
+) -> tuple[float, float]:
+    """By how much the chosen quarter turn beat the best of the other three.
+
+    Returns (difference, ratio). Both, because they fail differently: the ratio
+    catches a fit whose scores are all low, the difference a symmetric home
+    where two quarters both match well. An unbeaten quarter -- the others at
+    zero -- comes back with an infinite ratio, which is the honest answer.
+    """
+    others = max(s for q, s in enumerate(scores) if q != quarter)
+    if others <= 0.0:
+        return scores[quarter], float("inf")
+    return scores[quarter] - others, scores[quarter] / others
 
 
 def manhattan_angle(cells: Iterable[tuple[int, int]]) -> float:
@@ -753,9 +803,17 @@ class AccumulatedMap:
         }
 
         if self.walls:
-            quarter, dx, dy, overlap, fine = align_to_reference(walls, self.walls)
+            quarter, dx, dy, overlap, fine, scores = align_to_reference(
+                walls, self.walls
+            )
+            # Le recouvrement dit si la session ressemble a la carte, la marge
+            # si c'est bien ce quart-la et pas un autre. Une fusion refusee
+            # avec une marge nette se lit autrement qu'une fusion refusee sur
+            # quatre quarts a egalite, et sans ca les deux se ressemblent.
+            margin, _ratio = quarter_margin(scores, quarter)
             report.update(
-                quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3)
+                quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3),
+                margin=round(margin, 3),
             )
             if overlap < MERGE_MIN_OVERLAP and not contribute:
                 # Nothing of it was going into the map anyway, so a poor fit
@@ -1395,6 +1453,31 @@ class SessionTracker:
             self.matched, self.candidates, 100 * moved[n // 2], 100 * moved[-1],
         )
         return refined
+
+    @property
+    def placed(self) -> int:
+        """Combien de scans ont ete places jusqu'ici."""
+        return self._placed
+
+    def walls_so_far(self) -> dict[tuple[int, int], float]:
+        """Les murs vus depuis le debut du menage, dans le repere du run.
+
+        C'est la copie de `_scratch`, que la passe 1 tient deja a jour pour
+        l'appariement : la meme accumulation, cellule par cellule, que la
+        passe 2 de `build_session_grids` produirait sur les memes scans. Placer
+        la session en cours sur la carte ne coute donc aucune geometrie
+        supplementaire -- seulement l'ajustement lui-meme.
+
+        Ce n'est pas tout a fait ce que la fusion verra : elle projettera
+        depuis les poses fermees par le graphe, pas depuis les poses causales.
+        L'ecart est de quelques centimetres, sans effet sur le choix d'un quart
+        de tour.
+
+        ⚠ Le dictionnaire est copie : `add()` tourne dans l'executeur, et le
+        rendre tel quel ferait iterer l'appelant sur une structure en cours de
+        modification.
+        """
+        return dict(self._scratch)
 
     @property
     def scans(self):

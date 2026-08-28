@@ -33,10 +33,14 @@ from .lidar_mapper import (
     SessionTracker,
     plan_calibration,
     AccumulatedMap,
+    LIVE_MIN_MARGIN,
+    LIVE_MIN_RATIO,
     MAX_MOVE_DURING_SCAN_M,
     MAX_TURN_DURING_SCAN_DEG,
+    align_to_reference,
     build_session_grids,
     parse_pose,
+    quarter_margin,
     MAX_CONSECUTIVE_REJECTS,
     RENDER_PX_PER_M,
     alignment_key,
@@ -103,6 +107,23 @@ MAX_INTERVAL = 12.0
 # too coarse to justify throwing a run away.
 HEALTH_EVERY = 300.0
 HEALTH_GRACE = 600.0
+# Placement de la session en cours sur la carte. Voir _align_live().
+#
+# 25 scans suffisent a designer le bon quart de tour sur les deux runs
+# rejoues ; 40 laisse de la marge sans rien coûter, le premier essai tombant
+# alors vers la troisieme minute de menage. On recommence ensuite au meme
+# rythme que le controle de sante : l'ajustement coute une a cinq secondes
+# d'executeur et fait sauter l'echantillonnage d'un tick, donc douze fois par
+# heure est genereux pour un affichage.
+LIVE_ALIGN_EVERY = 300.0
+LIVE_ALIGN_MIN_SCANS = 40
+# ...et on s'arrete des que la reponse se repete, parce qu'elle ne bouge plus.
+# Rejoue sur les runs 8 et 9 : le quart de tour est le bon des le premier
+# essai, la translation se pose au deuxieme (run 9) ou au troisieme (run 8),
+# et les quatre a cinq essais suivants rendent exactement la meme chose.
+# S'arreter la ramene le cout d'un run de 35 min de 23 s d'executeur a 7-11 s,
+# et un run dont l'ajustement continue de bouger continue d'etre ajuste.
+LIVE_ALIGN_STABLE = 2
 BACKOFF_RATIO = 0.55
 RECOVER_RATIO = 0.80   # hysteresis band: below 0.55 slow down, above 0.80 speed up
 
@@ -201,6 +222,12 @@ class LidarMapRunner:
         self._tracker: SessionTracker | None = None
         self._tracked = 0
         self._tracking = False
+        # Ou la session en cours se pose sur la carte, avant que la fusion ne
+        # le sache. Voir _align_live().
+        self._live_align: tuple[int, int, int, float, float, float] | None = None
+        self._live_align_at = 0.0
+        self._live_stable = 0
+        self._aligning = False
         self._collecting = False
         self._unsub_timer = None
         self._unsub_coordinator = None
@@ -297,6 +324,13 @@ class LidarMapRunner:
         self._tracker = SessionTracker()
         self._tracked = 0
         self._tracking = False
+        # Remis a zero ici et nulle part ailleurs. Une fusion refusee ne place
+        # la session nulle part, et le placement provisoire reste alors le seul
+        # que la carte ait pour ce run : le garder vaut mieux que revenir au
+        # repere brut du robot.
+        self._live_align = None
+        self._live_align_at = 0.0
+        self._live_stable = 0
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -321,8 +355,14 @@ class LidarMapRunner:
         echoue, le suiveur est abandonne plutot que laisse incomplet -- un
         suiveur a trous rendrait des poses fausses, pas approximatives, et la
         fusion retombe sur le calcul de fin qui, lui, est correct.
+
+        `_aligning` exclut l'autre travail qui touche au suiveur : _align_live()
+        copie `_scratch`, et copier un dictionnaire qu'un autre fil est en train
+        de remplir leve une RuntimeError. Les deux drapeaux ne sont poses et
+        lus que dans la boucle d'evenements, donc l'exclusion est stricte meme
+        si le travail lui-meme est dans l'executeur.
         """
-        if self._tracker is None or self._tracking:
+        if self._tracker is None or self._tracking or self._aligning:
             return
         new = self._captures[self._tracked:]
         if not new:
@@ -339,6 +379,122 @@ class LidarMapRunner:
             self._tracker = None
         finally:
             self._tracking = False
+
+    @staticmethod
+    def _fit_live(tracker: SessionTracker, ref_walls: dict[tuple[int, int], int]):
+        """Ajuste les murs vus jusqu'ici sur la carte. Tourne dans l'executeur.
+
+        Prend ce sur quoi il travaille en argument plutot que de le lire sur
+        `self` : la fin du menage peut tomber pendant l'attente et remettre le
+        suiveur a None, et le fil de l'executeur trouverait alors un attribut
+        vide au lieu du travail qu'on lui a confie.
+        """
+        walls = tracker.walls_so_far()
+        if not walls:
+            return None
+        return align_to_reference(walls, ref_walls)
+
+    async def _align_live(self) -> bool:
+        """Place la session en cours sur la carte, sans attendre la fusion.
+
+        Le repere du robot tourne d'un quart de tour d'un menage a l'autre --
+        il suit la direction ou le robot se cale en sortant du dock, et sur
+        certains cycles il fait un quart de tour de plus avant de commencer.
+        La fusion le rattrape et la carte n'en souffre pas ; c'est l'affichage
+        qui trinque, la session etant servie dans le repere brut jusqu'a la
+        fusion. La zone nettoyee apparait alors en travers des murs pendant
+        toute l'heure du menage.
+
+        La rotation, elle, est fixee des le depart : il n'y a donc rien a
+        attendre. Rejoue sur les runs 8 et 9 du 27/08, le bon quart de tour se
+        detache des 25 scans et ne change plus ensuite.
+
+        Le placement est refait a chaque LIVE_ALIGN_EVERY plutot que fige au
+        premier succes : le quart de tour ne bouge pas, mais la translation se
+        deplace encore de quelques cellules le temps que le run couvre assez de
+        terrain. On s'arrete quand la reponse se repete, pas apres un nombre
+        d'essais decide d'avance -- voir LIVE_ALIGN_STABLE.
+
+        Rend True si ce tick a servi a ca -- l'echantillonnage saute alors son
+        tour, ce qui coute un scan sur les quelque neuf cents d'un menage.
+        """
+        if (
+            self._aligning
+            or self._tracking
+            or self._live_stable >= LIVE_ALIGN_STABLE
+            or self._tracker is None
+            or self._map is None
+            # Rien a quoi se raccrocher : la toute premiere carte est ce
+            # premier run, dans son propre repere, et il n'y a pas de travers.
+            or not self._map.walls
+            # Le placement est range sous le nom du fichier de session ; sans
+            # lui la carte de rejeu ne saurait pas a quoi il se rapporte.
+            or not self._session_name
+            or self._tracker.placed < LIVE_ALIGN_MIN_SCANS
+        ):
+            return False
+        now = time.monotonic()
+        if now - self._live_align_at < LIVE_ALIGN_EVERY:
+            return False
+        self._live_align_at = now
+        self._aligning = True
+        scans = self._tracker.placed
+        try:
+            fit = await self.hass.async_add_executor_job(
+                self._fit_live, self._tracker, self._map.walls
+            )
+        except Exception as err:  # noqa: BLE001 -- un affichage ne coute pas un run
+            _LOGGER.debug("LIDAR mapping: placement provisoire echoue (%s)", err)
+            return True
+        finally:
+            self._aligning = False
+        if fit is None:
+            return True
+
+        quarter, dx, dy, overlap, fine, scores = fit
+        margin, ratio = quarter_margin(scores, quarter)
+        if margin < LIVE_MIN_MARGIN or ratio < LIVE_MIN_RATIO:
+            # Pas assez tranche pour valoir mieux que le repere brut. Rien de
+            # perdu : le prochain essai aura vu plus de terrain.
+            _LOGGER.debug(
+                "LIDAR mapping: quart de tour indecis apres %d scans "
+                "(%s), placement provisoire reporte",
+                scans,
+                " ".join(f"q{q}={s:.2f}" for q, s in enumerate(scores)),
+            )
+            return True
+
+        # La meme correction que la fusion range avec l'alignement, et pour la
+        # meme raison : les murs sont projetes depuis des poses que le recalage
+        # a deja deplacees, le trajet rejoue vient du journal brut du robot.
+        cx, cy = self._tracker.correction if self._tracker else (0.0, 0.0)
+        placement = (
+            quarter, dx, dy, fine, cx / CELL_SIZE_M, cy / CELL_SIZE_M,
+        )
+        first = self._live_align is None
+        turned = not first and self._live_align[0] != quarter
+        # La correction du recalage bouge de quelques millimetres a chaque
+        # scan et ne se repeterait jamais : c'est la pose sur la carte qu'on
+        # regarde, pas elle.
+        if not first and self._live_align[:4] == placement[:4]:
+            self._live_stable += 1
+        else:
+            self._live_stable = 1
+        self._live_align = placement
+        if first or turned:
+            _LOGGER.info(
+                "LIDAR mapping: session en cours placee sur la carte apres %d "
+                "scans — quart %d, decalage (%+d,%+d), %.1f deg ; recouvrement "
+                "%.0f%%, marge %.2f (%.1fx)",
+                scans, quarter, dx, dy, fine, 100 * overlap, margin, ratio,
+            )
+        else:
+            _LOGGER.debug(
+                "LIDAR mapping: placement provisoire revu apres %d scans — "
+                "quart %d, decalage (%+d,%+d), recouvrement %.0f%%",
+                scans, quarter, dx, dy, 100 * overlap,
+            )
+        return True
 
     async def _async_tick(self, _now=None) -> None:
         if self._busy:
@@ -379,6 +535,11 @@ class LidarMapRunner:
 
         self._busy = True
         try:
+            # Avant l'echantillonnage, et sous le meme drapeau : l'ajustement
+            # tient l'executeur une a cinq secondes, et un tick qui echantillonne
+            # pendant ce temps-la mettrait deux lectures serie en parallele.
+            if await self._align_live():
+                return
             # Prefer what the bridge kept for us. It samples on its own loop
             # while cleaning, so a WiFi outage no longer costs the scans taken
             # during it -- and there is no HTTP round trip per scan competing
@@ -931,10 +1092,25 @@ class LidarMapRunner:
         The card needs it to draw the run in the same frame as the walls;
         without it a session recorded after a localisation loss shows its
         cleaned area a quarter turn off.
+
+        Le run en cours n'est pas encore fusionne et n'a donc rien de range
+        sous son nom. Plutot que de le servir dans le repere brut du robot
+        pendant toute l'heure du menage, on rend le placement provisoire que
+        _align_live() a calcule. Le fusionne passe devant des qu'il existe.
         """
         if not self._map:
             return None
-        return self._map.alignments.get(alignment_key(session_name))
+        key = alignment_key(session_name)
+        merged = self._map.alignments.get(key)
+        if merged is not None:
+            return merged
+        if (
+            self._live_align is not None
+            and self._session_name
+            and alignment_key(self._session_name) == key
+        ):
+            return self._live_align
+        return None
 
     def view_rotation(self, user_offset: float = 0.0) -> float:
         """Rotation that stands the map upright, plus the user's offset."""
