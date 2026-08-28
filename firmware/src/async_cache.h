@@ -41,6 +41,28 @@ public:
             return;
         }
 
+        // A fetch that never calls back used to wedge this cache for good:
+        // `fetching` stayed true, every later get() queued behind it and was
+        // never served, and the endpoint answered nothing until the bridge was
+        // rebooted. invalidate() does not help — it clears `hasValue`, not
+        // this.
+        //
+        // Seen on 2026-08-28: /api/error timed out 429 times in a row, every
+        // polling cycle for hours, while the very same GetErr command answered
+        // in 54 ms through the uncached path and POST /api/clear-errors in
+        // 148 ms. The serial queue was healthy throughout; only the cache was
+        // dead. Which event lost that one callback was never identified, and
+        // this makes it not matter: the producer is contracted to call back
+        // exactly once, and if it has not by now it never will.
+        if (fetching && millis() - fetchStartedAt >= FETCH_GIVE_UP_MS) {
+            fetching = false;
+            auto abandoned = std::move(waiters);
+            waiters.clear();
+            for (auto& cb: abandoned) {
+                cb(false, cached);
+            }
+        }
+
         // Add to waiters list
         if (callback)
             waiters.push_back(callback);
@@ -51,7 +73,13 @@ public:
 
         // Trigger a new fetch
         fetching = true;
-        fetcher([this](bool ok, const T& data) {
+        fetchStartedAt = millis();
+        // Tagged, so a producer abandoned above cannot come back to life later
+        // and clear `fetching` out from under the fetch that replaced it.
+        unsigned long gen = ++generation;
+        fetcher([this, gen](bool ok, const T& data) {
+            if (gen != generation)
+                return;
             fetching = false;
 
             if (ok) {
@@ -80,6 +108,12 @@ public:
     const T& getCached() const { return cached; }
 
 private:
+    // How long an in-flight fetch is trusted before it is written off. Well
+    // clear of anything legitimate: a serial command times out on its own after
+    // NEATO_CMD_TIMEOUT_MS (3 s) and the queue holds at most NEATO_QUEUE_MAX_SIZE
+    // (16) of them, so even a full queue drains long before this.
+    static const unsigned long FETCH_GIVE_UP_MS = 60000;
+
     unsigned long ttl;
     FetchFunc fetcher;
     HitFunc hitFunc;
@@ -88,6 +122,8 @@ private:
     unsigned long cachedAt = 0;
     bool hasValue = false;
     bool fetching = false;
+    unsigned long fetchStartedAt = 0;
+    unsigned long generation = 0;
     std::vector<Callback> waiters;
 };
 
