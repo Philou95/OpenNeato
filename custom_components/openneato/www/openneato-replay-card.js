@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.4.2";
+const CARD_VERSION = "2.5.0";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -49,6 +49,25 @@ const STRETCH_MAX_HOPS = 8;
 const STRETCH_RETRY_FRAMES = 30;
 
 const LIVE_REFRESH_MS = 3000;
+// The card watches Home Assistant even when nothing is being recorded, so a
+// clean that starts after the page was opened shows up on its own. This used
+// to poll only while the *selected* session was recording, which meant the
+// card was only ever live if it happened to be opened during a clean --
+// otherwise you had to reload the page to see the robot working.
+//
+// The listing is answered from the coordinator's cache, so this costs no
+// request to the robot; 20 s is a compromise between noticing a clean quickly
+// and not asking Home Assistant a question every few seconds all day.
+const IDLE_POLL_MS = 20000;
+// Between the robot docking and the map being rebuilt around it. Faster than
+// idle because something is known to be coming, and the run that just finished
+// is redrawn in the merged frame the moment it lands.
+const MERGE_POLL_MS = 4000;
+// How long a merge is given before the card stops saying one is under way. A
+// run of the house takes about a minute to fold in on a Pi 5; a merge that is
+// refused, or a run too thin to merge at all, never changes the map and would
+// otherwise leave the notice up for good.
+const MERGE_WAIT_MS = 300000;
 
 const DEFAULT_CELL_M = 0.05;
 // Cleaned floor. Opaque and flat: a square is cleaned or it is not, and a
@@ -110,6 +129,16 @@ const DEFAULTS = {
 /* ── small helpers ──────────────────────────────────────────────────── */
 
 const pad2 = (n) => String(n).padStart(2, "0");
+
+/* The plan's cache-busting token. The backend builds it from the session
+   count, the wall threshold and how many cells clear it, so it changes exactly
+   when the drawn map changes and not merely when a cleaning is added -- which
+   makes it the one honest signal that a merge has landed. */
+const planSignature = (fp) => {
+    if (!fp || !fp.url) return null;
+    const q = String(fp.url).split("?v=")[1];
+    return q === undefined ? String(fp.url) : q;
+};
 
 function formatClock(secs) {
     const total = Math.max(0, Math.floor(secs));
@@ -258,6 +287,17 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._floorplanCells = null;
         this._floorplanKey = null;
 
+        // Following the robot, and knowing when to stop. The card picks the
+        // run in progress on its own, but a run the viewer chose from the
+        // picker is theirs -- a clean starting must not yank them out of it.
+        this._userPicked = false;
+        // The plan's cache-busting signature, which changes exactly when the
+        // drawn map does. Watching it is how the card knows a merge landed.
+        this._planSig = null;
+        // Deadline for the "map being rebuilt" notice, see _watchTick().
+        this._mergeUntil = 0;
+        this._wasRecording = false;
+
         // Playback state. `_time` is the source of truth and is mutated by
         // the rAF loop directly — putting it in a re-render cycle is what
         // makes this kind of player stutter.
@@ -285,11 +325,55 @@ class OpenNeatoReplayCard extends HTMLElement {
     }
 
     setConfig(config) {
+        const pinned =
+            config && config.session && config.session !== "latest" ? config.session : null;
         this._config = { ...DEFAULTS, ...config };
         this._speed = Number(this._config.speed) > 0 ? Number(this._config.speed) : DEFAULTS.speed;
-        this._selectedName =
-            this._config.session && this._config.session !== "latest" ? this._config.session : null;
+        // A pinned session is the viewer's choice as much as one clicked in
+        // the picker, so the card must not follow the robot away from it.
+        if (pinned) {
+            this._selectedName = pinned;
+            this._userPicked = true;
+        } else if (!this._session) {
+            this._selectedName = null;
+        }
         this._buildDom();
+        // Home Assistant calls setConfig again on a card that is already on
+        // screen -- every edit of `fit`, `rotation`, `height` or the title
+        // goes through here -- and _buildDom() throws the whole shadow DOM
+        // away and builds it back empty: no options in the picker, controls
+        // disabled, "Loading…" over a map that is still perfectly good. The
+        // session was still in memory the whole time, so the change looked
+        // like it had not been taken into account until the page was
+        // reloaded, which is the one thing that runs _loadSessions() again.
+        if (this._sessions.length) this._restoreDom();
+    }
+
+    /* Put back what _buildDom() wiped, for a card that already had data.
+       Only reached on a rebuild -- the first build has nothing to restore. */
+    _restoreDom() {
+        this._renderPicker();
+        if (this._selectedName) this._picker.value = this._selectedName;
+        const live = this._sessions.find((s) => s.recording);
+        this._delBtn.disabled = Boolean(live && this._selectedName === live.name);
+        if (this._session) {
+            this._renderStats();
+            this._setOverlay(null);
+            this._enableControls(true);
+            this._scrub.max = String(this._session.duration);
+            this._totalEl.textContent = formatClock(this._session.duration);
+            this._setPlayIcon(this._playing);
+            // Where the viewer was, not the beginning: a config edit is not a
+            // reason to lose their place in the replay.
+            this._seek(this._time);
+        }
+        this._setNotice(this._noticeText);
+        // The pre-painted layers were built for the old canvas and the old
+        // framing; both are gone.
+        this._cov.sig = "";
+        this._trk.sig = "";
+        this._dirty = true;
+        this._scheduleRender();
     }
 
     // Make the wrappers Home Assistant puts around this card stretch.
@@ -456,6 +540,10 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._ensureStretched();
         }
         if (this._canvas) this._observeResize();
+        // disconnectedCallback stops the watch; a card that comes back -- a
+        // view switched away from and back to -- has to start watching again,
+        // or it silently stops noticing that the robot has gone out.
+        if (this._hass) this._scheduleWatch();
         this._dirty = true;
         this._scheduleRender();
     }
@@ -604,6 +692,39 @@ class OpenNeatoReplayCard extends HTMLElement {
                     pointer-events: none;
                 }
                 .overlay[hidden] { display: none; }
+                /* Said in the corner, not across the map: while the map is
+                   being rebuilt the one on screen is still the real one, and
+                   covering it to announce that would be worse than silence. */
+                .notice {
+                    position: absolute;
+                    left: 8px;
+                    bottom: 8px;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    padding: 4px 10px;
+                    border-radius: 12px;
+                    background: var(--card-background-color, #fff);
+                    color: var(--secondary-text-color);
+                    font-size: 0.78rem;
+                    opacity: 0.92;
+                    pointer-events: none;
+                }
+                .notice[hidden] { display: none; }
+                .notice .dot {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 50%;
+                    background: var(--primary-color, #03a9f4);
+                    animation: pulse 1.4s ease-in-out infinite;
+                }
+                @keyframes pulse {
+                    0%, 100% { opacity: 0.25; }
+                    50% { opacity: 1; }
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    .notice .dot { animation: none; opacity: 0.8; }
+                }
                 .controls {
                     display: flex;
                     align-items: center;
@@ -684,6 +805,7 @@ class OpenNeatoReplayCard extends HTMLElement {
                 <div class="stage">
                     <canvas></canvas>
                     <div class="overlay">Loading…</div>
+                    <div class="notice" hidden><span class="dot"></span><span class="msg"></span></div>
                 </div>
                 <div class="controls">
                     <button class="play" title="Play/Pause" disabled>
@@ -708,6 +830,8 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._stage = root.querySelector(".stage");
         this._canvas = root.querySelector("canvas");
         this._overlay = root.querySelector(".overlay");
+        this._notice = root.querySelector(".notice");
+        this._noticeMsg = root.querySelector(".notice .msg");
         this._playBtn = root.querySelector(".play");
         this._restartBtn = root.querySelector(".restart");
         this._speedBtn = root.querySelector(".speed");
@@ -738,7 +862,14 @@ class OpenNeatoReplayCard extends HTMLElement {
             root.querySelector(".title").textContent = this._config.title;
         }
 
-        this._picker.addEventListener("change", () => this._selectSession(this._picker.value));
+        this._picker.addEventListener("change", () => {
+            // Chosen by hand: the card stops following the robot, so a clean
+            // starting cannot pull the view off the run being looked at.
+            // Picking the run in progress is the way back to following it.
+            const chosen = this._matchSession(this._picker.value);
+            this._userPicked = !(chosen && chosen.recording);
+            this._selectSession(this._picker.value);
+        });
         this._delBtn.addEventListener("click", () => this._deleteSelected());
         this._playBtn.addEventListener("click", () => this._togglePlay());
         this._restartBtn.addEventListener("click", () => this._restart());
@@ -858,42 +989,52 @@ class OpenNeatoReplayCard extends HTMLElement {
             // already handled a growing session -- it just declines to cache
             // one -- so this only ever needed the filter lifting.
             this._sessions = res.sessions || [];
+            this._planSig = planSignature(res.floorplan);
             if (this._sessions.length === 0) {
                 this._fail("No cleaning sessions yet");
+                // Still watch: the first clean of a new install has to be able
+                // to appear without the page being reloaded.
+                this._scheduleWatch();
                 return;
             }
             this._renderPicker();
 
             const live = this._sessions.find((s) => s.recording);
+            this._wasRecording = Boolean(live);
             // Follow the robot by default while it is cleaning, but never yank
             // the view away from a session the user chose themselves.
-            const held = this._matchSession(this._selectedName);
+            const held = this._userPicked ? this._matchSession(this._selectedName) : null;
             const wanted = held ? held.name : (live || this._sessions[0]).name;
             // A session the robot is still writing to cannot be deleted -- the
             // firmware would be appending to a file we just unlinked, and the
             // websocket command refuses it anyway.
             this._delBtn.disabled = Boolean(live && wanted === live.name);
             await this._selectSession(wanted);
-            this._scheduleLiveRefresh();
+            this._scheduleWatch();
         } catch (err) {
             this._fail(`Could not list sessions: ${err.message || err}`);
+            this._scheduleWatch();
         }
     }
 
-    /* While the selected session is the one the robot is still writing, pull
-       it again on a timer so the map fills in as the robot works. Stops on its
-       own the moment the session is no longer recording, so a finished run
-       costs nothing. */
-    _scheduleLiveRefresh() {
+    /* The card keeps an eye on Home Assistant for as long as it is on screen,
+       at whichever rate the situation deserves: every few seconds while the
+       robot is writing a session or while the map is being rebuilt around one
+       that just ended, and slowly the rest of the time so a clean that starts
+       later still appears on its own. */
+    _scheduleWatch() {
         clearTimeout(this._liveTimer);
-        const current = this._matchSession(this._selectedName);
-        if (!current || !current.recording) return;
-        this._liveTimer = setTimeout(() => this._refreshLive(), LIVE_REFRESH_MS);
+        if (!this._hass || !this.isConnected) return;
+        const recording = this._sessions.some((s) => s.recording);
+        let delay = IDLE_POLL_MS;
+        if (recording) delay = LIVE_REFRESH_MS;
+        else if (Date.now() < this._mergeUntil) delay = MERGE_POLL_MS;
+        this._liveTimer = setTimeout(() => this._watchTick(), delay);
     }
 
-    async _refreshLive() {
+    async _watchTick() {
         if (!this._hass || this._loading) {
-            this._scheduleLiveRefresh();
+            this._scheduleWatch();
             return;
         }
         try {
@@ -902,7 +1043,63 @@ class OpenNeatoReplayCard extends HTMLElement {
                 ...(this._entryId ? { entry_id: this._entryId } : {}),
             });
             this._sessions = res.sessions || [];
+            const planSig = planSignature(res.floorplan);
+            // No `!== null` guard: going from no map at all to the first one
+            // ever built is exactly the change worth reacting to.
+            const planChanged = planSig !== this._planSig;
+            this._planSig = planSig;
+            const live = this._sessions.find((s) => s.recording);
+
+            // ── the robot has just gone out ───────────────────────────
+            // Show the run it is writing, unless the viewer is deliberately
+            // looking at an older one.
+            if (live && !this._wasRecording) {
+                this._wasRecording = true;
+                this._mergeUntil = 0;
+                this._setNotice(null);
+                if (!this._userPicked) {
+                    this._selectedName = live.name;
+                    this._delBtn.disabled = true;
+                    this._renderPicker();
+                    await this._selectSession(live.name);
+                    this._scheduleWatch();
+                    return;
+                }
+            }
+
+            // ── the robot has just come home ──────────────────────────
+            // The map is folded in a minute or so later, so keep watching and
+            // say what is happening instead of leaving a stale plan up with
+            // no explanation.
+            if (!live && this._wasRecording) {
+                this._wasRecording = false;
+                this._mergeUntil = Date.now() + MERGE_WAIT_MS;
+                this._setNotice("Rebuilding the map…");
+            }
+
             this._renderPicker();
+
+            // ── the map has been rebuilt ──────────────────────────────
+            // Re-read the run rather than only the plan: the merge is also
+            // what works out where the session sits on the map, so its path
+            // and cleaned area move onto the new walls at the same moment.
+            if (planChanged) {
+                this._mergeUntil = 0;
+                this._setNotice(null);
+                const now = this._matchSession(this._selectedName);
+                if (now) {
+                    await this._selectSession(now.name, { keepView: true });
+                    this._scheduleWatch();
+                    return;
+                }
+            } else if (this._mergeUntil && Date.now() >= this._mergeUntil) {
+                // Nothing came. A refused merge or a run too thin to merge
+                // never changes the map, and the notice must not outlive the
+                // wait -- see MERGE_WAIT_MS.
+                this._mergeUntil = 0;
+                this._setNotice(null);
+            }
+
             // The run we are watching gets renamed under us the moment the
             // firmware compresses it. Follow it to its new name rather than
             // going on asking for the old one, which no longer exists.
@@ -913,19 +1110,29 @@ class OpenNeatoReplayCard extends HTMLElement {
                 // instead of leaving the picker pointing at nothing.
                 this._selectedName = null;
                 this._session = null;
+                this._userPicked = false;
                 await this._loadSessions();
                 return;
             }
             this._selectedName = current.name;
             this._picker.value = current.name;
-            // Keep the viewer's pan, zoom and scrub position: this is a
-            // background refresh, not a fresh selection.
-            await this._selectSession(current.name, { keepView: true });
+            // Maintained here rather than only when the list is first loaded:
+            // a run stops recording under us, and the button stayed greyed out
+            // until the page was reloaded.
+            this._delBtn.disabled = Boolean(current.recording);
+            // Only the growing one needs re-reading on every tick; a finished
+            // run does not change, and re-parsing it twenty times a minute
+            // would be work for nothing.
+            if (current.recording) {
+                // Keep the viewer's pan, zoom and scrub position: this is a
+                // background refresh, not a fresh selection.
+                await this._selectSession(current.name, { keepView: true });
+            }
         } catch (_err) {
             // A refresh that fails is not worth surfacing -- the next tick
             // will try again, and the map on screen is still valid.
         }
-        this._scheduleLiveRefresh();
+        this._scheduleWatch();
     }
 
     async _deleteSelected() {
@@ -953,9 +1160,12 @@ class OpenNeatoReplayCard extends HTMLElement {
             return;
         }
 
-        // Fall back to whichever session is newest once this one is gone.
+        // Fall back to whichever session is newest once this one is gone --
+        // and start following the robot again, since the run that was being
+        // held onto no longer exists.
         this._selectedName = null;
         this._session = null;
+        this._userPicked = false;
         await this._loadSessions();
     }
 
@@ -1129,6 +1339,16 @@ class OpenNeatoReplayCard extends HTMLElement {
     _setOverlay(text) {
         this._overlay.textContent = text || "";
         this._overlay.hidden = !text;
+    }
+
+    // Kept on the instance as well as in the DOM: _buildDom() throws the DOM
+    // away on every config edit, and a notice that vanished when the title was
+    // changed would be a small lie about what the backend is doing.
+    _setNotice(text) {
+        this._noticeText = text || "";
+        if (!this._notice) return;
+        this._noticeMsg.textContent = this._noticeText;
+        this._notice.hidden = !this._noticeText;
     }
 
     _fail(message) {
