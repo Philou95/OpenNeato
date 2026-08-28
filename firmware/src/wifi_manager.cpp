@@ -1,5 +1,7 @@
 #include "wifi_manager.h"
 #include "data_logger.h"
+#include "web_server.h"
+#include <Update.h>
 #include <ESPmDNS.h>
 #include <esp_task_wdt.h>
 #include <esp_wifi.h>
@@ -395,10 +397,110 @@ void WiFiManager::setApFallbackOnDisconnect(bool enabled) {
     reevaluateFallbackAp();
 }
 
+// -- Network watchdog --------------------------------------------------------
+
+void WiFiManager::bounceLink(const char *why) {
+    lastBounceAt = millis();
+    if (firstBounceAt == 0 || millis() - firstBounceAt > NET_WDT_BOUNCE_WINDOW_MS) {
+        firstBounceAt = millis();
+        bounceCount = 0;
+    }
+    bounceCount++;
+
+    LOG("WIFI", "Network watchdog: %s — bouncing the link (%u in this window)", why, bounceCount);
+    dataLogger.logWifi("net_stall_bounce", {{"why", String(why), FIELD_STRING},
+                                            {"count", String(bounceCount), FIELD_INT},
+                                            {"rssi", String(WiFi.RSSI()), FIELD_INT},
+                                            {"heap", String(ESP.getFreeHeap()), FIELD_INT}});
+
+    // Dropping the association drops every TCP connection with it. That is the
+    // only reap reachable from the loop task: touching AsyncTCP's own objects
+    // from here would race the task that owns them.
+    String ssid, password;
+    bool haveCreds = loadCredentials(ssid, password);
+    WiFi.disconnect(true);
+    delay(100);
+    if (haveCreds) {
+        WiFi.begin(ssid.c_str(), password.c_str());
+        applyTxPower();
+    }
+    // Whatever the counters said, they described the world before the bounce.
+    WebServer::resetServedCounts();
+    netWindowStart = millis();
+
+    // Bouncing again and again means the link was not the problem.
+    if (bounceCount >= NET_WDT_MAX_BOUNCES) {
+        LOG("WIFI", "Network watchdog: %u bounces in %lu ms did not help, restarting", bounceCount,
+            millis() - firstBounceAt);
+        dataLogger.logWifi("net_stall_restart", {{"bounces", String(bounceCount), FIELD_INT}});
+        delay(200); // let the log line reach flash before the reset
+        ESP.restart();
+    }
+}
+
+void WiFiManager::checkNetworkStall() {
+    // Nothing to judge while we are not meant to be serving anyone.
+    if (inConfigMode || WiFi.status() != WL_CONNECTED) {
+        netWindowStart = millis();
+        WebServer::resetServedCounts();
+        return;
+    }
+    // A firmware upload is one enormous request that legitimately runs for
+    // minutes. Left alone, this watchdog would read it as the very stall it
+    // exists to catch and drop the link in the middle of writing flash.
+    if (Update.isRunning()) {
+        netWindowStart = millis();
+        WebServer::resetServedCounts();
+        return;
+    }
+    // Someone is using the fallback AP to fix the WiFi — cutting them off to
+    // repair the WiFi would be a poor trade.
+    if (apActive && WiFi.softAPgetStationNum() > 0)
+        return;
+    // One bounce is disruptive enough; do not stack them.
+    if (lastBounceAt != 0 && millis() - lastBounceAt < NET_WDT_BOUNCE_COOLDOWN_MS)
+        return;
+
+    // A single request stuck this long is enough on its own: no legitimate
+    // answer on a local network takes two minutes.
+    unsigned long oldest = WebServer::oldestPendingMs();
+    if (oldest >= NET_WDT_STALL_MS) {
+        bounceLink("a request has been in flight for two minutes");
+        return;
+    }
+
+    if (netWindowStart == 0)
+        netWindowStart = millis();
+    if (millis() - netWindowStart < NET_WDT_WINDOW_MS)
+        return;
+
+    // The window is up. Slow answers vastly outnumbering fast ones is the
+    // shape of the 2026-08-28 failure: /api/state kept coming back in 183 ms
+    // while everything larger timed out, so "nothing is answering" would have
+    // been false and missed it. What was true is that almost nothing was
+    // answering *in time*.
+    unsigned long fast = WebServer::servedFast();
+    unsigned long slow = WebServer::servedSlow();
+    if (slow >= NET_WDT_MIN_SLOW && slow > fast * NET_WDT_SLOW_RATIO) {
+        LOG("WIFI", "Network watchdog: %lu slow answers against %lu fast in %lu ms", slow, fast, NET_WDT_WINDOW_MS);
+        bounceLink("responses are not getting out");
+        return;
+    }
+
+    // Healthy window, or too little traffic to say anything. Start a new one.
+    WebServer::resetServedCounts();
+    netWindowStart = millis();
+}
+
 void WiFiManager::tick() {
     // Re-evaluate the AP regardless of STA state , this also handles the
     // recovery case where credentials are wiped via the API.
     reevaluateFallbackAp();
+
+    // Before the early return below, and that is the whole point: the failure
+    // this catches happens *while* WiFi.status() is WL_CONNECTED, so anything
+    // placed after that test can never see it.
+    checkNetworkStall();
 
     // Only attempt auto-reconnect if we were previously connected and are not
     // in config mode (user is actively setting up WiFi through the serial menu)

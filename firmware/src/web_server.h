@@ -31,7 +31,43 @@ public:
     // this to detect frontend connectivity without dedicated heartbeat calls.
     static unsigned long lastApiActivity;
 
+    // -- How well the server is actually answering -------------------------
+    //
+    // Read by WiFiManager's network watchdog. A request is tracked from the
+    // moment its handler runs until its connection closes, which this server
+    // does as soon as the response is finished (WebRequest.cpp:260) — so the
+    // measurement is "how long did the answer take to leave", not "how long
+    // did the client keep the socket".
+    //
+    // Age of the oldest request still in flight, in ms, or 0 if none.
+    static unsigned long oldestPendingMs();
+    // Requests answered in the current window, split at NET_WDT_SLOW_MS.
+    static unsigned long servedFast();
+    static unsigned long servedSlow();
+    // Start the next window, keeping nothing.
+    static void resetServedCounts();
+
 private:
+    // Marks a request as in flight, arranges for it to be counted when its
+    // connection closes, and returns its start time for the latency log.
+    // Replaces the bare `lastApiActivity = millis()` every route used to open
+    // with, so every route is measured by construction rather than by anyone
+    // remembering to add it.
+    static unsigned long noteRequest(AsyncWebServerRequest *request);
+
+    // 0 means the slot is free. Sixteen is more than the server will have in
+    // flight at once in health -- Home Assistant's widest burst is eleven --
+    // and running out simply means the request goes untracked, which is
+    // harmless: by then the watchdog has plenty to look at.
+    static constexpr uint8_t PENDING_SLOTS = 16;
+    static unsigned long pendingSince[PENDING_SLOTS];
+    static unsigned long fastCount;
+    static unsigned long slowCount;
+    // The counters are written from the AsyncTCP task and read from the loop
+    // task. There is no other lock in this firmware, and that is a known
+    // hazard here -- this one is a handful of instructions on a fixed array.
+    static portMUX_TYPE pendingMux;
+
     AsyncWebServer& server;
     NeatoSerial& neato;
     DataLogger& logger;
@@ -267,8 +303,7 @@ void WebServer::registerGetRoute(const char *path, Mgr& mgr, Method method,
     static constexpr size_t NArgs = Traits::NArgs;
     auto names = detail::toArray<NArgs>(paramNames);
     server.on(path, HTTP_GET, [this, path, &mgr, method, names](AsyncWebServerRequest *request) {
-        lastApiActivity = millis();
-        unsigned long startMs = lastApiActivity;
+        unsigned long startMs = noteRequest(request);
         auto weak = request->pause();
         Cb cb = [this, weak, path, startMs](bool ok, const T& data) {
             if (auto req = weak.lock()) {
@@ -347,8 +382,7 @@ void WebServer::registerPostRoute(const char *path, Mgr& mgr, Method method,
     static constexpr size_t NArgs = Traits::NArgs;
     auto names = detail::toArray<NArgs>(paramNames);
     server.on(path, HTTP_POST, [this, path, &mgr, method, names](AsyncWebServerRequest *request) {
-        lastApiActivity = millis();
-        unsigned long startMs = lastApiActivity;
+        unsigned long startMs = noteRequest(request);
         auto weak = request->pause();
         typename Traits::Cb cb = [this, weak, path, startMs](bool ok) {
             if (auto req = weak.lock()) {

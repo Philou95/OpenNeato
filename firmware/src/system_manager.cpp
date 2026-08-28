@@ -1,4 +1,5 @@
 #include "system_manager.h"
+#include "web_server.h"
 #include <SPIFFS.h>
 #include <WiFi.h>
 #include <ctime>
@@ -160,6 +161,9 @@ std::vector<Field> SystemHealth::toFields() const {
             {"tz", tz, FIELD_STRING},
             {"localTime", localTime, FIELD_STRING},
             {"isDst", isDst ? "true" : "false", FIELD_BOOL},
+            {"httpOldestPendingMs", String(httpOldestPendingMs), FIELD_INT},
+            {"httpServedFast", String(httpServedFast), FIELD_INT},
+            {"httpServedSlow", String(httpServedSlow), FIELD_INT},
     };
 }
 
@@ -167,6 +171,9 @@ SystemHealth SystemManager::getSystemHealth(const String& tz) const {
     SystemHealth h;
     h.heap = ESP.getFreeHeap();
     h.heapTotal = ESP.getHeapSize();
+    h.httpOldestPendingMs = WebServer::oldestPendingMs();
+    h.httpServedFast = WebServer::servedFast();
+    h.httpServedSlow = WebServer::servedSlow();
     h.uptime = millis();
     h.rssi = WiFi.RSSI();
     h.fsUsed = SPIFFS.usedBytes();

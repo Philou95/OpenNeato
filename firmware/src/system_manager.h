@@ -23,6 +23,12 @@ struct SystemHealth : public JsonSerializable {
     String tz;
     String localTime; // DST-aware local time string, e.g. "Sat 17:45:01"
     bool isDst = false; // true when daylight saving time is active
+    // What the network watchdog is looking at. Exposed because the failure it
+    // guards against is invisible to heap and RSSI: on 2026-08-28 both were
+    // healthy while nothing larger than 70 bytes could leave the device.
+    unsigned long httpOldestPendingMs = 0;
+    unsigned long httpServedFast = 0;
+    unsigned long httpServedSlow = 0;
 
     std::vector<Field> toFields() const override;
 };

@@ -115,6 +115,21 @@ private:
     unsigned long reconnectBackoff = WIFI_RECONNECT_INTERVAL;
     unsigned long reconnectAttemptCount = 0;
 
+    // -- Network watchdog ----------------------------------------------------
+    //
+    // Recovers the case nothing else can see: associated, loop alive, heap
+    // healthy, and the HTTP server nevertheless not delivering. Measured on
+    // 2026-08-28, that state lasted 21 minutes and only a restart cleared it.
+    // It is judged on responses, not on WiFi.status(), because WiFi.status()
+    // said WL_CONNECTED throughout.
+    void checkNetworkStall();
+    // Tear down the association, which drops every TCP connection with it.
+    void bounceLink(const char *why);
+    unsigned long netWindowStart = 0;
+    unsigned long lastBounceAt = 0;
+    unsigned long firstBounceAt = 0;
+    uint8_t bounceCount = 0;
+
     bool connectToWiFi(const String& ssid, const String& password);
 
     void saveCredentials(const String& ssid, const String& password);

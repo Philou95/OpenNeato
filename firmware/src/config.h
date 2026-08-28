@@ -271,6 +271,30 @@ enum CommandStatus {
 #define HEAP_WATCHDOG_THRESHOLD 16384 // 16 KB — below this is critical
 #define HEAP_WATCHDOG_DURATION_MS 30000 // Must stay low for 30s to trigger
 
+// Network watchdog — recover when the HTTP server stops delivering.
+//
+// Observed 2026-08-28: the bridge served /api/state (~70 bytes) in 183 ms while
+// /api/version and /api/history timed out at 20 s, for 21 minutes straight, and
+// only a restart cleared it. Neither existing watchdog could fire: the loop task
+// was alive so the TWDT was fed, the heap sat at 106 KB against a 16 KB
+// threshold, and WiFi.status() was WL_CONNECTED throughout — which is exactly
+// the hole the upstream reporter fell into as well.
+//
+// So the trigger is what actually failed: responses. A request is judged on how
+// long it took to finish, and a spell where the slow ones vastly outnumber the
+// fast ones means the server is not serving, whatever WiFi and the heap say.
+#define NET_WDT_WINDOW_MS 120000 // Rolling window the counts are judged over
+#define NET_WDT_SLOW_MS 10000 // A LAN response taking longer than this is not healthy
+#define NET_WDT_MIN_SLOW 20 // Below this many slow responses, say nothing
+#define NET_WDT_SLOW_RATIO 4 // Slow must outnumber fast by this much
+#define NET_WDT_STALL_MS 120000 // Or: one request in flight this long, on its own
+// Recovery is staged. First bounce the association, which tears down every TCP
+// connection — the only reap available from here. If that keeps being needed,
+// the problem is not the link and a restart is the honest answer.
+#define NET_WDT_BOUNCE_COOLDOWN_MS 60000 // Never bounce more often than this
+#define NET_WDT_MAX_BOUNCES 3 // Bounces within the window below before restarting
+#define NET_WDT_BOUNCE_WINDOW_MS 900000 // 15 min
+
 // NTP / time sync
 #define NTP_SERVER_1 "pool.ntp.org"
 #define NTP_SERVER_2 "time.nist.gov"

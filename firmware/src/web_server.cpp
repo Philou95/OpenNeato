@@ -13,6 +13,81 @@
 #include <SPIFFS.h>
 
 unsigned long WebServer::lastApiActivity = 0;
+unsigned long WebServer::pendingSince[WebServer::PENDING_SLOTS] = {0};
+unsigned long WebServer::fastCount = 0;
+unsigned long WebServer::slowCount = 0;
+portMUX_TYPE WebServer::pendingMux = portMUX_INITIALIZER_UNLOCKED;
+
+unsigned long WebServer::noteRequest(AsyncWebServerRequest *request) {
+    // millis() is 0 for the first millisecond after boot and again every 49
+    // days; 1 is indistinguishable in practice and keeps 0 meaning "free".
+    unsigned long now = millis();
+    unsigned long stamp = now ? now : 1;
+    lastApiActivity = now;
+
+    int slot = -1;
+    portENTER_CRITICAL(&pendingMux);
+    for (uint8_t i = 0; i < PENDING_SLOTS; i++) {
+        if (pendingSince[i] == 0) {
+            pendingSince[i] = stamp;
+            slot = i;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&pendingMux);
+
+    if (slot >= 0) {
+        // Fires when the connection closes, which this server does the moment
+        // the response is finished — so this is where the answer is counted.
+        request->onDisconnect([slot, stamp]() {
+            unsigned long took = millis() - stamp;
+            portENTER_CRITICAL(&pendingMux);
+            pendingSince[slot] = 0;
+            if (took >= NET_WDT_SLOW_MS)
+                slowCount++;
+            else
+                fastCount++;
+            portEXIT_CRITICAL(&pendingMux);
+        });
+    }
+    return now;
+}
+
+unsigned long WebServer::oldestPendingMs() {
+    unsigned long now = millis();
+    unsigned long oldest = 0;
+    portENTER_CRITICAL(&pendingMux);
+    for (uint8_t i = 0; i < PENDING_SLOTS; i++) {
+        if (pendingSince[i] == 0)
+            continue;
+        unsigned long age = now - pendingSince[i];
+        if (age > oldest)
+            oldest = age;
+    }
+    portEXIT_CRITICAL(&pendingMux);
+    return oldest;
+}
+
+unsigned long WebServer::servedFast() {
+    portENTER_CRITICAL(&pendingMux);
+    unsigned long n = fastCount;
+    portEXIT_CRITICAL(&pendingMux);
+    return n;
+}
+
+unsigned long WebServer::servedSlow() {
+    portENTER_CRITICAL(&pendingMux);
+    unsigned long n = slowCount;
+    portEXIT_CRITICAL(&pendingMux);
+    return n;
+}
+
+void WebServer::resetServedCounts() {
+    portENTER_CRITICAL(&pendingMux);
+    fastCount = 0;
+    slowCount = 0;
+    portEXIT_CRITICAL(&pendingMux);
+}
 
 WebServer::WebServer(AsyncWebServer& server, NeatoSerial& neato, DataLogger& logger, SystemManager& sys,
                      FirmwareManager& fw, SettingsManager& settings, ManualCleanManager& manual,
@@ -22,8 +97,7 @@ WebServer::WebServer(AsyncWebServer& server, NeatoSerial& neato, DataLogger& log
 
 void WebServer::loggedRoute(const char *path, WebRequestMethodComposite httpMethod, SyncHandler handler) {
     server.on(path, httpMethod, [this, handler](AsyncWebServerRequest *request) {
-        lastApiActivity = millis();
-        unsigned long startMs = lastApiActivity;
+        unsigned long startMs = noteRequest(request);
         int status = handler(request);
         logger.logRequest(request->method(), request->url().c_str(), status, millis() - startMs);
     });
@@ -33,8 +107,7 @@ void WebServer::loggedBodyRoute(const char *path, WebRequestMethodComposite http
     server.on(
             path, httpMethod, [](AsyncWebServerRequest *request) { /* handled in body callback */ }, nullptr,
             [this, handler](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
-                lastApiActivity = millis();
-                unsigned long startMs = lastApiActivity;
+                unsigned long startMs = noteRequest(request);
                 int status = handler(request, data, len);
                 logger.logRequest(request->method(), request->url().c_str(), status, millis() - startMs);
             });
@@ -102,7 +175,7 @@ void WebServer::registerApiRoutes() {
         request->send(200, "application/json", historyMgr.scanStatusJson());
     });
     server.on("/api/lidar/buffer", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        unsigned long startMs = millis();
+        unsigned long startMs = noteRequest(request);
         uint32_t after = 0;
         if (request->hasParam("after"))
             after = strtoul(request->getParam("after")->value().c_str(), nullptr, 10);
@@ -136,8 +209,7 @@ void WebServer::registerApiRoutes() {
     // Always available (no debug gate — useful for diagnostics without enabling verbose logging).
     // Excluded from public API docs (diagnostics-only passthrough).
     server.on("/api/serial", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        lastApiActivity = millis();
-        unsigned long startMs = lastApiActivity;
+        unsigned long startMs = noteRequest(request);
 
         if (!request->hasParam("cmd")) {
             logger.logRequest(HTTP_POST, "/api/serial", 400, millis() - startMs);
@@ -409,8 +481,7 @@ void WebServer::registerMapRoutes() {
 
     // GET /api/history[/filename] — list sessions, collection status, or download a specific file
     server.on("/api/history", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        lastApiActivity = millis();
-        unsigned long startMs = lastApiActivity;
+        unsigned long startMs = noteRequest(request);
         String suffix = request->url().substring(String("/api/history/").length());
 
         if (suffix.isEmpty()) {
