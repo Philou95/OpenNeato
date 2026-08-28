@@ -135,12 +135,48 @@ MAX_SWATH_M = 1.5
 # Free-space evidence. Where the robot's *centre* went there can be nothing, so
 # a narrow band around the path is proof a cell is empty -- unlike the 319 mm
 # swath, which laps onto any wall the robot follows. Wall counts on those cells
-# are scaled down rather than cleared: a real wall seen hundreds of times shrugs
-# off one stray crossing, while a chair seen once is gone. Applied at most once
-# per cell per cleaning, so a run that crosses the same spot repeatedly cannot
-# compound its way through a wall.
+# are reduced rather than cleared: a wall seen over many cleanings shrugs off one
+# stray crossing, while a chair seen once is gone. Applied at most once per cell
+# per cleaning, so a run that crosses the same spot repeatedly cannot compound
+# its way through a wall. How much is taken off is CARVE_STEP below.
 CARVE_HALF_M = 0.05
-CARVE_FACTOR = 0.5
+# Taken off a cell's count each cleaning that sees through it, rather than a
+# fraction of it.
+#
+# It used to be `count * 0.5`, and that is the shape of the bug Philou caught on
+# 2026-08-28: **building a wall is linear (+n per cleaning) while erasing it was
+# geometric (halved per cleaning), so anything under-observed lost the race by
+# construction.** A cell holding a hundred hits banked over twelve cleanings
+# fell below the floor in five runs that merely grazed it. Measured on the live
+# map: 99% of its cells carried a fractional count, meaning nearly every cell
+# had already been halved at least once. Erosion was the normal regime, not the
+# exception.
+#
+# Subtracting makes forgetting symmetric with learning, and 8 keeps the response
+# to real change: from the cap below down to the draw threshold is six cleanings,
+# against four under the old halving. Slower to forget a chair, far slower to
+# eat a wall.
+CARVE_STEP = 8.0
+# Ceiling on what one cell may bank. Seeing a wall for the thirteenth time does
+# not make it more of a wall than the fifth.
+#
+# This is the other half of the same bug, and the larger half. wall_threshold()
+# returns `WALL_KEEP_FRACTION * p95`, and p95 grew without bound because
+# well-seen cells accumulate forever: on the live map it went 121 -> 269 over six
+# cleanings, so the bar for being drawn **more than doubled** (25.4 -> 56.5)
+# while the under-observed cells were being halved. Drawn wall fell 3689 -> 2673,
+# monotonically, every single cleaning. The better the robot saw its main walls,
+# the more it erased the rest.
+#
+# Capping pins the threshold at WALL_KEEP_FRACTION * cap = 12.6. Replayed over
+# runs 9, 10 and 11 the count stops falling and climbs (2673 -> 4849), and the
+# recovered material is *cleaner*: isolated cells, which are almost always
+# noise, drop from 1.2% to 0.3%. What the old rule eroded was connected wall.
+#
+# 60 rather than a larger cap because a bigger bank takes proportionally longer
+# to overturn: at 200 a departed chair needs twenty cleanings to fade, at 60 it
+# needs six.
+WALL_COUNT_CAP = 60.0
 # Free space read off the beams themselves -- see scan_free_cells().
 #
 # The guard keeps a beam from rubbing out the surface it just found, and it is
@@ -903,7 +939,7 @@ class AccumulatedMap:
             return report
 
         for cell, n in walls.items():
-            self.walls[cell] = self.walls.get(cell, 0) + n
+            self.walls[cell] = min(self.walls.get(cell, 0) + n, WALL_COUNT_CAP)
 
         # Then let this run's free space push back on what earlier runs saw.
         # Anything the robot drove through is not there any more, and without
@@ -915,7 +951,7 @@ class AccumulatedMap:
                 previous = self.walls.get(cell)
                 if previous is None:
                     continue
-                reduced = previous * CARVE_FACTOR
+                reduced = previous - CARVE_STEP
                 if reduced < WALL_MIN_HITS:
                     del self.walls[cell]
                     faded += 1
