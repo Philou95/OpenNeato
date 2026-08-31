@@ -35,6 +35,7 @@ from .lidar_mapper import (
     AccumulatedMap,
     LIVE_MIN_MARGIN,
     LIVE_MIN_RATIO,
+    MERGE_MIN_OVERLAP,
     MAX_MOVE_DURING_SCAN_M,
     MAX_TURN_DURING_SCAN_DEG,
     align_to_reference,
@@ -124,6 +125,30 @@ LIVE_ALIGN_MIN_SCANS = 40
 # S'arreter la ramene le cout d'un run de 35 min de 23 s d'executeur a 7-11 s,
 # et un run dont l'ajustement continue de bouger continue d'etre ajuste.
 LIVE_ALIGN_STABLE = 2
+# ...mais seulement une fois que la session recouvre assez la carte pour que la
+# translation veuille dire quelque chose.
+#
+# ⚠ Deux lectures identiques a cinq minutes d'intervalle ne prouvent pas la
+# convergence : elles prouvent que ca n'a pas bouge en cinq minutes. Le
+# 31/08/2026 le placement s'est fige sur dy = -5 alors que la fusion allait
+# choisir +3 -- huit cellules, 20 cm, un demi-passage de brosse -- et n'y est
+# jamais revenu : la zone nettoyee est restee dessinee a cote de ses murs
+# pendant tout le reste du menage. La regle avait ete validee sur deux runs,
+# et elle generalisait depuis n=2.
+#
+# Le recouvrement dit quand la translation est determinee, et il le dit sur
+# n'importe quel run. Mesure sur le menage du 30/08, ajustement partiel rejoue
+# tous les 25 scans :
+#
+#     scans  50   150   200   300   668
+#     recouv 0.38 0.48  0.55  0.72  0.90
+#     dy     +1   +2    +3    +3    +3      <- se pose a 0.55
+#
+# Sous ce seuil la session est un morceau de maison qui glisse le long des murs
+# de la carte sans que le score en souffre. C'est le meme seuil que la fusion
+# exige avant de croire un ajustement, et pour la meme raison : en dessous,
+# l'ajustement n'est pas une mesure.
+LIVE_ALIGN_MIN_OVERLAP = MERGE_MIN_OVERLAP
 BACKOFF_RATIO = 0.55
 RECOVER_RATIO = 0.80   # hysteresis band: below 0.55 slow down, above 0.80 speed up
 
@@ -478,7 +503,14 @@ class LidarMapRunner:
         # La correction du recalage bouge de quelques millimetres a chaque
         # scan et ne se repeterait jamais : c'est la pose sur la carte qu'on
         # regarde, pas elle.
-        if not first and self._live_align[:4] == placement[:4]:
+        #
+        # Et une repetition ne compte pas tant que la session ne recouvre pas
+        # assez la carte : sous LIVE_ALIGN_MIN_OVERLAP la translation peut
+        # tenir en place cinq minutes durant et se tromper quand meme, faute
+        # d'assez de terrain pour la contraindre. Voir la constante.
+        if overlap < LIVE_ALIGN_MIN_OVERLAP:
+            self._live_stable = 0
+        elif not first and self._live_align[:4] == placement[:4]:
             self._live_stable += 1
         else:
             self._live_stable = 1
