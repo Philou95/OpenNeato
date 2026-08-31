@@ -1,300 +1,379 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/Leicas/OpenNeato)](https://github.com/Leicas/OpenNeato/releases/latest)
 [![Upstream](https://img.shields.io/badge/upstream-renjfk%2FOpenNeato-blue)](https://github.com/renjfk/OpenNeato)
+[![Fork of](https://img.shields.io/badge/fork%20of-Leicas%2FOpenNeato-blue)](https://github.com/Leicas/OpenNeato)
 
 <p align="center">
  <img width="192" alt="OpenNeato Icon" src="frontend/public/icon-192.png">
 </p>
 
-# OpenNeato — Home Assistant fork
+# OpenNeato — the Home Assistant side
 
-**This is a [Leicas/OpenNeato](https://github.com/Leicas/OpenNeato) fork focused on the Home Assistant
-integration.** The HACS-installable integration under
-[`custom_components/openneato/`](custom_components/openneato/) is the reason this fork exists — it turns the
-upstream ESP32 bridge into a full HA device with vacuum / camera / sensor / switch / button entities, no YAML.
+**This fork exists for one thing: the Home Assistant integration under
+[`custom_components/openneato/`](custom_components/openneato/).** It turns the OpenNeato ESP32 bridge
+into a first-class Home Assistant device — vacuum, sensors, switches, buttons, a schedule you can set
+from HA — plus a Lovelace card that draws a floor plan the robot builds for itself out of its own
+LIDAR, and replays each cleaning on top of it.
+
+Everything *underneath* that — the bridge firmware, the standalone web UI, the flash tool, the wiring,
+the serial protocol — is upstream's work and is documented upstream. This README does not repeat it.
 
 > [!IMPORTANT]
-> **If you want the standalone web UI**, use upstream [renjfk/OpenNeato](https://github.com/renjfk/OpenNeato)
-> directly — it has the original maintainer, the release cadence, and the live demo.
->
-> **Use this fork if** you run Home Assistant and want the robot exposed as a first-class HA device. Firmware
-> changes in this fork are minor and exist only to support the integration (e.g. `/api/sensors`,
-> `/api/history` hardening, ntfy server/token/on-start extensions). The firmware, frontend, and flash tool
-> otherwise track upstream closely.
+> **If you are not running Home Assistant, you want [renjfk/OpenNeato](https://github.com/renjfk/OpenNeato),
+> not this.** That is the real project: the maintainer, the releases, the live demo, the documentation.
+> This fork adds a Home Assistant layer on top and changes almost nothing else.
 
-The upstream project is an open-source replacement for Neato's discontinued cloud and mobile app: an ESP32
-bridge that talks to Botvac robots (D3-D7) over UART and exposes a local web UI over WiFi — no cloud, no app,
-no account required.
+<p align="center">
+  <img width="620" alt="The replay card in Home Assistant: the accumulated LIDAR floor plan in black, the cleaned area painted in as the run replays, with a session picker and a timeline scrubber" src="screenshots/ha-replay-card.png">
+</p>
 
-> [!NOTE]
-> Both upstream and this fork are early beta. Rough edges are expected. For HA-integration bugs, open an
-> [issue here](https://github.com/Leicas/OpenNeato/issues); for firmware/frontend/flash-tool bugs, file
-> against [upstream](https://github.com/renjfk/OpenNeato/issues).
+<p align="center">
+  <em>One cleaning replayed on the plan the robot built for itself. Black is wall, blue is cleaned floor,
+  and the thin line is the path. Nothing here was drawn by hand or configured — the walls come from the
+  robot's own LIDAR, accumulated over every run.</em>
+</p>
 
-> [!TIP]
-> Want to get a feel for the underlying web UI without hardware? Open the upstream
-> [live demo](https://openneato-demo.renjfk.com/). Demo states can be selected with `?scenario=...`; see
-> [mock scenarios](docs/mock-scenarios.md).
+---
 
-|                Dashboard                 |                  Manual Drive                  |                    Cleaning History                    |
-|:----------------------------------------:|:----------------------------------------------:|:------------------------------------------------------:|
-| ![Dashboard](screenshots/dashboard.webp) | ![Manual Drive](screenshots/manual-drive.webp) | ![Cleaning History](screenshots/cleaning-history.webp) |
+## Thanks
 
-|                Clean Map                 |                Schedule                |                Settings                |
-|:----------------------------------------:|:--------------------------------------:|:--------------------------------------:|
-| ![Clean Map](screenshots/clean-map.webp) | ![Schedule](screenshots/schedule.webp) | ![Settings](screenshots/settings.webp) |
+This project is not ours from the ground up, and it would be dishonest to present it as if it were.
 
-## About the underlying project (upstream)
+- **[renjfk](https://github.com/renjfk)** wrote OpenNeato. Neato shut down their cloud and their app and
+  left a lot of perfectly good robots without a brain; renjfk reverse-engineered the debug-port protocol,
+  built the ESP32 bridge firmware, the web UI, the scheduler, the OTA pipeline and the flash tool, and
+  gave it all away under MIT. Every capability this integration exposes exists because that work exists
+  first. If you find this useful, the thanks belong there — there is a
+  [Ko-fi](https://ko-fi.com/renjfk), and testing prereleases and filing good bug reports is worth more.
+- **[Leicas](https://github.com/Leicas)** maintains the fork this one descends from, and started the
+  Home Assistant integration that the work here continues.
 
-The sections below describe the upstream [renjfk/OpenNeato](https://github.com/renjfk/OpenNeato) project that
-this fork builds on — the ESP32 bridge firmware, standalone web UI, and flash tool. **None of this is unique
-to this fork**; it's reproduced here so HA users have full context on what's running behind the integration.
-If you only want the HA bits, you can skip ahead to the [Home Assistant section](#home-assistant-integration)
-below.
+Upstream has never touched `custom_components/` and this fork has barely touched the firmware, so the
+line between the two projects is unusually clean. What is ours is described below; everything else is
+theirs.
 
-Neato shut down their cloud services and mobile app, leaving perfectly functional robot vacuums without remote
-control or scheduling. OpenNeato brings them back to life with a small ESP32 board wired to the robot's debug
-port, giving you a local web interface that works without any external dependencies.
+---
 
-### Upstream web UI features
+## What this fork actually changes
 
-- **Dashboard** with live robot status, battery level, cleaning state, WiFi signal, and storage usage
-- **House and spot cleaning** with pause/resume/stop/dock controls that adapt to the current state
-- **Manual driving mode** with a virtual joystick, live LIDAR map visualization, motor toggles (brush, vacuum, side
-  brush), bumper/wheel-lift/stall safety warnings
-- **Live cleaning map** — watch the robot's path during an active cleaning session in the History view, rendered on a
-  canvas with coverage overlay
-- **7-day cleaning scheduler** with two slots per day, managed entirely on the ESP32 (doesn't use the robot's built-in
-  schedule commands)
-- **Cleaning history** with recorded robot paths rendered as coverage maps, session stats like duration, distance, area
-  covered, and battery usage; individual session import/export for backup and restore
-- **Push notifications** via [ntfy.sh](https://ntfy.sh); get notified when cleaning is done, an error occurs, a
-  maintenance alert triggers, or the robot docks; fully optional, configurable per event
-- **OTA firmware updates** from the browser with SHA-256 download verification (against published `checksums.txt`), MD5
-  transfer integrity, dual-partition layout with auto-rollback, and automatic new version notifications when a release
-  is available on GitHub
-- **Settings page** for hostname, timezone, motor presets, notification topics, UART pins, theme (dark/light/auto),
-  battery diagnostics (cycle count, voltage, temperature, and a "New Battery" calibration trigger), and more
-- **Event logging** with configurable log levels (off/info/debug), compressed JSONL files on SPIFFS, browsable and
-  downloadable from the UI; optional remote syslog (UDP) for long-running diagnostics without flash wear; logging is
-  off by default
-- **Factory reset** via 5-second button hold on the ESP32 or from the settings page
-- **Robot clock sync** — pushes NTP time to the robot automatically, re-syncs every 4 hours
-- **Flash tool** — standalone CLI that auto-detects the USB port, downloads the correct firmware from GitHub Releases,
-  and flashes with zero prerequisites
-- **Safety watchdog** — auto-stops wheels in manual mode if the browser disconnects; task and heap watchdogs restart the
-  ESP32 on hangs
-- **Crash recovery** — orphaned cleaning sessions after unexpected reboots are automatically recovered with full stats
+| Area | Who wrote it | Status here |
+|---|---|---|
+| `custom_components/openneato/` — HA integration | this fork | **the whole point** |
+| `custom_components/openneato/www/` — replay card | this fork | **the whole point** |
+| `firmware/` — ESP32 bridge | upstream | tracks upstream; small additions only |
+| `frontend/` — standalone web UI | upstream | tracks upstream, unmodified |
+| `flash/` — flash tool | upstream | tracks upstream, unmodified |
+| `docs/` — wiring, protocol, user guide | upstream | tracks upstream |
 
-The frontend is a lightweight SPA that gets gzipped and embedded directly into the firmware binary, so a single
-OTA update covers both firmware and UI. Mobile-friendly, dark theme by default.
+The firmware changes are deliberately small and exist only because the integration needed something the
+bridge did not expose yet:
 
-## Home Assistant Integration
+- `/api/sensors` — three range sensors (`WallSensor`, `DropSensorLeft`, `DropSensorRight`) that
+  `GetAnalogSensors` returns and the bridge was dropping.
+- `/api/lidar/buffer` — the bridge keeps LIDAR scans in a ring buffer so a Home Assistant restart, or a
+  slow poll, stops costing them.
+- `/api/history` hardening — bounded response, filename validation, retry on a body the bridge cuts
+  short mid-send.
+- `/api/system` — `resetReason` and a persistent `bootCount`, so an unattended restart says why.
+- ntfy custom server + token + notify-on-start (upstream knows `ntfy.sh` only).
+- A network watchdog that recovers the bridge when it answers but stops serving.
 
-This fork ships a HACS-installable Home Assistant custom integration in
-[`custom_components/openneato/`](custom_components/openneato/). Once installed it discovers your OpenNeato bridge
-by IP/hostname and exposes the robot as a full HA device — no YAML, no extra add-ons.
+### Where to go for everything else
 
-> [!NOTE]
-> The HA integration is the primary differentiator of this fork. The firmware, frontend, and flash tool track
-> upstream [`renjfk/OpenNeato`](https://github.com/renjfk/OpenNeato) closely. If you only want the standalone web
-> UI, use upstream directly.
+Do not look here for these — upstream documents them properly and keeps them current:
 
-### Install via HACS
+| You want | Go to |
+|---|---|
+| Wiring the ESP32 to the robot | [upstream user guide](https://github.com/renjfk/OpenNeato/blob/main/docs/user-guide.md) |
+| Flashing, the serial menu, WiFi setup | [upstream README](https://github.com/renjfk/OpenNeato#installation) |
+| The standalone web UI and what it can do | [upstream README](https://github.com/renjfk/OpenNeato) · [live demo](https://openneato-demo.renjfk.com/) |
+| Which robots are supported | upstream — short answer: **Botvac D3–D7**, not D8/D9/D10 |
+| OTA updates, dual-partition rollback | upstream |
+| The 7-day scheduler running *on the ESP32* | upstream |
+| ntfy push notifications | upstream |
+| The Neato serial protocol | [`docs/neato-serial-protocol.md`](docs/neato-serial-protocol.md) |
+| Firmware / frontend / flash-tool bugs | [upstream issues](https://github.com/renjfk/OpenNeato/issues) |
 
-1. In HACS, add this fork as a **custom repository**: `https://github.com/Leicas/OpenNeato` (category:
-   *Integration*).
-2. Search for **OpenNeato** in HACS and install.
-3. Restart Home Assistant.
-4. **Settings → Devices & Services → Add Integration → OpenNeato** and enter the bridge hostname or IP
-   (e.g. `neato.local` or `192.168.1.42`).
+---
 
-The integration polls `/api/*` over your LAN every 5 seconds (`local_polling`). No cloud round-trip, no
-external dependencies. Requires firmware `1.0+`; battery diagnostics need firmware `0.13+` (upstream PR #121).
+## Requirements
 
-### What you get
+- A working OpenNeato bridge on your LAN — **flash it and wire it by following upstream first.** This
+  integration talks to a bridge that already works; it is not a way to set one up.
+- Home Assistant **2025.1 or newer** — the minimum HACS enforces, declared in
+  [`hacs.json`](hacs.json).
+- Bridge firmware **1.0+**. Some entities need more:
+  - battery diagnostics — firmware `0.13+`
+  - the three range sensors, the LIDAR ring buffer, `resetReason` — the firmware from this fork
+  - older bridges do not break; the affected entities simply report `unknown`.
+- Nothing else. `manifest.json` declares `"requirements": []` — the mapper draws with Pillow, which HA
+  Core already ships.
 
-A single device with the following entity groups:
-
-- **Vacuum** (`vacuum.openneato_<name>`) — start/stop/pause/dock/locate/spot-clean, battery level, status,
-  fan speed presets (Eco/Auto/Intense), error reporting. Works with all the standard vacuum cards.
-- **Map card** — [`openneato-replay-card`](custom_components/openneato/www/openneato-replay-card.js), a
-  canvas Lovelace card that draws the accumulated LIDAR floorplan and replays a cleaning session over it,
-  with pan, zoom and a timeline scrubber. It reads the `openneato/session` and `openneato/sessions`
-  websocket commands directly, so there is no server-side rendering and no image polling. It replaces the
-  former `LIDAR map` and `Cleaning replay` camera entities, which are gone.
-- **Sensors** — battery level/voltage/current/temperature, battery cycle count, cumulative cleaning time,
-  WiFi RSSI, free heap, storage used, uptime, motor RPMs, error code/message, plus "last clean" stats
-  (duration, area covered, distance, battery used, mode, end time) pulled from the on-device history.
-- **Binary sensors** — charging, external power, battery over-temp, battery failure, empty fuel, error
-  active, NTP synced, dustbin seated, left/right wheel lifted, DC jack, and the six bumper contacts
-  (front/side/LDS, left and right — disabled by default, since they toggle on every bump).
-- **Switches** — eco mode, intense clean, bin-full detect, wall follower, schedule on/off, button-click
-  sounds, melodies, warnings, stealth LED, remote syslog, WiFi AP fallback, and per-event push
-  notifications (start/done/error/alert/docking).
-- **Text** — syslog server IP, ntfy topic, ntfy server, ntfy token (full push-notification config from HA).
-- **Numbers** — brush RPM, vacuum speed, side-brush power, stall threshold.
-- **Select** — navigation mode (Normal / Gentle / Deep / Quick).
-- **Buttons** — restart bridge, restart robot, shutdown robot, locate, clear errors, format filesystem
-  (diagnostic, disabled by default), **new battery** (resets fuel-gauge calibration after a physical pack
-  swap, disabled by default for safety).
-
-Every entity is translated via `strings.json`, and diagnostic-class entities (voltages, currents, raw
-sensor states) are tagged so they cluster cleanly under HA's Diagnostic section.
-
-### Notes for setup
-
-- **The map card needs no installation** — the integration serves
-  `www/openneato-replay-card.js` itself and registers the script tag, so there is nothing to copy into
-  `/config/www/` and no Lovelace resource to add. Just add a manual card with
-  `type: custom:openneato-replay-card`. The browser cache is keyed on the integration version, so the
-  card refreshes on upgrade rather than needing a hard reload. The walls come from the integration's own
-  LIDAR mapper, which accumulates an occupancy grid across cleanings — the plan sharpens with each run.
-- **Reading the diagnostics** — two field names are misleading and the integration corrects for them:
-  `errorCode` returns **200** (`UI_ALERT_INVALID`) when nothing is wrong, so the *Error code* sensor
-  reports *unknown* instead; and `chargerMAH` / `dischargeMAH` are **milliamps, not milliamp-hours**
-  (measured decreasing while the robot discharged), so they are exposed with a current device class.
-  `dcJackIn` is the robot's own barrel jack, not the dock — *on dock* is `extPwrPresent`.
-- **Coordinator resilience** — the integration tolerates a single hung endpoint without going into
-  "requires attention" state. State / charger / system are critical; anything else (errors, motors,
-  history) falls back to the last known value during transient ESP32 serial hangs.
-- **No Pillow declared dependency** — the LIDAR mapper writes its wall grid with Pillow, which already
-  ships with HA Core, so the integration's `manifest.json` keeps `"requirements": []`. Nothing extra to
-  install.
-- **ntfy + custom servers** — point `ntfy_server` at a self-hosted instance and `ntfy_token` at a Bearer
-  token for authenticated push. Empty server defaults to `ntfy.sh`; empty token is unauthenticated.
-
-### Version history
-
-Full per-version notes live in [`custom_components/openneato/CHANGELOG.md`](custom_components/openneato/CHANGELOG.md).
-Highlights:
-
-- **1.12** — the `openneato-replay-card` canvas card replaces the `LIDAR map` and `Cleaning replay`
-  cameras (`Platform.CAMERA` dropped); self-calibrating LIDAR floorplan with per-session alignment;
-  HA-settable 7-day schedule (14 `time` entities + 14 slot switches); six bumper binary sensors, off by
-  default; `chargerMAH` / `dischargeMAH` corrected from mAh to mA; the `errorCode` 200 sentinel no longer
-  reported as an error; `Dock contact` renamed `DC jack`; static floorplan-background option removed.
-- **1.11** — added `notify_on_start` and `ap_fallback_on_disconnect` switches; ntfy topic/server/token text
-  entities for full HA-side push config.
-- **1.10** — battery diagnostics (current, voltage, cycles, cumulative cleaning time) on top of firmware
-  PR #121, `New battery` calibration button, UTF-8-tolerant `/api/version` parsing.
-- **1.9** — fixed cameras stuck on the idle placeholder (`get_encoding()` crash on streamed bodies).
-- **1.6** — `Cleaning replay` camera (animated GIF time-lapse), `/api/history` corruption-tolerant parsing,
-  history filename validation + 2 MB response cap (LAN-MITM mitigation).
-- **1.3** — `LIDAR map` camera ported from the frontend renderer; self-managed polling.
-- **1.2** — last-clean stats sensors; dropped Pillow from declared deps.
-
-### Reporting integration bugs
-
-Use this fork's [issue tracker](https://github.com/Leicas/OpenNeato/issues) for anything that lives under
-`custom_components/openneato/`. For firmware, frontend, or flash-tool issues, upstream
-[renjfk/OpenNeato](https://github.com/renjfk/OpenNeato/issues) is the right place.
-
-## Supported Robots
-
-Neato Botvac D3 through D7. D8/D9/D10 are NOT supported (different board, password-locked serial port).
+---
 
 ## Installation
 
-### Requirements
+### 1. Add the repository to HACS
 
-- ESP32-C3, ESP32-S3, or original ESP32 board with **4 MB flash** (any dev board with USB and exposed GPIOs)
+HACS → ⋮ → **Custom repositories** → add `https://github.com/Philou95/OpenNeato`, category
+**Integration**. Then search for **OpenNeato**, install, and restart Home Assistant.
 
-### Quick Start
+### 2. Add the integration
 
-1. Download the latest release from the [Releases](https://github.com/renjfk/OpenNeato/releases) page
-2. Flash the ESP32 using the flash tool (auto-detects your chip type):
-   ```bash
-   openneato-flash
-   ```
-3. Configure your home WiFi via the serial menu (opens automatically after flashing)
-4. Wire the ESP32 to your robot's debug port
-5. Open the web UI at `http://neato.local` or the IP shown in the serial monitor
+**Settings → Devices & Services → Add Integration → OpenNeato**, then enter the bridge's hostname or IP
+(`neato.local`, or `192.168.1.42`). That is the whole configuration — no YAML.
 
-For detailed instructions and troubleshooting, see the [User Guide](docs/user-guide.md).
+The integration polls `/api/*` over your LAN every 5 seconds. `local_polling`, no cloud, no account.
 
-### Building from Source
+### 3. Add the map card
 
-Requires [Node.js](https://nodejs.org/) 22+, [PlatformIO CLI](https://platformio.org/install/cli),
-and [Go](https://go.dev/) 1.26+.
+Nothing to copy, nothing to register. The integration serves the card itself and registers the Lovelace
+resource. Add a manual card:
 
-```bash
-git clone https://github.com/renjfk/OpenNeato.git
-cd OpenNeato
-
-# Build frontend (generates web_assets.h)
-cd frontend && npm ci && npm run build && cd ..
-
-# Build firmware
-pio run -e c3-release
-
-# Build flash tool
-cd flash && go build -o openneato-flash . && cd ..
+```yaml
+type: custom:openneato-replay-card
 ```
 
-## Contributing
+Useful options:
 
-OpenNeato is open to contributions and ideas! Whether you're a developer wanting to add features or a user with
-suggestions, your input is valuable.
+```yaml
+type: custom:openneato-replay-card
+title: Vacuum
+floorplan: true        # draw the accumulated LIDAR plan behind the run (default: true)
+autoplay: false        # start playing as soon as a session loads
+height: fill           # or a number of pixels
+map_rotation_offset: 0 # degrees, if you want the plan turned to match your idea of "up"
+```
 
-The most useful contributions are testing prereleases on your hardware, filing clear bug reports, and opening PRs.
-If you'd rather just say thanks, there's a [Ko-fi](https://ko-fi.com/renjfk). Optional, doesn't influence the
-roadmap, the project stays free and community-driven either way.
+### 4. Run a cleaning
 
-> [!TIP]
-> Before opening an issue, consider starting a [Discussion](https://github.com/renjfk/OpenNeato/discussions) first —
-> many questions, setup troubles, and ideas are easier to resolve through conversation.
+The floor plan does not exist until the robot has been round once. After the first clean you get walls;
+after four or five they are worth looking at. See [How the map is built](#how-the-map-is-built) for what
+is actually happening and how long it takes to settle.
 
-> [!IMPORTANT]
-> For anything beyond a small bug fix, please open an issue
-> or [Discussion](https://github.com/renjfk/OpenNeato/discussions) first to align on the design before writing code.
-> This is an embedded project with tight resource constraints (single-core MCU, 320 KB RAM, 1.6 MB flash per OTA slot)
-> and strict architectural rules (non-blocking event loop, zero external dependencies). A quick design conversation
-> upfront avoids large rewrites during review.
+---
 
-### Issue Conventions
+## What you get
 
-When creating issues, please follow our simple naming convention:
+One device, with these entity groups.
 
-**Format:** `type: brief description`
+**Vacuum** — `vacuum.<name>`: start, pause, stop, return to base, locate, spot clean, battery, status,
+fan-speed presets (Eco / Auto / Intense), error reporting. Works with the standard HA vacuum cards.
 
-#### Issue Types
+> [!NOTE]
+> **Pause, don't stop, if you want the robot to come home.** `return to base` sends an event the robot
+> only acts on while a clean is running or paused. After a `stop` there is no run to return from, and
+> the recovery path costs the robot its localisation — which is also the map's frame for that session.
 
-- `feat:` - New features or functionality
-- `fix:` - Bug fixes
-- `enhance:` - Improvements to existing features
-- `chore:` - Maintenance tasks, dependencies, cleanup
-- `docs:` - Documentation updates
-- `build:` - Build system, CI/CD changes
+**Map card** — [`openneato-replay-card`](custom_components/openneato/www/openneato-replay-card.js): a
+canvas card that draws the accumulated floor plan, paints the cleaned area square by square as the run
+replays over it, and gives you pan, zoom, a timeline scrubber and a session picker. It reads the
+`openneato/sessions` and `openneato/session` websocket commands directly — no server-side rendering, no
+image polling. A cleaning in progress appears in the picker labelled *in progress* and refreshes every
+3 s, so you can watch the map being drawn.
 
-#### Examples
+**Sensors** — battery level / voltage / current / temperature, battery cycle count, cumulative cleaning
+time, WiFi RSSI, free heap, storage used, uptime, bridge reset reason and boot count, motor RPMs, LIDAR
+RPM, wall distance, floor distance left/right, error code and message, and last-clean statistics
+(duration, area, distance, battery used, mode, end time).
 
-- `feat: add CSV export functionality`
-- `fix: app crashes when importing large files`
-- `enhance: improve data loading performance`
-- `chore: update dependencies to latest versions`
-- `docs: update README with installation instructions`
-- `build: update Xcode project settings`
+**Binary sensors** — charging, external power, battery over-temp, battery failure, empty fuel, error
+active, NTP synced, dustbin seated, left/right wheel lifted, DC jack, and the six bumper contacts
+(front / side / LDS, left and right — disabled by default, they toggle on every bump).
 
-#### Guidelines
+**Switches** — eco mode, intense clean, bin-full detect, wall follower, schedule on/off, button-click
+sounds, melodies, warning sounds, stealth LED, remote syslog, WiFi AP fallback, and per-event push
+notifications (start / done / error / alert / docking).
 
-- Use lowercase for the description
-- Be specific and actionable
-- Keep under 60 characters
-- No period at the end
+**Numbers** — brush RPM, vacuum speed, side-brush power, stall threshold.
+**Select** — navigation mode (Normal / Gentle / Deep / Quick).
+**Text** — syslog server IP, ntfy topic, server, token.
+**Time + switches** — a full 7-day schedule, two slots per day, settable from HA (14 `time` entities and
+14 slot switches).
+**Buttons** — restart bridge, restart robot, shutdown robot, locate, clear errors, format filesystem
+(diagnostic, off by default), new battery (fuel-gauge recalibration after a pack swap, off by default).
+
+Everything is translated through `strings.json`, and diagnostic entities are tagged so they cluster
+under HA's Diagnostic section instead of cluttering the main card.
+
+### Things the raw API gets wrong, and what the integration does about them
+
+Three field names mislead, and the integration corrects for them rather than passing them through:
+
+- **`errorCode` returns 200 when nothing is wrong** (`UI_ALERT_INVALID`). The *Error code* sensor
+  reports `unknown` instead, so an idle robot does not look broken.
+- **`chargerMAH` / `dischargeMAH` are milliamps, not milliamp-hours** — measured decreasing while the
+  robot discharged. Exposed with a current device class.
+- **`dcJackIn` is the robot's own barrel jack, not the dock.** "On dock" is `extPwrPresent`.
+
+And one behaviour worth knowing: the coordinator tolerates a single hung endpoint without dropping the
+whole device into "requires attention". State, charger and system are treated as critical; errors,
+motors and history fall back to their last known value through a transient serial hang on the bridge.
+
+---
+
+## How the map is built
+
+This is the substantial part of the fork, so it is worth explaining rather than just listing.
+
+The robot's LIDAR is honest. Measured against a cardboard box at eight ranges with the robot standing
+still, the returns are **accurate to about a centimetre** at every distance tested, and a flat cardboard
+face comes back flat to 0.8–1.5 mm. Every centimetre of error on the finished plan is therefore *pose*,
+not sensing — where the robot thought it was when it took the scan. The pipeline is a stack of
+corrections to that, each one measured on real runs before it was kept:
+
+1. **Scans are weighted by how still the robot was.** A scan takes 0.6–1.7 s and the robot keeps
+   driving. Rotation dominates: 3.5° of turn displaces a wall point 2 m away by 12 cm, where 3.5 cm of
+   travel displaces it by 3.5 cm. A motionless scan counts 1.0 and the weight falls to zero at the
+   limits.
+2. **The LIDAR is not on the centre of rotation.** The turret sits **103 mm behind** it — measured by
+   turning 178° in place and fitting the range change against bearing. Uncorrected, the same wall gets
+   stamped up to 206 mm apart depending on which way the robot faced.
+3. **Each scan is matched onto the map built so far**, so odometry drift does not accumulate through an
+   hour-long run. When that search hits the edge of its window the result is discarded: a clipped search
+   has not converged on anything, and the edge of a window is not a measurement.
+4. **The run's poses are then closed as a graph** — loop closures found and solved during the clean
+   rather than all at once at the end, so the cost is constant per scan instead of quadratic.
+5. **The session is fitted onto the accumulated map** — four quarter turns, then a fine angle sweep —
+   and merged. A session that does not fit is refused rather than allowed to corrupt the map.
+6. **The map forgets.** Free space read off the beams themselves erodes cells that are no longer there,
+   so a chair that moves out is gone in about six cleanings while a wall seen every time is not touched.
+
+Two properties of the accumulation are worth stating because they are what keeps the plan honest over
+months:
+
+- **A cell's value is evidence *per opportunity*, not evidence banked.** The grid is rescaled after each
+  merge so the top of its distribution stays put, which holds the draw threshold still without closing
+  the gap between "seen every cleaning" and "seen twice". A per-cell ceiling was tried first and does
+  the opposite: it stops the core of a wall growing while the fringe beside it keeps climbing, and the
+  walls thicken run after run.
+- **The replay is drawn in the same frame as the walls.** The correction the mapper applied to the
+  poses is stored with the session and re-applied to the robot's own path log — as a rotation *and* a
+  shift, because the rotation is the larger half of it.
+
+### What it converges to
+
+On the reference home, a single cleaning draws its walls **2 cells thick — 50 mm**, and the accumulated
+map settles at the same, which is as thin as the data supports. Coverage that falls on a drawn wall sits
+around **1.3 %**, which is a 319 mm cleaning swath lapping onto a wall the robot followed, not a
+misalignment.
+
+An existing map that predates the rescaling converges rather than jumping: measured by replaying real
+cleanings, thickness holds for three merges, improves at the fourth, and reaches its floor around the
+eleventh.
+
+---
+
+## Test conditions
+
+Everything above was measured on one setup. It is a real home, not a lab, and a second one might behave
+differently — so here is exactly what was tested, and on what.
+
+**Robot** — Neato **Botvac D6 Connected**, software `4.5.3.189.0`, LDS `V2.7.4`, main board rev 4,
+smart battery (`bq40z50`) manufactured 2024-02. Robot width **319 mm**, main brush 280 mm — the cleaned
+swath is the robot's width, not the brush's, because the side brush sweeps the strip beyond the main
+brush into its path.
+
+**Bridge** — ESP32-C3, OpenNeato firmware from this fork, wired to the robot's debug port. WiFi transmit
+power is deliberately below the firmware default on this install; the supply is not perfectly stable and
+a higher transmit power browns it out, which looks exactly like a WiFi problem and is not one.
+
+**Home Assistant** — HA Core 2026.8.x on a **Raspberry Pi 5**, HACS install, integration talking to the
+bridge over a plain LAN. The pose-graph timings quoted in the changelog (~85 s in the executor at the
+end of an hour-long clean) are Pi 5 figures; a Pi 4 is roughly twice that.
+
+**The home** — a single floor of about **27 m² of cleaned area** per run, taking 55 to 62 minutes and
+185 to 195 m of travel. Broadly rectangular, lightly furnished, few thin obstacles. **This matters**: a
+cluttered home with many chair legs, or a mirrored or glass-walled room, will not produce the same
+numbers, and a long featureless corridor is the case where scan matching has the least to work with —
+position *along* a corridor is not observable from a LIDAR scan, and that is a known weak point of the
+pipeline rather than a bug that was fixed.
+
+**Calibration target** — a **50 × 29 cm cardboard box, 33.5 cm tall**, in good condition, placed in the
+open. Measured on the rendered plan as the **outermost cell in each direction still carrying ≥ 20 % of
+that wall's peak weight**, which is the box's *outer surface* — the only face the robot ever sees.
+
+> [!WARNING]
+> That estimator is not interchangeable with the obvious ones, and the difference is not small. On the
+> same map the same box measures 32.5 × 57.5 cm by bounding box, 27.5 × 50.0 cm axis-to-axis, 25.9 ×
+> 47.2 cm peak-to-peak, and 30.0 × 52.5 cm by the outer-surface rule. A measurement's reference frame is
+> part of the measurement. Sweep the threshold before believing a number: from 10 % to 30 % the
+> outer-surface figure does not move, which is what makes it a result rather than a setting.
+
+**Honest accuracy on the accumulated plan: +1.0 / +2.5 cm** on a 29 × 50 cm target. Earlier
+sub-centimetre claims were an artefact of the wrong estimator.
+
+**Sample size** — the mapping work was validated by replaying real cleanings offline against the real
+merge code: seven full sessions of 430 to 670 scans each, plus a stored map of seventeen accumulated
+cleanings. One run's scans are kept in `config/openneato_captures.json` for exactly this, so a mapping
+change can be tried against real returns instead of shipped and judged a cycle later.
+
+**Not tested at all**: D3, D4, D5, D7. Multi-floor homes. Anything other than a Pi 5. Robots with a
+different LDS revision. The lever arm (103 mm) and the swath (319 mm) are D6 measurements and are very
+likely wrong for another model.
+
+---
+
+## Change history
+
+Full per-version notes, with the measurements behind each change, live in
+[`custom_components/openneato/CHANGELOG.md`](custom_components/openneato/CHANGELOG.md). The shape of the
+project, in order:
+
+### Mapping and the replay card (1.13 → current)
+
+| Version | What landed |
+|---|---|
+| **1.25** | The correction handed to the replay became a rotation *and* a shift, not an averaged shift — the run stopped being drawn beside its own walls. The grid is rescaled instead of capped, so walls stop thickening with every cleaning. A clipped scan-match result is refused instead of applied. `resetReason` / `bootCount` on the bridge. The card says the map is being rebuilt instead of blaming the robot for it. |
+| **1.24** | The run in progress is placed on the map without waiting for the merge. Firmware network watchdog. Map protected from a bridge that answers badly. |
+| **1.23** | The map can be watched while the robot is still cleaning. Scans weighted by how still the robot was. Pose-graph loop closure. The bridge keeps the scans, so an outage stops costing them. The map learns to forget what is no longer there. |
+| **1.22** | Three range sensors the bridge was dropping — wall distance, floor distance left and right. |
+| **1.21** | Navigation mode recorded per session. Fixed the session picker freezing HA. |
+| **1.20** | The wall threshold follows the map's own distribution instead of standing still. |
+| **1.19** | Delete button on the card. `return to base` made to work on a stopped robot. Returning to base no longer reported as an error. |
+| **1.18** | Six bumper binary sensors, off by default. |
+| **1.17** | **Self-building floor plan from the LIDAR** — the accumulated occupancy grid the whole map story starts from. |
+| **1.13 – 1.16** | The interactive replay card, and the alignment work that stopped the view shifting between cleanings. |
+
+### Before the map (1.0 → 1.12)
+
+| Version | What landed |
+|---|---|
+| **1.12** | The canvas replay card replaced the `LIDAR map` and `Cleaning replay` camera entities (`Platform.CAMERA` dropped). Per-session alignment. HA-settable 7-day schedule. `chargerMAH` / `dischargeMAH` corrected from mAh to mA; the `errorCode` 200 sentinel stopped being reported as an error. |
+| **1.11** | `notify_on_start` and AP-fallback switches; ntfy topic / server / token text entities. |
+| **1.10** | Battery diagnostics — current, voltage, cycle count, cumulative cleaning time — and the `New battery` calibration button. |
+| **1.6 – 1.9** | The `Cleaning replay` GIF camera, corruption-tolerant `/api/history` parsing, filename validation and a response cap. |
+| **1.2 – 1.3** | Last-clean statistics sensors, the first `LIDAR map` camera, coordinator resilience, Pillow dropped from declared dependencies. |
+| **1.0 – 1.1** | The integration itself: config flow, vacuum, sensors, switches, buttons. |
+
+---
+
+## Reporting bugs
+
+- **Anything under `custom_components/openneato/`** — the integration, the card, the mapper:
+  [this fork's issues](https://github.com/Philou95/OpenNeato/issues).
+- **Firmware, frontend, flash tool, wiring, the protocol**:
+  [upstream issues](https://github.com/renjfk/OpenNeato/issues). Please check there first — most of what
+  can go wrong lives upstream, and upstream is where it gets fixed for everybody.
+
+A useful report for a mapping problem includes a copy of `config/.storage/openneato_*_lidar_map` and, if
+you have it, `config/openneato_captures.json`. A complaint about the map is a complaint about a picture,
+and the picture is three transforms away from the data — those two files are what makes it possible to
+tell which of the three is at fault.
+
+> [!NOTE]
+> This is beta, and so is upstream. Rough edges are expected.
+
+---
 
 ## Development
 
-For frontend development without hardware, use the mock API scenarios documented in
-[`docs/mock-scenarios.md`](docs/mock-scenarios.md). The same `?scenario=...` URLs work in local Vite dev and the
-Cloudflare demo.
+The integration is plain Python with no external dependencies. Lint with `ruff`. There is no test suite;
+mapping changes are validated by replaying recorded sessions against the real merge code, which is what
+`config/openneato_captures.json` exists for.
 
-### Release Process
-
-Manual releases via opencode; see [RELEASE_PROCESS.md](RELEASE_PROCESS.md).
-
-Prereleases can be triggered from any PR by commenting `/prerelease` (collaborators only).
+For the firmware, frontend and flash tool, follow upstream's build instructions — they are unchanged
+here.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE), same as upstream.
