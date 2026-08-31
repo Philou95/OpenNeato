@@ -191,6 +191,48 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /api/lidar/status:
+    get:
+      tags:
+        - History
+      summary: Counters for the LIDAR scan buffer
+      description: >-
+        Diagnostics for the ring buffer the bridge fills while a cleaning runs.
+        Reported live and reset per session; a reader uses it to tell a quiet
+        buffer from a stalled one.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LidarBufferStatus"
+  /api/lidar/buffer:
+    get:
+      tags:
+        - History
+      summary: Drain buffered LIDAR scans as NDJSON
+      description: >-
+        One JSON object per line, oldest first. `after` acknowledges everything
+        up to that sequence number, which is what frees the ring: pass the
+        highest `seq` of the previous batch. An empty body means nothing new,
+        which is the normal case between scans and not an error.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: Highest sequence number already consumed.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+      responses:
+        "200":
+          description: application/x-ndjson
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
   /api/lidar:
     get:
       tags:
@@ -1248,6 +1290,58 @@ components:
         - errorCode
         - errorMessage
         - displayMessage
+    LidarBufferStatus:
+      type: object
+      description: >-
+        Counters for the scan ring buffer, as /api/lidar/status reports them.
+        All are cumulative for the current session except the state flags and
+        the sizes, which are instantaneous.
+      properties:
+        calls:
+          type: number
+          description: Scan attempts made by the bridge
+        ok:
+          type: number
+          description: Attempts that produced a usable scan
+        scanFail:
+          type: number
+          description: Attempts whose LIDAR read failed
+        poseFail:
+          type: number
+          description: Attempts whose first pose read failed
+        pose2Fail:
+          type: number
+          description: Attempts whose second pose read failed
+        skipPending:
+          type: number
+          description: Attempts skipped because one was already in flight
+        skipInterval:
+          type: number
+          description: Attempts skipped by the sampling interval
+        skipDrain:
+          type: number
+          description: Attempts skipped while the buffer was being drained
+        released:
+          type: number
+          description: Scans dropped because nothing drained them in time
+        ring:
+          type: number
+          description: Scans currently held in the ring
+        spilling:
+          type: number
+          description: 1 while the ring is overflowing to flash, else 0
+        collecting:
+          type: number
+          description: 1 while a cleaning is being recorded, else 0
+        pending:
+          type: number
+          description: 1 while a scan is in flight, else 0
+        drainAgeMs:
+          type: number
+          description: Milliseconds since a reader last drained the buffer
+        batchLen:
+          type: number
+          description: Size in bytes of the batch waiting to be served
     LidarScan:
       type: object
       properties:
