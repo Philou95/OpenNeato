@@ -224,7 +224,7 @@ class LidarMapRunner:
         self._tracking = False
         # Ou la session en cours se pose sur la carte, avant que la fusion ne
         # le sache. Voir _align_live().
-        self._live_align: tuple[int, int, int, float, float, float] | None = None
+        self._live_align: tuple[int, int, int, float, float, float, float] | None = None
         self._live_align_at = 0.0
         self._live_stable = 0
         self._aligning = False
@@ -467,9 +467,11 @@ class LidarMapRunner:
         # La meme correction que la fusion range avec l'alignement, et pour la
         # meme raison : les murs sont projetes depuis des poses que le recalage
         # a deja deplacees, le trajet rejoue vient du journal brut du robot.
-        cx, cy = self._tracker.correction if self._tracker else (0.0, 0.0)
+        cx, cy, cth = (
+            self._tracker.correction if self._tracker else (0.0, 0.0, 0.0)
+        )
         placement = (
-            quarter, dx, dy, fine, cx / CELL_SIZE_M, cy / CELL_SIZE_M,
+            quarter, dx, dy, fine, cx / CELL_SIZE_M, cy / CELL_SIZE_M, cth,
         )
         first = self._live_align is None
         turned = not first and self._live_align[0] != quarter

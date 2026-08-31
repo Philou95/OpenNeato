@@ -821,7 +821,7 @@ class AccumulatedMap:
         floor: set[tuple[int, int]],
         session_name: str | None = None,
         free: set[tuple[int, int]] | None = None,
-        correction: tuple[float, float] = (0.0, 0.0),
+        correction: tuple[float, ...] = (0.0, 0.0, 0.0),
         contribute: bool = True,
     ) -> dict[str, Any]:
         """Fold one cleaning into the accumulated map, re-aligning it first.
@@ -924,12 +924,18 @@ class AccumulatedMap:
             # half of the same journey: raw log -> corrected frame -> map.
             # In cells, like dx and dy, and applied before the rotation
             # because that is where scan matching applied it.
+            #
+            # Seven fields since 2026-08-31: the correction is a rigid
+            # transform, and its rotation is the larger half of it. Six-field
+            # alignments already stored mean cth = 0, which is what they were
+            # replayed as anyway.
             cx = correction[0] / CELL_M
             cy = correction[1] / CELL_M
+            cth = correction[2] if len(correction) > 2 else 0.0
             self.alignments[alignment_key(session_name)] = (
-                (quarter, dx, dy, fine, cx, cy)
+                (quarter, dx, dy, fine, cx, cy, cth)
                 if self.walls
-                else (0, 0, 0, 0.0, cx, cy)
+                else (0, 0, 0, 0.0, cx, cy, cth)
             )
 
         if not contribute:
@@ -1116,6 +1122,60 @@ def match_pose(
     return bx, by, bt
 
 
+def fit_rigid(
+    raw: list[tuple[float, float]], fixed: list[tuple[float, float]]
+) -> tuple[float, float, float]:
+    """Rotation and shift that best carry the raw poses onto the corrected ones.
+
+    Returns (tx, ty, degrees) meaning `p_corrected ~= R(degrees) . p_raw + t`,
+    with the rotation about the frame origin so it composes with the quarter
+    and fine turns the merge already applies.
+
+    Why a rotation and not just a shift, which is what used to be handed over:
+    scan matching applies a *running* correction and the pose graph then moves
+    every pose again, and the sum of those is overwhelmingly a rotation of the
+    whole run. Averaging it into one translation cannot express that, and the
+    error it leaves is not small. Measured over seven cleanings, the median
+    distance between where the map places a scan and where the replay draws it:
+
+    | run | mean shift (today) | rigid fit |
+    |-----|--------------------|-----------|
+    |   6 | 100 mm, 50% > 10 cm |  33 mm, 2.3% |
+    |   9 |  45 mm,  0.6%       |  29 mm, 0.2% |
+    |  11 |  62 mm,  3.6%       |  22 mm, 0.7% |
+    |  14 | 124 mm, 63%         |  33 mm, 3.7% |
+
+    Sixty-four interpolated knots -- 128 numbers instead of three -- reach
+    35 mm on run 14, no better than the rigid block. The deformation genuinely
+    is a rigid one, so three numbers is not an approximation of the answer, it
+    is the answer.
+    """
+    n = len(raw)
+    if n < 2 or n != len(fixed):
+        return (0.0, 0.0, 0.0)
+    rcx = sum(p[0] for p in raw) / n
+    rcy = sum(p[1] for p in raw) / n
+    fcx = sum(p[0] for p in fixed) / n
+    fcy = sum(p[1] for p in fixed) / n
+    sxx = sxy = 0.0
+    for (rx, ry), (fx, fy) in zip(raw, fixed):
+        ax, ay = rx - rcx, ry - rcy
+        bx, by = fx - fcx, fy - fcy
+        sxx += ax * bx + ay * by
+        sxy += ax * by - ay * bx
+    if not sxx and not sxy:
+        return (fcx - rcx, fcy - rcy, 0.0)
+    theta = math.atan2(sxy, sxx)
+    cos_a, sin_a = math.cos(theta), math.sin(theta)
+    # t = centroid(fixed) - R . centroid(raw), so the rotation is about the
+    # origin and the pair (t, theta) is a transform, not a pair of hints.
+    return (
+        fcx - (rcx * cos_a - rcy * sin_a),
+        fcy - (rcx * sin_a + rcy * cos_a),
+        math.degrees(theta),
+    )
+
+
 def _session_poses(captures, match, refine):
     """La passe 1 : recaler chaque scan, puis fermer les boucles.
 
@@ -1135,12 +1195,16 @@ def _session_poses(captures, match, refine):
     dx = dy = dtheta = 0.0
     matching = match
     placed = 0
-    sum_dx = sum_dy = 0.0
+    # The pose as the robot reported it, kept per placed scan so the correction
+    # handed to the replay can be fitted against where the scan actually ended
+    # up rather than averaged. See fit_rigid().
+    raw_poses: list[tuple[float, float]] = []
     for capture in captures:
         x, y, theta, points = capture[:4]
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
         if weight <= 0:
             continue
+        raw_poses.append((x, y))
         x, y, theta = x + dx, y + dy, theta + dtheta
         if matching and placed >= MATCH_SEED:
             mx, my, mtheta = match_pose(scratch, x, y, theta, points)
@@ -1156,8 +1220,6 @@ def _session_poses(captures, match, refine):
             scratch[cell] = scratch.get(cell, 0.0) + weight
         scans.append((x, y, theta, points, weight))
         placed += 1
-        sum_dx += dx
-        sum_dy += dy
 
     # -- fermeture de boucle, entre les deux passes ------------------------
     # Elle rend None quand elle n'a rien a dire -- trop peu de scans, aucun
@@ -1180,7 +1242,9 @@ def _session_poses(captures, match, refine):
                 (better[k][0], better[k][1], math.degrees(better[k][2]), s_[3], s_[4])
                 for k, s_ in enumerate(scans)
             ]
-    correction = (sum_dx / placed, sum_dy / placed) if placed else (0.0, 0.0)
+    # Fitted last, against the poses as the graph left them: the replay has to
+    # land on the walls the *projection* used, not on the causal pass.
+    correction = fit_rigid(raw_poses, [(s_[0], s_[1]) for s_ in scans])
     return scans, correction
 
 
@@ -1193,7 +1257,7 @@ def build_session_grids(
     dict[tuple[int, int], float],
     set[tuple[int, int]],
     set[tuple[int, int]],
-    tuple[float, float],
+    tuple[float, float, float],
 ]:
     """Turn a run's captures into wall hit counts and traversed floor.
 
@@ -1206,11 +1270,13 @@ def build_session_grids(
     which is what stops odometry drift accumulating across a run. Pass
     match=False for the raw-odometry behaviour.
 
-    Also returns the mean pose correction scan matching applied, in metres.
-    The walls come out in the corrected frame; the replay's path and coverage
-    are read from the robot's own log and are still in the raw one, so
-    whoever serves them has to be told the difference. Leaving it out put the
-    cleaned area 8 cm off the walls on the 2026-08-26 run.
+    Also returns the pose correction as a rigid transform -- (tx, ty, degrees),
+    metres and degrees. The walls come out in the corrected frame; the replay's
+    path and coverage are read from the robot's own log and are still in the raw
+    one, so whoever serves them has to be told the difference. Leaving it out
+    put the cleaned area 8 cm off the walls on the 2026-08-26 run; averaging it
+    into a shift, which is what this returned until 2026-08-31, left the run of
+    the 30th 124 mm off. See fit_rigid().
 
     CPU-bound; call it from the executor.
     """
@@ -1220,13 +1286,18 @@ def build_session_grids(
     # minutes a une vingtaine de secondes sur un Raspberry Pi 5.
     if tracker is not None:
         scans = tracker.scans
-        correction = tracker.correction
         better = tracker.refined()
         if better is not None:
             scans = [
                 (better[k][0], better[k][1], math.degrees(better[k][2]), s_[3], s_[4])
                 for k, s_ in enumerate(scans)
             ]
+        # Fitted here rather than read off the tracker, so it is measured
+        # against the poses the projection below actually uses. Reading it
+        # before the graph ran would describe a frame the map never sees.
+        correction = fit_rigid(
+            tracker.raw_poses, [(s_[0], s_[1]) for s_ in scans]
+        )
     else:
         scans, correction = _session_poses(captures, match, refine)
 
@@ -1352,12 +1423,16 @@ class SessionTracker:
     """
 
     __slots__ = ("_clouds", "_dth", "_dx", "_dy", "_edges", "_matching",
-                 "_placed", "_points", "_poses", "_scratch", "_sum_dx",
-                 "_sum_dy", "_weights", "candidates", "matched")
+                 "_placed", "_points", "_poses", "_raw", "_scratch",
+                 "_weights", "candidates", "matched")
 
     def __init__(self) -> None:
         self._scratch: dict[tuple[int, int], float] = {}
         self._poses: list[tuple[float, float, float]] = []
+        # The pose the robot reported, before any correction, one per placed
+        # scan and in the same order as _poses. That pairing is the whole
+        # input to fit_rigid().
+        self._raw: list[tuple[float, float]] = []
         self._clouds: list[list[tuple[float, float]]] = []
         self._points: list = []
         self._weights: list[float] = []
@@ -1365,8 +1440,6 @@ class SessionTracker:
         self._dx = self._dy = self._dth = 0.0
         self._matching = True
         self._placed = 0
-        self._sum_dx = 0.0
-        self._sum_dy = 0.0
         self.candidates = 0
         self.matched = 0
 
@@ -1382,6 +1455,7 @@ class SessionTracker:
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
         if weight <= 0:
             return
+        self._raw.append((x, y))
         x, y, theta = x + self._dx, y + self._dy, theta + self._dth
         if self._matching and self._placed >= MATCH_SEED:
             mx, my, mtheta = match_pose(self._scratch, x, y, theta, points)
@@ -1409,8 +1483,6 @@ class SessionTracker:
             slam.clouds([(x, y, theta, points)], MAX_RANGE_M, LIDAR_BEHIND_M)[0]
         )
         self._placed += 1
-        self._sum_dx += self._dx
-        self._sum_dy += self._dy
         self._close_loops(k)
 
     def _close_loops(self, k: int) -> None:
@@ -1531,13 +1603,23 @@ class SessionTracker:
             self.add(capture)
 
     @property
-    def correction(self) -> tuple[float, float]:
-        """Correction moyenne appliquee par le recalage, en metres.
+    def raw_poses(self) -> list[tuple[float, float]]:
+        """Les poses telles que le robot les a rapportees, une par scan place.
 
-        Meme definition que la passe 1 : la moyenne du decalage accumule, pas
-        du decalage par scan. Le rejeu la reclame pour dessiner le trajet dans
-        le meme repere que les murs.
+        Appariees a `scans` par l'indice : c'est ce que `fit_rigid` demande.
         """
-        if not self._placed:
-            return (0.0, 0.0)
-        return (self._sum_dx / self._placed, self._sum_dy / self._placed)
+        return list(self._raw)
+
+    @property
+    def correction(self) -> tuple[float, float, float]:
+        """Le deplacement rigide que le recalage a fait subir au menage.
+
+        (tx, ty, degres), en metres et degres : `pose_carte ~= R(d) . brute + t`.
+        Le rejeu la reclame pour dessiner le trajet dans le meme repere que les
+        murs.
+
+        Sur les poses causales, donc utilisable **pendant** le menage. La
+        fusion, elle, refait l'ajustement contre les poses fermees par le
+        graphe -- voir `build_session_grids`.
+        """
+        return fit_rigid(self._raw, [(p[0], p[1]) for p in self._poses])

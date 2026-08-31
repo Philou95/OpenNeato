@@ -278,11 +278,11 @@ def _apply_alignment(
 ) -> list[tuple[float, float, float, float]]:
     """Rotate and shift a run onto the accumulated map's frame.
 
-    `align` is (quarter, dx, dy, fine, cx, cy) as merge_session stored it:
-    first the pose correction scan matching applied during the run, then a
-    quarter turn counter-clockwise, then a fine angle, then a shift -- all the
-    offsets in *cells*. Older alignments carry three or four fields and mean
-    fine = 0 and no correction.
+    `align` is (quarter, dx, dy, fine, cx, cy, cth) as merge_session stored it:
+    first the pose correction scan matching and the pose graph applied during
+    the run, then a quarter turn counter-clockwise, then a fine angle, then a
+    shift -- all the offsets in *cells*. Older alignments carry three to six
+    fields and mean fine = 0, no correction, or a correction with no rotation.
 
     The correction comes first because that is where it was applied: the map's
     walls were built from poses scan matching had already moved, while this
@@ -290,16 +290,28 @@ def _apply_alignment(
     beside the walls by whatever the run drifted -- 8 cm on 2026-08-26, and in
     the opposite direction from forgetting the shift, which is how it was
     spotted.
+
+    ⚠ The correction is a rotation *and* a shift, and the rotation is the
+    bigger half. It was stored as a shift alone until 2026-08-31, which is what
+    put the 30th's cleaning 124 mm off its own walls -- half a cleaned swath,
+    and visible as the lanes sitting beside the plan rather than on it. Applied
+    about the frame origin, like the fine turn below, because that is the frame
+    fit_rigid() expressed it in.
     """
     quarter, dx, dy = align[0], align[1], align[2]
     fine = align[3] if len(align) > 3 else 0.0
     corr_x = align[4] * HISTORY_CELL_SIZE_M if len(align) > 5 else 0.0
     corr_y = align[5] * HISTORY_CELL_SIZE_M if len(align) > 5 else 0.0
+    corr_t = align[6] if len(align) > 6 else 0.0
     quarter %= 4
     shift_x = dx * HISTORY_CELL_SIZE_M
     shift_y = dy * HISTORY_CELL_SIZE_M
+    corr_cos = math.cos(math.radians(corr_t))
+    corr_sin = math.sin(math.radians(corr_t))
     out = []
     for x, y, t, ts in norm:
+        if corr_t:
+            x, y = x * corr_cos - y * corr_sin, x * corr_sin + y * corr_cos
         x += corr_x
         y += corr_y
         if quarter == 1:
@@ -313,7 +325,12 @@ def _apply_alignment(
             cos_a, sin_a = math.cos(rad), math.sin(rad)
             x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
         out.append(
-            (x + shift_x, y + shift_y, (t + quarter * 90.0 + fine) % 360.0, ts)
+            (
+                x + shift_x,
+                y + shift_y,
+                (t + corr_t + quarter * 90.0 + fine) % 360.0,
+                ts,
+            )
         )
     return out
 
