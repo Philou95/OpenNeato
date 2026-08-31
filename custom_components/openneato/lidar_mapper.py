@@ -157,26 +157,49 @@ CARVE_HALF_M = 0.05
 # against four under the old halving. Slower to forget a chair, far slower to
 # eat a wall.
 CARVE_STEP = 8.0
-# Ceiling on what one cell may bank. Seeing a wall for the thirteenth time does
-# not make it more of a wall than the fifth.
+# Where the top of the map's distribution is pinned. wall_threshold() returns
+# `WALL_KEEP_FRACTION * p95`, so holding p95 still is what holds the bar still,
+# and a bar that drifts is what rots the plan run after run.
 #
-# This is the other half of the same bug, and the larger half. wall_threshold()
-# returns `WALL_KEEP_FRACTION * p95`, and p95 grew without bound because
-# well-seen cells accumulate forever: on the live map it went 121 -> 269 over six
-# cleanings, so the bar for being drawn **more than doubled** (25.4 -> 56.5)
-# while the under-observed cells were being halved. Drawn wall fell 3689 -> 2673,
-# monotonically, every single cleaning. The better the robot saw its main walls,
-# the more it erased the rest.
+# This used to be a per-cell ceiling -- `min(count + n, 60)` -- and that fixed
+# the threshold drifting *up*, which was eroding the map. It bought the erosion
+# fix and introduced the thickening Philou reported on 2026-08-31: **a ceiling
+# stops the core of a wall growing while the fringe beside it keeps climbing**,
+# so the ratio between "seen every cleaning" and "seen twice" closes a little
+# more each run until the fringe clears the bar too.
 #
-# Capping pins the threshold at WALL_KEEP_FRACTION * cap = 12.6. Replayed over
-# runs 9, 10 and 11 the count stops falling and climbs (2673 -> 4849), and the
-# recovered material is *cleaner*: isolated cells, which are almost always
-# noise, drop from 1.2% to 0.3%. What the old rule eroded was connected wall.
+# Measured, and it is not subtle. Merging one session with *itself* seven times
+# -- identical evidence, a perfect alignment, nothing new learned -- took the
+# drawn plan from 2158 cells to 3735 and the walls from 2 cells thick to 3.
+# Over seven real cleanings the same inflation ran 2088 -> 4069.
 #
-# 60 rather than a larger cap because a bigger bank takes proportionally longer
-# to overturn: at 200 a departed chair needs twenty cleanings to fade, at 60 it
-# needs six.
-WALL_COUNT_CAP = 60.0
+# Rescaling the whole grid instead keeps the bar still *and* keeps the ratio,
+# because multiplying every cell by the same number changes neither. Replayed
+# over the same seven cleanings the plan settles at ~2350 cells and **2 cells
+# thick, p90 3** -- as thin as a single cleaning draws it, which is the most the
+# data can support. Two things came with it, unasked:
+#
+#   * the stored grid stops growing (8252 -> 4804 cells), and
+#   * the merge overlap *rises* run after run -- 0.85, 0.81, 0.75, 0.72, 0.71
+#     under the ceiling, decaying towards the 0.55 that discards the map, against
+#     0.85, 0.81, 0.91, 0.88, 0.93, 0.97 rescaled. A cleaner map is easier to
+#     fit a cleaning onto, so this moves the map away from the cliff rather
+#     than towards it.
+#
+# The fixed point is worth stating plainly, because it is the property the whole
+# rule exists for: a cell settles at `WALL_REFERENCE x (its weight per cleaning)
+# / (the p95 cell's weight per cleaning)`. Evidence per opportunity, not evidence
+# banked -- which is what a wall is and a passer-by is not.
+#
+# 60 rather than more for the same reason the ceiling was 60: the rescaling
+# fades an unseen cell by roughly a quarter per cleaning, so a departed chair is
+# under the bar in about six.
+WALL_REFERENCE = 60.0
+# Below this a cell is arithmetic dust: it is three and a half fadings under the
+# draw threshold and nothing but a fresh sighting can bring it back, which would
+# overwrite it anyway. Dropping it is what stops the stored grid -- and the
+# .storage file, a megabyte and climbing -- growing forever.
+WALL_DUST = 1.5
 # Free space read off the beams themselves -- see scan_free_cells().
 #
 # The guard keeps a beam from rubbing out the surface it just found, and it is
@@ -945,7 +968,7 @@ class AccumulatedMap:
             return report
 
         for cell, n in walls.items():
-            self.walls[cell] = min(self.walls.get(cell, 0) + n, WALL_COUNT_CAP)
+            self.walls[cell] = self.walls.get(cell, 0) + n
 
         # Then let this run's free space push back on what earlier runs saw.
         # Anything the robot drove through is not there any more, and without
@@ -973,6 +996,7 @@ class AccumulatedMap:
 
         self.floor |= floor
         self.sessions += 1
+        report["rescaled"] = self._rescale()
 
         if len(self.walls) > MAX_GRID_CELLS:
             # Drop the weakest evidence first; real walls are seen repeatedly.
@@ -983,6 +1007,30 @@ class AccumulatedMap:
         report["total_walls"] = len(self.walls)
         report["sessions"] = self.sessions
         return report
+
+    def _rescale(self) -> float:
+        """Pin the top of the distribution, so the draw threshold holds still.
+
+        Returns the factor applied, 1.0 when nothing was needed.
+
+        Multiplying every cell by the same number leaves every ratio between
+        them untouched, which is the whole difference from the ceiling this
+        replaces: it holds the bar still without also closing the gap between a
+        wall and the fringe beside it. See WALL_REFERENCE for the measurements.
+        """
+        if not self.walls:
+            return 1.0
+        counts = sorted(self.walls.values())
+        p95 = counts[min(len(counts) - 1, int(len(counts) * WALL_STRONG_QUANTILE))]
+        if p95 <= WALL_REFERENCE:
+            return 1.0
+        scale = WALL_REFERENCE / p95
+        self.walls = {
+            cell: n * scale
+            for cell, n in self.walls.items()
+            if n * scale >= WALL_DUST
+        }
+        return scale
 
     def render_signature(self) -> str:
         """Identifier that changes whenever the drawn plan would change.
