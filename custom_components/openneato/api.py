@@ -34,7 +34,20 @@ class OpenNeatoConnectionError(HomeAssistantError):
 
 
 class OpenNeatoApiError(HomeAssistantError):
-    """Error to indicate a non-connection API failure."""
+    """Error to indicate a non-connection API failure.
+
+    Carries the HTTP status when there was one, because the callers need to
+    tell apart "the robot answered, and the answer was no" from "the robot did
+    not answer". A 404 on a session is the first: the file has been renamed
+    under us -- the firmware compresses a finished run to `.hs` a minute after
+    it ends -- and the cure is to relist, not to tell the user the robot is
+    unreachable while it sits on its dock. `None` when the failure had no
+    status of its own.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 async def _read_json(response: aiohttp.ClientResponse) -> Any:
@@ -101,7 +114,7 @@ class OpenNeatoApiClient:
         except aiohttp.ClientResponseError as err:
             _LOGGER.warning("HTTP %s on GET %s: %s", err.status, path, err.message)
             raise OpenNeatoApiError(
-                f"API error from {path}: {err.status} {err.message}"
+                f"API error from {path}: {err.status} {err.message}", err.status
             ) from err
         except TimeoutError as err:
             _LOGGER.warning("Timeout on GET %s (limit %ss)", path, TIMEOUT)
@@ -135,7 +148,7 @@ class OpenNeatoApiClient:
         except aiohttp.ClientResponseError as err:
             _LOGGER.warning("HTTP %s on POST %s: %s", err.status, path, err.message)
             raise OpenNeatoApiError(
-                f"API error from POST {path}: {err.status} {err.message}"
+                f"API error from POST {path}: {err.status} {err.message}", err.status
             ) from err
         except TimeoutError as err:
             _LOGGER.warning("Timeout on POST %s (limit %ss)", path, TIMEOUT)
@@ -171,7 +184,8 @@ class OpenNeatoApiClient:
             _LOGGER.warning("HTTP %s deleting %s: %s", err.status, filename, err.message)
             raise OpenNeatoApiError(
                 f"API error deleting /api/history/{filename}: "
-                f"{err.status} {err.message}"
+                f"{err.status} {err.message}",
+                err.status,
             ) from err
         except TimeoutError as err:
             _LOGGER.warning("Timeout deleting %s (limit %ss)", filename, TIMEOUT)
@@ -200,7 +214,7 @@ class OpenNeatoApiClient:
         except aiohttp.ClientResponseError as err:
             _LOGGER.warning("HTTP %s on PUT %s: %s", err.status, path, err.message)
             raise OpenNeatoApiError(
-                f"API error from PUT {path}: {err.status} {err.message}"
+                f"API error from PUT {path}: {err.status} {err.message}", err.status
             ) from err
         except TimeoutError as err:
             _LOGGER.warning("Timeout on PUT %s (limit %ss)", path, TIMEOUT)
@@ -296,7 +310,9 @@ class OpenNeatoApiClient:
                 f"Unable to connect to OpenNeato at {self._host}: {err}"
             ) from err
         except aiohttp.ClientResponseError as err:
-            raise OpenNeatoApiError(f"API error from {path}: {err.status} {err.message}") from err
+            raise OpenNeatoApiError(
+                f"API error from {path}: {err.status} {err.message}", err.status
+            ) from err
         except TimeoutError as err:
             raise OpenNeatoConnectionError(
                 f"Timeout connecting to OpenNeato at {self._host}"
@@ -413,7 +429,8 @@ class OpenNeatoApiClient:
             ) from err
         except aiohttp.ClientResponseError as err:
             raise OpenNeatoApiError(
-                f"API error from /api/history/{filename}: {err.status} {err.message}"
+                f"API error from /api/history/{filename}: {err.status} {err.message}",
+                err.status,
             ) from err
         except TimeoutError as err:
             _LOGGER.warning(

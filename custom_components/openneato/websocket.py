@@ -16,6 +16,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
+from .api import OpenNeatoApiError
 from .const import (
     CELL_SIZE_M,
     CONF_MAP_ROTATION_OFFSET,
@@ -259,6 +260,27 @@ async def ws_get_session(
 
     try:
         raw = await data["api"].get_history_session(resolved)
+    except OpenNeatoApiError as err:
+        if err.status == 404:
+            # Same situation as the branch above, reached a listing later: the
+            # firmware renames a finished run to `.hs` when it compresses it,
+            # about a minute after the robot docks, and until the card relists
+            # it is asking for a name that no longer exists. The robot answered
+            # perfectly well -- it said "not here" -- so this must not reach the
+            # card as a fetch failure, which is what made it announce "robot not
+            # answering" for the whole minute after every cleaning, while the
+            # robot sat on its dock and the map was being rebuilt.
+            _LOGGER.debug(
+                "Replay: session %s has been renamed under us; the card will "
+                "relist", resolved,
+            )
+            connection.send_error(
+                msg["id"], "session_gone", f"Session {resolved} is no longer on the robot"
+            )
+            return
+        _LOGGER.warning("Replay: failed to fetch session %s: %s", resolved, err)
+        connection.send_error(msg["id"], "fetch_failed", str(err))
+        return
     except Exception as err:  # noqa: BLE001 -- surface any fetch failure to the card
         _LOGGER.warning("Replay: failed to fetch session %s: %s", resolved, err)
         connection.send_error(msg["id"], "fetch_failed", str(err))

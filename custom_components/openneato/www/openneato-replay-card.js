@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.5.2";
+const CARD_VERSION = "2.5.3";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1305,7 +1305,15 @@ class OpenNeatoReplayCard extends HTMLElement {
             // was renamed between the listing and the fetch, is a reason to
             // wait for the next tick -- not to replace the run the user is
             // watching with an error.
-            this._offline = true;
+            //
+            // But only one of those two is the robot going quiet. `session_gone`
+            // means it answered and the name we asked for is not there any more,
+            // which is what happens for about a minute after every cleaning while
+            // the firmware compresses the run to `.hs`. Treating that as offline
+            // is what put "robot not answering" on screen at the exact moment the
+            // robot was sitting on its dock and the map was being rebuilt around
+            // it -- the one time the card has something worth saying.
+            if (!err || err.code !== "session_gone") this._offline = true;
             if (keepView) {
                 console.debug("openneato-replay-card: live refresh skipped", err);
                 this._updateNotice();
@@ -1413,14 +1421,25 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._overlay.hidden = !text;
     }
 
-    /* One line, two things that can be true at once. Losing the robot is the
-       more urgent of the two -- a merge the card is waiting for cannot even be
-       observed while the link is down. */
+    /* One line, two things that can be true at once.
+   
+       A known merge comes first. It used to be the other way round, on the
+       reasoning that a merge cannot be observed while the link is down -- true
+       when deciding whether to *start* waiting for one, but not here: by the
+       time this runs the card has already watched the run end, so the merge is
+       something it knows rather than something it hopes for. And the bridge is
+       genuinely slow to answer in that window, because it is compressing the
+       run it just recorded, so letting the quiet win meant the card announced a
+       missing robot precisely when it could have explained itself. When both
+       are true, say both -- the merge is the answer to "what is happening", the
+       silence to "why is nothing moving". */
     _updateNotice() {
-        if (this._offline) {
+        if (this._mergeUntil) {
+            this._setNotice(this._offline
+                ? "Rebuilding the map — the robot is not answering yet"
+                : "Rebuilding the map…");
+        } else if (this._offline) {
             this._setNotice("Robot not answering — showing the last map");
-        } else if (this._mergeUntil) {
-            this._setNotice("Rebuilding the map…");
         } else {
             this._setNotice(null);
         }
