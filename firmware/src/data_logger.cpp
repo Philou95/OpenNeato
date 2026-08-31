@@ -570,10 +570,26 @@ void DataLogger::logBootEvent() {
             if (esp_core_dump_get_summary(cd) == ESP_OK) {
                 fields.push_back({"crash_task", String(cd->exc_task), FIELD_STRING});
                 fields.push_back({"crash_pc", "0x" + String(cd->exc_pc, HEX), FIELD_STRING});
+                // `ex_info` is architecture-specific and the two families share
+                // no field names: RISC-V carries the machine CSRs, Xtensa the
+                // exception cause and the faulting virtual address. Naming the
+                // fields the same way on both sides keeps whoever reads the log
+                // from having to know which chip wrote it.
+#if CONFIG_IDF_TARGET_ARCH_RISCV
                 fields.push_back({"crash_ra", "0x" + String(cd->ex_info.ra, HEX), FIELD_STRING});
                 fields.push_back({"crash_sp", "0x" + String(cd->ex_info.sp, HEX), FIELD_STRING});
-                fields.push_back({"crash_mcause", String(cd->ex_info.mcause), FIELD_INT});
-                fields.push_back({"crash_mtval", "0x" + String(cd->ex_info.mtval, HEX), FIELD_STRING});
+                fields.push_back({"crash_cause", String(cd->ex_info.mcause), FIELD_INT});
+                fields.push_back({"crash_addr", "0x" + String(cd->ex_info.mtval, HEX), FIELD_STRING});
+#else
+                fields.push_back({"crash_cause", String(cd->ex_info.exc_cause), FIELD_INT});
+                fields.push_back({"crash_addr", "0x" + String(cd->ex_info.exc_vaddr, HEX), FIELD_STRING});
+                // Xtensa keeps a real backtrace rather than a raw stack dump;
+                // the first two frames are what name the caller.
+                if (cd->exc_bt_info.depth > 1)
+                    fields.push_back({"crash_bt1", "0x" + String(cd->exc_bt_info.bt[1], HEX), FIELD_STRING});
+                if (cd->exc_bt_info.depth > 2)
+                    fields.push_back({"crash_bt2", "0x" + String(cd->exc_bt_info.bt[2], HEX), FIELD_STRING});
+#endif
                 // Ties those addresses to one build. Resolving them against a
                 // different firmware.elf would produce confident nonsense.
                 fields.push_back({"crash_elf", String(reinterpret_cast<char *>(cd->app_elf_sha256)), FIELD_STRING});
