@@ -480,13 +480,14 @@ class OpenNeatoApiClient:
         return await self._post("/api/clear-errors")
 
     async def restart(self) -> dict[str, Any] | str:
-        """Redemarre le PONT ESP32, pas le robot.
+        """Restart the ESP32 BRIDGE, not the robot.
 
-        `/api/system/restart` tombe sur `SystemManager::restart` -> `ESP.restart()`.
-        Le robot, lui, se redemarre par `/api/power?action=restart`, qui passe par
-        `TestMode On` + `SetSystemMode` et **re-zerote le repere de localisation** :
-        la session suivante arrive alors tournee d'un quart de tour. Le docstring
-        disait « robot controller » et invitait a confondre les deux.
+        `/api/system/restart` lands on `SystemManager::restart` -> `ESP.restart()`.
+        The robot itself is restarted through `/api/power?action=restart`, which
+        goes via `TestMode On` + `SetSystemMode` and **re-zeroes the localisation
+        frame**: the next session then arrives turned by a quarter. This
+        docstring used to say "robot controller" and invited exactly that
+        confusion.
         """
         return await self._post("/api/system/restart")
 

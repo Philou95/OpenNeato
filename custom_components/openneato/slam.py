@@ -1,39 +1,38 @@
-"""Fermeture de boucle sur les poses d'une session, en Python pur.
+"""Loop closure over a session's poses, in pure Python.
 
-Le pipeline corrige deja la pose scan par scan (`match_pose`) et session par
-session (`align_to_reference`). Il manquait l'etage du milieu : rien ne corrige
-la derive accumulee sur un tour complet, quand le robot voit un mur d'un cote
-au debut du cycle et de l'autre quarante minutes plus tard.
+The pipeline already corrects the pose scan by scan (`match_pose`) and session
+by session (`align_to_reference`). The middle storey was missing: nothing
+corrected the drift accumulated over a full circuit, when the robot sees a wall
+from one side at the start of a cleaning and from the other forty minutes later.
 
-Ce module ajoute cet etage. Chaque scan est un noeud ; deux scans qui voient le
-meme endroit a des instants eloignes donnent une contrainte de fermeture, et
-l'erreur est repartie sur toute la trajectoire au lieu d'etre imposee au seul
-scan courant.
+This module adds that storey. Every scan is a node; two scans that see the same
+place at distant times give a closure constraint, and the error is spread over
+the whole trajectory instead of being forced onto the current scan alone.
 
-**Aucune dependance.** numpy et scipy ne peuvent pas entrer dans une integration
-Home Assistant, donc :
+**No dependencies.** numpy and scipy cannot go into a Home Assistant
+integration, so:
 
-  - `cKDTree` -> grille de hachage au pas du rayon de recherche. Un arbre sert
-    quand le rayon est inconnu ; ici il vaut toujours `MAX_PAIR_M`, donc neuf
-    cases suffisent et la construction est lineaire.
-  - SVD -> Kabsch 2D en forme fermee. Faire tourner une SVD sur une matrice
-    2x2 n'a pas de sens.
-  - `spsolve` -> relaxation de Gauss-Seidel par blocs 3x3, sur-relaxee. C'est
-    legitime parce que le graphe est *dense* -- mesure, ~5 900 aretes pour 479
-    noeuds -- donc l'information traverse la trajectoire en quelques balayages.
+  - `cKDTree` -> a hash grid at the search radius. A tree earns its keep when
+    the radius is unknown; here it is always `MAX_PAIR_M`, so nine cells are
+    enough and building it is linear.
+  - SVD -> closed-form 2D Kabsch. Running an SVD on a 2x2 matrix makes no
+    sense.
+  - `spsolve` -> block Gauss-Seidel relaxation on 3x3 blocks, over-relaxed.
+    That is legitimate because the graph is *dense* -- measured, ~5900 edges
+    for 479 nodes -- so information crosses the trajectory in a few sweeps.
 
-Mesure le 2026-08-27 sur trois runs enregistres, contre la version scipy de
-reference : ecart median **0,07 mm** sur les poses, decisions d'acceptation des
-fermetures identiques, et 13x plus rapide sur l'optimisation.
+Measured on 2026-08-27 over three recorded runs, against the reference scipy
+version: median difference **0.07 mm** on the poses, identical accept/reject
+decisions on the closures, and 13x faster on the optimisation.
 
-Ce que ca achete, mesure sur le run le plus derive :
+What it buys, measured on the most drifted run:
 
-  - le carton etalon passe de 20,0 x 62,5 cm **instable** a 27,5 x 47,5 stable
-    contre 29 x 50 reels, cellules isolees de 40 a 14 ;
-  - et surtout le **recouvrement de fusion** passe de 67,8 % a 85,3 %. Sous
-    `MERGE_MIN_OVERLAP` la session est refusee, et trois refus consecutifs
-    effacent la carte accumulee : cette session-la etait a 3,5 points de la
-    falaise, elle est maintenant a 28.
+  - the calibration box goes from 20.0 x 62.5 cm **unstable** to 27.5 x 47.5
+    stable against a true 29 x 50, and isolated cells from 40 to 14;
+  - and above all the **merge overlap** goes from 67.8% to 85.3%. Below
+    `MERGE_MIN_OVERLAP` the session is refused, and three refusals in a row
+    discard the accumulated map: that session was 3.5 points from the cliff,
+    it is now 28.
 """
 
 from __future__ import annotations
@@ -43,43 +42,42 @@ import math
 
 _LOGGER = logging.getLogger(__name__)
 
-MAX_PAIR_M = 0.25          # rayon d'appariement ICP, et pas de la grille
+MAX_PAIR_M = 0.25          # ICP pairing radius, and the grid's own step
 ICP_ITERS = 30
-ICP_MIN_PTS = 30           # sous ca l'appariement n'a rien a dire
+ICP_MIN_PTS = 30           # below this the pairing has nothing to say
 
-# Un scan porte ~205 retours, bien plus qu'il n'en faut pour trouver une
-# rotation et une translation. Mesure sur le run du 27/08 au soir, 9 410
-# candidats : a 204 points l'appariement prend 75,7 s pour 69,4 % de
-# recouvrement, a 102 points il prend **34,1 s pour 69,5 %** -- 2,2x plus
-# rapide et une cellule isolee de moins. En descendant plus bas ca coute :
-# 68 points ne rendent plus que 67,0 %, et ce n'est pas le garde-fou
-# ICP_MIN_PTS qui bride (le rendre proportionnel ne recupere que 0,7 point),
-# c'est l'information qui manque. Donc 2, pas 3.
+# A scan carries ~205 returns, far more than are needed to find a rotation and
+# a translation. Measured on the run of the evening of 27/08, 9410 candidates:
+# at 204 points the pairing takes 75.7 s for 69.4% overlap, at 102 points it
+# takes **34.1 s for 69.5%** -- 2.2x faster and one isolated cell fewer. Going
+# lower costs: 68 points return only 67.0%, and it is not the ICP_MIN_PTS guard
+# holding it back (making that proportional recovers only 0.7 of a point), it
+# is missing information. So 2, not 3.
 #
-# Le pas preserve l'etalement angulaire : les retours sont ordonnes par angle
-# sur 360 degres, donc un sur deux couvre toujours le tour complet.
+# The stride preserves the angular spread: returns are ordered by angle over
+# 360 degrees, so every other one still covers the full turn.
 ICP_POINT_STRIDE = 2
 
-LOOP_MIN_GAP = 40          # scans d'ecart minimum pour parler de retour sur zone
-LOOP_MAX_DIST_M = 1.2      # au-dela les deux scans ne voient pas la meme chose
+LOOP_MIN_GAP = 40          # minimum scans apart to call it a revisit
+LOOP_MAX_DIST_M = 1.2      # beyond this the two scans do not see the same thing
 
-# Un lien de fermeture faux est pire que pas de lien : il tire toute la
-# trajectoire vers une position inventee. D'ou un double rejet, sur le residu
-# ET sur la part de points qui trouvent un correspondant.
+# A wrong closure link is worse than no link: it drags the whole trajectory
+# towards an invented position. Hence a double rejection, on the residual AND
+# on the share of points that find a match.
 ACCEPT_MIN_FIT = 0.55
 ACCEPT_MAX_RES_M = 0.05
 
-# omega=1.9 est la valeur qui compte : a 1.0 l'ecart avec scipy est de 5,7 mm
-# en 18,5 s, a 1.9 il est de 0,07 mm en 4,4 s. Le meme optimum sort sur un
-# graphe synthetique et sur les vrais runs.
+# omega=1.9 is the value that matters: at 1.0 the difference from scipy is
+# 5.7 mm in 18.5 s, at 1.9 it is 0.07 mm in 4.4 s. The same optimum comes out
+# on a synthetic graph and on the real runs.
 OMEGA = 1.9
 SWEEPS = 400
-HUBER_M = 0.10             # au-dela, un lien pese moins -- pare-fou anti-faux-lien
+HUBER_M = 0.10             # past this a link weighs less -- guard against a false link
 DAMPING = 1e-6
 TOL_M = 1e-5
 
-MIN_SCANS = 80             # sous ca il n'y a pas de boucle a fermer
-MAX_SCANS = 1500           # garde-fou : le cout croit avec les candidats
+MIN_SCANS = 80             # below this there is no loop to close
+MAX_SCANS = 1500           # guard: the cost grows with the candidates
 
 
 def wrap(a: float) -> float:
@@ -87,35 +85,35 @@ def wrap(a: float) -> float:
 
 
 def relative(a, b):
-    """Pose de b vue depuis a."""
+    """Pose of b as seen from a."""
     ca, sa = math.cos(a[2]), math.sin(a[2])
     dx, dy = b[0] - a[0], b[1] - a[1]
     return (ca * dx + sa * dy, -sa * dx + ca * dy, wrap(b[2] - a[2]))
 
 
 class _Grid:
-    """Points ranges par case de cote `pas`, pour un plus-proche-voisin borne."""
+    """Points bucketed into cells of side `step`, for a bounded nearest neighbour."""
 
-    __slots__ = ("cases", "pas")
+    __slots__ = ("cells", "step")
 
-    def __init__(self, points, pas):
-        self.pas = pas
-        self.cases = {}
-        inv = 1.0 / pas
+    def __init__(self, points, step):
+        self.step = step
+        self.cells = {}
+        inv = 1.0 / step
         for k, (x, y) in enumerate(points):
             c = (math.floor(x * inv), math.floor(y * inv))
-            b = self.cases.get(c)
+            b = self.cells.get(c)
             if b is None:
-                self.cases[c] = [(x, y, k)]
+                self.cells[c] = [(x, y, k)]
             else:
                 b.append((x, y, k))
 
     def nearest(self, x, y, rmax):
-        inv = 1.0 / self.pas
+        inv = 1.0 / self.step
         cx, cy = math.floor(x * inv), math.floor(y * inv)
         best = rmax * rmax
         bi = -1
-        get = self.cases.get
+        get = self.cells.get
         for ddx in (-1, 0, 1):
             for ddy in (-1, 0, 1):
                 b = get((cx + ddx, cy + ddy))
@@ -137,7 +135,7 @@ def _median(v):
 
 
 def icp(src, dst, x0, y0, th0, iters=ICP_ITERS, max_pair=MAX_PAIR_M):
-    """Amene `src` sur `dst`. Rend (x, y, th, residu median, part appariee)."""
+    """Bring `src` onto `dst`. Returns (x, y, th, median residual, matched share)."""
     n = len(src)
     if n == 0 or len(dst) < ICP_MIN_PTS:
         return x0, y0, th0, 9.9, 0.0
@@ -214,7 +212,7 @@ def _blocks(ci, si, cz, sz, dx, dy):
 
 
 def _solve3(h00, h01, h02, h11, h12, h22, b0, b1, b2, damp):
-    """Cholesky 3x3. Rend None plutot qu'une direction inventee si ca echoue."""
+    """3x3 Cholesky. Returns None rather than an invented direction if it fails."""
     h00 += damp
     h11 += damp
     h22 += damp
@@ -242,7 +240,7 @@ def _solve3(h00, h01, h02, h11, h12, h22, b0, b1, b2, damp):
 
 
 def optimise(poses, edges, sweeps=SWEEPS, fixed=0, huber=HUBER_M, omega=OMEGA):
-    """Relaxation de Gauss-Seidel par blocs. Rend la liste des poses corrigees."""
+    """Block Gauss-Seidel relaxation. Returns the list of corrected poses."""
     grid = [[float(p[0]), float(p[1]), float(p[2])] for p in poses]
     n_nodes = len(grid)
     inc = [[] for _ in range(n_nodes)]
@@ -289,10 +287,11 @@ def optimise(poses, edges, sweeps=SWEEPS, fixed=0, huber=HUBER_M, omega=OMEGA):
 
 
 def clouds(scans, max_range_m, lidar_behind_m):
-    """Chaque scan en nuage de points, dans le repere du robot.
+    """Each scan as a point cloud, in the robot's frame.
 
-    Le LIDAR est en arriere du centre de rotation : sans ce decalage le meme
-    mur est stampe jusqu'a 206 mm plus loin selon le sens de marche.
+    The LIDAR sits behind the centre of rotation: without that offset the same
+    wall is stamped up to 206 mm further away depending on the direction of
+    travel.
     """
     out = []
     rad = math.pi / 180.0
@@ -310,10 +309,10 @@ def clouds(scans, max_range_m, lidar_behind_m):
 
 
 def loop_candidates(poses, min_gap=LOOP_MIN_GAP, max_dist=LOOP_MAX_DIST_M):
-    """Paires de scans proches dans l'espace et eloignees dans le temps.
+    """Scan pairs close in space and far apart in time.
 
-    C'est la definition d'un retour sur zone : le robot repasse la ou il est
-    deja alle, assez tard pour que sa pose ait derive entre-temps.
+    That is the definition of a revisit: the robot passes where it has already
+    been, late enough that its pose has drifted in between.
     """
     lim = max_dist * max_dist
     out = []
@@ -332,54 +331,53 @@ def loop_candidates(poses, min_gap=LOOP_MIN_GAP, max_dist=LOOP_MAX_DIST_M):
 
 
 def refine_poses(scans, poses, max_range_m, lidar_behind_m):
-    """Rend les poses corrigees par fermeture de boucle, ou None.
+    """Returns the poses corrected by loop closure, or None.
 
-    `scans` : liste de (x, y, theta_deg, points), alignee sur `poses`.
-    `poses` : liste de (x, y, theta_rad) telles que le recalage scan-a-scan
-              les a etablies.
+    `scans`: list of (x, y, theta_deg, points), aligned with `poses`.
+    `poses`: list of (x, y, theta_rad) as scan-to-map matching established them.
 
-    Rend None -- et dit pourquoi -- plutot que de rendre les poses d'entree :
-    l'appelant doit pouvoir distinguer << rien a corriger >> de << corrige >>.
+    Returns None -- and says why -- rather than returning the input poses: the
+    caller has to be able to tell "nothing to correct" from "corrected".
     """
     n = len(poses)
     if n < MIN_SCANS:
-        _LOGGER.debug("SLAM: %d scans, trop peu pour fermer une boucle", n)
+        _LOGGER.debug("SLAM: %d scans, too few to close a loop", n)
         return None
     if n > MAX_SCANS:
-        _LOGGER.info("SLAM: %d scans, au-dela du garde-fou de %d", n, MAX_SCANS)
+        _LOGGER.info("SLAM: %d scans, past the guard of %d", n, MAX_SCANS)
         return None
 
     cl = clouds(scans, max_range_m, lidar_behind_m)
     cands = loop_candidates(poses)
     if not cands:
-        _LOGGER.info("SLAM: aucun retour sur zone sur %d scans", n)
+        _LOGGER.info("SLAM: no revisit found over %d scans", n)
         return None
 
-    # Odometrie : la trajectoire telle que le recalage scan-a-scan l'a etablie.
+    # Odometry: the trajectory as scan-to-map matching established it.
     edges = [
         (k, k + 1, relative(poses[k], poses[k + 1]), 1.0)
         for k in range(n - 1)
     ]
     n_odo = len(edges)
-    residus = []
+    residuals = []
     for a, b in cands:
         z0 = relative(poses[a], poses[b])
         x, y, th, res, fit = icp(cl[b], cl[a], z0[0], z0[1], z0[2])
         if fit < ACCEPT_MIN_FIT or res > ACCEPT_MAX_RES_M:
             continue
-        # Poids : un accord serre pese plus qu'un accord limite.
+        # Weight: a tight agreement counts for more than a borderline one.
         w = min(
             2.0,
             (fit / ACCEPT_MIN_FIT) * (ACCEPT_MAX_RES_M / max(res, 1e-3)) * 0.25,
         )
         edges.append((a, b, (x, y, th), w))
-        residus.append(res)
+        residuals.append(res)
 
     kept = len(edges) - n_odo
     if kept < n // 4:
         _LOGGER.info(
-            "SLAM: %d fermetures retenues sur %d candidates, trop peu pour "
-            "contraindre %d scans -- poses laissees telles quelles",
+            "SLAM: %d closures kept of %d candidates, too few to constrain "
+            "%d scans -- poses left as they are",
             kept, len(cands), n,
         )
         return None
@@ -390,9 +388,9 @@ def refine_poses(scans, poses, max_range_m, lidar_behind_m):
         for k in range(n)
     )
     _LOGGER.info(
-        "SLAM: %d fermetures sur %d candidates, residu median %.1f cm ; "
-        "poses deplacees de %.1f cm en median, %.1f cm au pire",
-        kept, len(cands), 100 * _median(residus),
+        "SLAM: %d closures of %d candidates, median residual %.1f cm; "
+        "poses moved %.1f cm in the median, %.1f cm at worst",
+        kept, len(cands), 100 * _median(residuals),
         100 * moved[n // 2], 100 * moved[-1],
     )
     return refined

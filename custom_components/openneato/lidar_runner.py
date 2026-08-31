@@ -58,7 +58,7 @@ POLL_INTERVAL = 4.0          # seconds between captures
 # file's own existence is the switch: it is written once and then never again,
 # so this costs a single run. About 1.5 MB for a full cycle; the cap is only a
 # runaway guard and a normal run is well under it.
-# Entre deux sauvegardes des captures en cours. Voir _persist_captures().
+# Between two saves of the captures in progress. See _persist_captures().
 CAPTURE_PERSIST_S = 300.0
 # Batches collected per tick. The bridge sends a few scans at a time on
 # purpose, so catching up after an outage is spread over several ticks rather
@@ -108,46 +108,44 @@ MAX_INTERVAL = 12.0
 # too coarse to justify throwing a run away.
 HEALTH_EVERY = 300.0
 HEALTH_GRACE = 600.0
-# Placement de la session en cours sur la carte. Voir _align_live().
+# Placing the run in progress on the map. See _align_live().
 #
-# 25 scans suffisent a designer le bon quart de tour sur les deux runs
-# rejoues ; 40 laisse de la marge sans rien coûter, le premier essai tombant
-# alors vers la troisieme minute de menage. On recommence ensuite au meme
-# rythme que le controle de sante : l'ajustement coute une a cinq secondes
-# d'executeur et fait sauter l'echantillonnage d'un tick, donc douze fois par
-# heure est genereux pour un affichage.
+# 25 scans are enough to name the right quarter turn on both replayed runs; 40
+# leaves margin at no cost, putting the first attempt around the third minute
+# of the cleaning. It then repeats at the same rate as the health check: a fit
+# costs one to five seconds of executor time and makes a tick skip its
+# sampling, so twelve times an hour is generous for a display.
 LIVE_ALIGN_EVERY = 300.0
 LIVE_ALIGN_MIN_SCANS = 40
-# ...et on s'arrete des que la reponse se repete, parce qu'elle ne bouge plus.
-# Rejoue sur les runs 8 et 9 : le quart de tour est le bon des le premier
-# essai, la translation se pose au deuxieme (run 9) ou au troisieme (run 8),
-# et les quatre a cinq essais suivants rendent exactement la meme chose.
-# S'arreter la ramene le cout d'un run de 35 min de 23 s d'executeur a 7-11 s,
-# et un run dont l'ajustement continue de bouger continue d'etre ajuste.
+# ...and we stop as soon as the answer repeats, because it no longer moves.
+# Replayed on runs 8 and 9: the quarter turn is right from the first attempt,
+# the translation settles on the second (run 9) or the third (run 8), and the
+# next four or five attempts return exactly the same thing. Stopping there
+# takes a 35-minute run from 23 s of executor time down to 7-11 s, and a run
+# whose fit keeps moving keeps being fitted.
 LIVE_ALIGN_STABLE = 2
-# ...mais seulement une fois que la session recouvre assez la carte pour que la
-# translation veuille dire quelque chose.
+# ...but only once the session overlaps enough of the map for the translation
+# to mean anything.
 #
-# ⚠ Deux lectures identiques a cinq minutes d'intervalle ne prouvent pas la
-# convergence : elles prouvent que ca n'a pas bouge en cinq minutes. Le
-# 31/08/2026 le placement s'est fige sur dy = -5 alors que la fusion allait
-# choisir +3 -- huit cellules, 20 cm, un demi-passage de brosse -- et n'y est
-# jamais revenu : la zone nettoyee est restee dessinee a cote de ses murs
-# pendant tout le reste du menage. La regle avait ete validee sur deux runs,
-# et elle generalisait depuis n=2.
+# ⚠ Two identical readings five minutes apart do not prove convergence: they
+# prove it has not moved in five minutes. On 2026-08-31 the placement froze on
+# dy = -5 while the merge was going to choose +3 -- eight cells, 20 cm, half a
+# cleaning swath -- and never came back to it: the cleaned area stayed drawn
+# beside its own walls for the whole rest of the run. The rule had been
+# validated on two runs, and it generalised from n=2.
 #
-# Le recouvrement dit quand la translation est determinee, et il le dit sur
-# n'importe quel run. Mesure sur le menage du 30/08, ajustement partiel rejoue
-# tous les 25 scans :
+# The overlap says when the translation is determined, and it says it on any
+# run. Measured on the cleaning of 30/08, the partial fit replayed every 25
+# scans:
 #
 #     scans  50   150   200   300   668
 #     recouv 0.38 0.48  0.55  0.72  0.90
-#     dy     +1   +2    +3    +3    +3      <- se pose a 0.55
+#     dy     +1   +2    +3    +3    +3      <- settles at 0.55
 #
-# Sous ce seuil la session est un morceau de maison qui glisse le long des murs
-# de la carte sans que le score en souffre. C'est le meme seuil que la fusion
-# exige avant de croire un ajustement, et pour la meme raison : en dessous,
-# l'ajustement n'est pas une mesure.
+# Below that bar the session is a piece of house sliding along the map's walls
+# without the score suffering for it. It is the same bar the merge demands
+# before believing a fit, and for the same reason: below it, a fit is not a
+# measurement.
 LIVE_ALIGN_MIN_OVERLAP = MERGE_MIN_OVERLAP
 BACKOFF_RATIO = 0.55
 RECOVER_RATIO = 0.80   # hysteresis band: below 0.55 slow down, above 0.80 speed up
@@ -229,26 +227,26 @@ class LidarMapRunner:
         self.api = api
         self.coordinator = coordinator
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_map")
-        # Les captures d'un run en cours, pour qu'un redemarrage de Home
-        # Assistant ne les emporte pas : elles ne vivaient qu'en memoire.
+        # The captures of a run in progress, so a Home Assistant restart does
+        # not take them with it: they used to live in memory alone.
         self._cap_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_captures")
-        # Une copie de la carte juste avant une fusion qui la remplacerait.
+        # A copy of the map just before a merge that would replace it.
         self._bak_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_map_backup")
         self._pending_captures: list | None = None
         self._pending_session: str | None = None
         self._last_persist = 0.0
         self._map: AccumulatedMap | None = None
         self._captures: list[tuple[float, float, float, list[tuple[int, int]]]] = []
-        # Ferme les boucles au fil du menage plutot qu'en bloc a la fin. Le
-        # nombre de paires candidates croit comme le carre du nombre de scans,
-        # donc l'etaler transforme un cout quadratique en fin de course en un
-        # cout constant par scan -- 5 min 11 s de fusion mesurees sur le
-        # Raspberry Pi 5, contre une vingtaine de secondes ainsi.
+        # Closes the loops as the cleaning goes rather than all at once at the
+        # end. The number of candidate pairs grows as the square of the scan
+        # count, so spreading it turns a quadratic cost at the finish into a
+        # constant cost per scan -- 5 min 11 s of merge measured on the
+        # Raspberry Pi 5, against about twenty seconds this way.
         self._tracker: SessionTracker | None = None
         self._tracked = 0
         self._tracking = False
-        # Ou la session en cours se pose sur la carte, avant que la fusion ne
-        # le sache. Voir _align_live().
+        # Where the run in progress sits on the map, before the merge knows.
+        # See _align_live().
         self._live_align: tuple[int, int, int, float, float, float, float] | None = None
         self._live_align_at = 0.0
         self._live_stable = 0
@@ -326,10 +324,10 @@ class LidarMapRunner:
         self._health_ref = self._recording_session()
         self._session_name = None
         self._note_session_name()
-        # Meme session qu'un run que Home Assistant a interrompu : on reprend
-        # ou on en etait au lieu de repartir de zero. Le nom vient du fichier
-        # que le robot est en train d'ecrire, donc l'egalite suffit a dire que
-        # c'est le meme nettoyage et pas le suivant.
+        # Same session as a run Home Assistant interrupted: pick up where it
+        # left off instead of starting over. The name comes from the file the
+        # robot is writing, so equality is enough to say it is the same
+        # cleaning and not the next one.
         if self._pending_captures and self._pending_session == self._session_name:
             self._captures = [tuple(c) for c in self._pending_captures]
             _LOGGER.info(
@@ -343,16 +341,16 @@ class LidarMapRunner:
             )
         self._pending_captures = None
         self._pending_session = None
-        # Cree apres la reprise eventuelle : le suiveur absorbera les captures
-        # restaurees d'un bloc au premier drain, ce qui est exactement ce qu'il
-        # aurait fait si elles etaient arrivees une a une.
+        # Created after any resume: the tracker will take in the restored
+        # captures as one batch on the first drain, which is exactly what it
+        # would have done had they arrived one by one.
         self._tracker = SessionTracker()
         self._tracked = 0
         self._tracking = False
-        # Remis a zero ici et nulle part ailleurs. Une fusion refusee ne place
-        # la session nulle part, et le placement provisoire reste alors le seul
-        # que la carte ait pour ce run : le garder vaut mieux que revenir au
-        # repere brut du robot.
+        # Reset here and nowhere else. A refused merge places the session
+        # nowhere, and the provisional placement is then the only one the map
+        # has for that run: keeping it beats falling back to the robot's raw
+        # frame.
         self._live_align = None
         self._live_align_at = 0.0
         self._live_stable = 0
@@ -373,19 +371,19 @@ class LidarMapRunner:
     # ── sampling ────────────────────────────────────────────────────
 
     async def _track_new(self) -> None:
-        """Ferme les boucles des scans arrives depuis le dernier passage.
+        """Close the loops of the scans that arrived since the last pass.
 
-        Le curseur avance AVANT l'attente : un tick concurrent voit alors une
-        tranche vide au lieu de refaire le meme travail. Et si l'executeur
-        echoue, le suiveur est abandonne plutot que laisse incomplet -- un
-        suiveur a trous rendrait des poses fausses, pas approximatives, et la
-        fusion retombe sur le calcul de fin qui, lui, est correct.
+        The cursor advances BEFORE the await: a concurrent tick then sees an
+        empty slice instead of redoing the same work. And if the executor
+        fails, the tracker is abandoned rather than left incomplete -- a
+        tracker with holes would return wrong poses, not approximate ones, and
+        the merge falls back on the end-of-run computation, which is correct.
 
-        `_aligning` exclut l'autre travail qui touche au suiveur : _align_live()
-        copie `_scratch`, et copier un dictionnaire qu'un autre fil est en train
-        de remplir leve une RuntimeError. Les deux drapeaux ne sont poses et
-        lus que dans la boucle d'evenements, donc l'exclusion est stricte meme
-        si le travail lui-meme est dans l'executeur.
+        `_aligning` excludes the other work that touches the tracker:
+        _align_live() copies `_scratch`, and copying a dictionary another
+        thread is filling raises a RuntimeError. Both flags are only set and
+        read on the event loop, so the exclusion is strict even though the work
+        itself is in the executor.
         """
         if self._tracker is None or self._tracking or self._aligning:
             return
@@ -407,12 +405,12 @@ class LidarMapRunner:
 
     @staticmethod
     def _fit_live(tracker: SessionTracker, ref_walls: dict[tuple[int, int], int]):
-        """Ajuste les murs vus jusqu'ici sur la carte. Tourne dans l'executeur.
+        """Fit the walls seen so far onto the map. Runs in the executor.
 
-        Prend ce sur quoi il travaille en argument plutot que de le lire sur
-        `self` : la fin du menage peut tomber pendant l'attente et remettre le
-        suiveur a None, et le fil de l'executeur trouverait alors un attribut
-        vide au lieu du travail qu'on lui a confie.
+        Takes what it works on as an argument rather than reading it off
+        `self`: the end of the cleaning can land during the await and set the
+        tracker back to None, and the executor thread would then find an empty
+        attribute instead of the work it was handed.
         """
         walls = tracker.walls_so_far()
         if not walls:
@@ -420,28 +418,27 @@ class LidarMapRunner:
         return align_to_reference(walls, ref_walls)
 
     async def _align_live(self) -> bool:
-        """Place la session en cours sur la carte, sans attendre la fusion.
+        """Place the run in progress on the map, without waiting for the merge.
 
-        Le repere du robot tourne d'un quart de tour d'un menage a l'autre --
-        il suit la direction ou le robot se cale en sortant du dock, et sur
-        certains cycles il fait un quart de tour de plus avant de commencer.
-        La fusion le rattrape et la carte n'en souffre pas ; c'est l'affichage
-        qui trinque, la session etant servie dans le repere brut jusqu'a la
-        fusion. La zone nettoyee apparait alors en travers des murs pendant
-        toute l'heure du menage.
+        The robot's frame turns a quarter from one cleaning to the next -- it
+        follows the direction the robot settles on coming off the dock, and on
+        some cycles it makes an extra quarter turn before starting. The merge
+        catches that and the map does not suffer; it is the display that pays,
+        the session being served in the raw frame until the merge. The cleaned
+        area then appears across the walls for the whole hour of the run.
 
-        La rotation, elle, est fixee des le depart : il n'y a donc rien a
-        attendre. Rejoue sur les runs 8 et 9 du 27/08, le bon quart de tour se
-        detache des 25 scans et ne change plus ensuite.
+        The rotation, though, is fixed from the start: there is nothing to wait
+        for. Replayed on runs 8 and 9 of 27/08, the right quarter turn stands
+        out from 25 scans and does not change afterwards.
 
-        Le placement est refait a chaque LIVE_ALIGN_EVERY plutot que fige au
-        premier succes : le quart de tour ne bouge pas, mais la translation se
-        deplace encore de quelques cellules le temps que le run couvre assez de
-        terrain. On s'arrete quand la reponse se repete, pas apres un nombre
-        d'essais decide d'avance -- voir LIVE_ALIGN_STABLE.
+        The placement is redone every LIVE_ALIGN_EVERY rather than frozen on
+        the first success: the quarter turn does not move, but the translation
+        still shifts by a few cells while the run covers enough ground. We stop
+        when the answer repeats, not after a number of attempts decided in
+        advance -- see LIVE_ALIGN_STABLE.
 
-        Rend True si ce tick a servi a ca -- l'echantillonnage saute alors son
-        tour, ce qui coute un scan sur les quelque neuf cents d'un menage.
+        Returns True if this tick was spent on it -- sampling then skips its
+        turn, which costs one scan out of the nine hundred or so in a cleaning.
         """
         if (
             self._aligning
@@ -449,11 +446,11 @@ class LidarMapRunner:
             or self._live_stable >= LIVE_ALIGN_STABLE
             or self._tracker is None
             or self._map is None
-            # Rien a quoi se raccrocher : la toute premiere carte est ce
-            # premier run, dans son propre repere, et il n'y a pas de travers.
+            # Nothing to hold on to: the very first map is that first run, in
+            # its own frame, and there is nothing out of true.
             or not self._map.walls
-            # Le placement est range sous le nom du fichier de session ; sans
-            # lui la carte de rejeu ne saurait pas a quoi il se rapporte.
+            # The placement is stored under the session's file name; without
+            # it the replay card would not know what it refers to.
             or not self._session_name
             or self._tracker.placed < LIVE_ALIGN_MIN_SCANS
         ):
@@ -479,19 +476,20 @@ class LidarMapRunner:
         quarter, dx, dy, overlap, fine, scores = fit
         margin, ratio = quarter_margin(scores, quarter)
         if margin < LIVE_MIN_MARGIN or ratio < LIVE_MIN_RATIO:
-            # Pas assez tranche pour valoir mieux que le repere brut. Rien de
-            # perdu : le prochain essai aura vu plus de terrain.
+            # Not decisive enough to beat the raw frame. Nothing is lost: the
+            # next attempt will have seen more ground.
             _LOGGER.debug(
-                "LIDAR mapping: quart de tour indecis apres %d scans "
-                "(%s), placement provisoire reporte",
+                "LIDAR mapping: quarter turn undecided after %d scans "
+                "(%s), provisional placement deferred",
                 scans,
                 " ".join(f"q{q}={s:.2f}" for q, s in enumerate(scores)),
             )
             return True
 
-        # La meme correction que la fusion range avec l'alignement, et pour la
-        # meme raison : les murs sont projetes depuis des poses que le recalage
-        # a deja deplacees, le trajet rejoue vient du journal brut du robot.
+        # The same correction the merge stores with the alignment, and for the
+        # same reason: the walls are projected from poses the matching has
+        # already moved, while the replayed path comes from the robot's raw
+        # log.
         cx, cy, cth = (
             self._tracker.correction if self._tracker else (0.0, 0.0, 0.0)
         )
@@ -500,14 +498,14 @@ class LidarMapRunner:
         )
         first = self._live_align is None
         turned = not first and self._live_align[0] != quarter
-        # La correction du recalage bouge de quelques millimetres a chaque
-        # scan et ne se repeterait jamais : c'est la pose sur la carte qu'on
-        # regarde, pas elle.
+        # The matching correction moves by a few millimetres on every scan and
+        # would never repeat: what is watched is the placement on the map, not
+        # it.
         #
-        # Et une repetition ne compte pas tant que la session ne recouvre pas
-        # assez la carte : sous LIVE_ALIGN_MIN_OVERLAP la translation peut
-        # tenir en place cinq minutes durant et se tromper quand meme, faute
-        # d'assez de terrain pour la contraindre. Voir la constante.
+        # And a repeat does not count while the session does not overlap enough
+        # of the map: below LIVE_ALIGN_MIN_OVERLAP the translation can hold
+        # still for five minutes and be wrong all the same, for want of enough
+        # ground to constrain it. See the constant.
         if overlap < LIVE_ALIGN_MIN_OVERLAP:
             self._live_stable = 0
         elif not first and self._live_align[:4] == placement[:4]:
@@ -533,8 +531,8 @@ class LidarMapRunner:
     async def _async_tick(self, _now=None) -> None:
         if self._busy:
             return
-        # Avant tout chemin qui peut sortir tot : c'est du travail qui doit se
-        # faire a chaque tick, quel que soit l'etat du robot.
+        # Before any path that can return early: this is work that has to
+        # happen on every tick, whatever the robot's state.
         await self._track_new()
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
         if not any(s in state for s in ACTIVE) or any(m in state for m in UNMAPPABLE):
@@ -569,9 +567,9 @@ class LidarMapRunner:
 
         self._busy = True
         try:
-            # Avant l'echantillonnage, et sous le meme drapeau : l'ajustement
-            # tient l'executeur une a cinq secondes, et un tick qui echantillonne
-            # pendant ce temps-la mettrait deux lectures serie en parallele.
+            # Before sampling, and under the same flag: the fit holds the
+            # executor for one to five seconds, and a tick that sampled during
+            # that would put two serial reads in parallel.
             if await self._align_live():
                 return
             # Prefer what the bridge kept for us. It samples on its own loop
@@ -805,19 +803,19 @@ class LidarMapRunner:
         self._log_link_quality(captures)
         await self.hass.async_add_executor_job(self._dump_captures, captures)
 
-        # Le suiveur n'est valable que si le filtre de rotation n'a rien
-        # retire : enlever un scan changerait la pose de tous les suivants,
-        # puisque match_pose s'accumule. Cas rare -- une fois sur neuf runs,
-        # deux scans sur 501 -- et on le dit au lieu de le taire.
+        # The tracker is only valid if the rotation filter removed nothing:
+        # dropping a scan would change the pose of every scan after it, since
+        # match_pose accumulates. Rare -- once in nine runs, two scans out of
+        # 501 -- and we say so rather than keep quiet about it.
         tracker, self._tracker = self._tracker, None
         if tracker is not None and tracker.refused:
-            # Une poignee est normale ; une grosse part dit que le menage s'est
-            # passe la ou le recalage ne voit rien -- un couloir, ou la position
-            # le long du couloir n'est pas observable. Ca se lit dans le log au
-            # lieu de se deviner en rejouant les captures.
+            # A handful is normal; a large share says the cleaning happened
+            # where the matching can see nothing -- a corridor, where position
+            # along the corridor is not observable. It reads in the log instead
+            # of being guessed at by replaying the captures.
             _LOGGER.info(
-                "LIDAR mapping: %d scans sur %d laisses a l'odometrie, la "
-                "recherche de recalage butait sur le bord de sa fenetre",
+                "LIDAR mapping: %d of %d scans left on odometry, the match "
+                "search was clipped at the edge of its window",
                 tracker.refused, tracker.placed,
             )
         if tracker is not None and not tracker.usable(dropped):
@@ -831,20 +829,20 @@ class LidarMapRunner:
             # the movement measured during it, which lives in the trailing
             # fields the truncation used to throw away.
             #
-            # refine=True : fermeture de boucle sur les poses avant la
-            # projection. Elle coute ~85 s dans l'executeur a la fin d'un
-            # menage d'une heure, et fait passer le recouvrement de fusion de
-            # 67,8 % a 85,3 % sur le run le plus derive, de 65,0 a 74,8 sur
-            # celui du 27/08. Sous MERGE_MIN_OVERLAP la session est refusee et
-            # trois refus effacent la carte : ca n'achete pas seulement de la
-            # nettete, ca eloigne la carte du bord.
+            # refine=True: loop closure on the poses before the projection. It
+            # costs ~85 s in the executor at the end of an hour-long cleaning,
+            # and takes the merge overlap from 67.8% to 85.3% on the most
+            # drifted run, and from 65.0 to 74.8 on the one of 27/08. Below
+            # MERGE_MIN_OVERLAP the session is refused and three refusals
+            # discard the map: this does not only buy sharpness, it moves the
+            # map away from the cliff.
             partial(build_session_grids, captures, refine=True, tracker=tracker)
         )
-        # La carte telle qu'elle est avant la fusion. merge_session peut la
-        # jeter entierement -- au troisieme refus d'affilee il considere que
-        # c'est elle qui ne correspond plus a la realite -- et cette decision
-        # est irreversible une fois ecrite. Cinq nettoyages de murs accumules
-        # meritent une copie avant d'etre effaces sur un jugement automatique.
+        # The map as it stands before the merge. merge_session can discard it
+        # entirely -- on the third refusal in a row it decides the map is what
+        # no longer matches reality -- and that decision is irreversible once
+        # written. Five cleanings of accumulated walls deserve a copy before
+        # being erased on an automatic judgement.
         before = self._map.as_dict()
         report = await self.hass.async_add_executor_job(
             self._map.merge_session, walls, floor, self._session_name, free,
@@ -863,8 +861,8 @@ class LidarMapRunner:
             )
 
         await self._store.async_save(self._map.as_dict())
-        # Integrees : la copie de travail n'a plus de raison d'etre, et la
-        # laisser ferait reprendre un run deja fusionne au prochain demarrage.
+        # Folded in: the working copy has no reason to exist any more, and
+        # leaving it would resume an already merged run on the next start.
         await self._cap_store.async_remove()
         # The carve counts are the only sign free-space evidence did anything;
         # without them a chair fading off the map looks like nothing happened.
@@ -916,16 +914,16 @@ class LidarMapRunner:
         )
 
     async def _persist_captures(self) -> None:
-        """Poser les captures sur le disque de temps en temps.
+        """Put the captures on disk every so often.
 
-        Elles ne vivaient qu'en memoire : un redemarrage de Home Assistant au
-        milieu d'un nettoyage emportait l'heure de collecte, et le run ne
-        laissait aucune trace dans la carte. Le firmware ne conserve jamais un
-        scan, donc rien ne pouvait le rattraper apres coup.
+        They used to live in memory alone: a Home Assistant restart in the
+        middle of a cleaning took the hour of collection with it, and the run
+        left no trace in the map. The firmware never keeps a scan, so nothing
+        could recover it after the fact.
 
-        Espacees, parce qu'un run pese pres de deux megaoctets et que Home
-        Assistant ecrit souvent sur une carte SD. Le pire cas devient quelques
-        minutes de scans perdus au lieu de la totalite.
+        Spaced out, because a run weighs close to two megabytes and Home
+        Assistant often writes to an SD card. The worst case becomes a few
+        minutes of lost scans instead of all of them.
         """
         now = time.monotonic()
         if now - self._last_persist < CAPTURE_PERSIST_S:
@@ -996,16 +994,21 @@ class LidarMapRunner:
             return 0.0
 
     def _heap(self) -> float:
-        """Memoire libre du pont, du meme sondage que le RSSI -- donc gratuit.
+        """The bridge's free heap, from the same poll as the RSSI -- so it is free.
 
-        Enregistree ici parce que le pont s'est redemarre pendant les deux
-        menages du 27/08, et toujours au meme ENDROIT et non au meme moment :
-        a 81 % et 85 % du parcours, la ou la part de scans sous -75 dBm passe
-        de 0-4 % a 15-17 %. L'hypothese est qu'un lien faible fait s'empiler
-        les tampons AsyncTCP jusqu'a ce que le watchdog memoire du firmware
-        tire (sous 16 Ko pendant 30 s). Le heap releve APRES un reboot est
-        toujours sain : c'est celui d'AVANT qu'il faut, et il n'existait
-        nulle part. Apparie au RSSI du meme scan, il tranchera.
+        Recorded here because the bridge restarted during both cleanings of
+        27/08, and always at the same PLACE rather than the same moment: 81%
+        and 85% of the way round, where the share of scans below -75 dBm goes
+        from 0-4% to 15-17%. The hypothesis at the time was a weak link piling
+        up AsyncTCP buffers until the firmware's heap watchdog fired.
+
+        ⚠ That hypothesis is now disproved, and the measurement is what
+        disproved it. On 2026-08-31 the bridge's reset reason was read directly
+        for the first time: **PANIC**, a code crash. The heap watchdog fires
+        below 16 KB for 30 s and the heap never went under 88 KB -- a factor of
+        five -- and the reboot of 30/08 landed at -49 dBm, the *strongest*
+        reading of its window. Neither the heap nor the link. Keep recording
+        both anyway: they are what rules each explanation out.
         """
         try:
             return float(((self.coordinator.data or {}).get("system") or {}).get("heap") or 0.0)
@@ -1103,15 +1106,15 @@ class LidarMapRunner:
         """
         if not self._map or not self._map.rejects:
             return None
-        # Unaccented on purpose: Pillow's default bitmap font has no Latin-1
-        # glyphs, and "ACTUALISÉE" comes out as "ACTUALIS<box>E". Verified by
-        # rendering both. Restoring the accents needs a real font file first.
+        # ASCII only: Pillow's default bitmap font has no Latin-1 glyphs, so
+        # anything accented renders as a box. Verified by drawing both. Any
+        # non-ASCII text here needs a real font file first.
         return [
-            "CARTE NON ACTUALISEE",
-            "Verifier que la base n'a pas bouge",
+            "MAP NOT UPDATING",
+            "Check that the dock has not moved",
             (
-                f"Tentative {self._map.rejects} sur "
-                f"{MAX_CONSECUTIVE_REJECTS} avant reinitialisation"
+                f"Attempt {self._map.rejects} of "
+                f"{MAX_CONSECUTIVE_REJECTS} before resetting"
             ),
         ]
 

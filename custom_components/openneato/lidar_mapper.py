@@ -865,10 +865,10 @@ class AccumulatedMap:
             quarter, dx, dy, overlap, fine, scores = align_to_reference(
                 walls, self.walls
             )
-            # Le recouvrement dit si la session ressemble a la carte, la marge
-            # si c'est bien ce quart-la et pas un autre. Une fusion refusee
-            # avec une marge nette se lit autrement qu'une fusion refusee sur
-            # quatre quarts a egalite, et sans ca les deux se ressemblent.
+            # The overlap says whether the session looks like the map, the
+            # margin whether it is that quarter turn and not another. A merge
+            # refused with a clear margin reads differently from one refused
+            # with the four quarters level, and without this the two look alike.
             margin, _ratio = quarter_margin(scores, quarter)
             report.update(
                 quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3),
@@ -1259,17 +1259,17 @@ def fit_rigid(
 
 
 def _session_poses(captures, match, refine):
-    """La passe 1 : recaler chaque scan, puis fermer les boucles.
+    """Pass 1: match every scan, then close the loops.
 
-    Sortie en fonction pour que `build_session_grids` puisse la court-circuiter
-    quand un `SessionTracker` a deja fait le travail au fil du menage.
+    Pulled out into a function so `build_session_grids` can short-circuit it
+    when a `SessionTracker` has already done the work during the cleaning.
     """
-    # Le recalage a besoin d'une carte a laquelle se comparer, donc cette passe
-    # construit des murs de travail, jetes ensuite. La projection definitive est
-    # refaite en passe 2 depuis les poses retenues. C'est ce decoupage qui
-    # permet d'inserer la fermeture de boucle entre les deux -- et, quand elle
-    # ne tourne pas, le resultat est identique a l'ancien code puisque la
-    # projection est deterministe a poses donnees.
+    # Matching needs a map to compare against, so this pass builds working
+    # walls and then throws them away. The final projection is redone in pass 2
+    # from the poses that were kept. That split is what makes room for loop
+    # closure between the two -- and when it does not run, the result is
+    # identical to the old code, since the projection is deterministic given
+    # the poses.
     scratch: dict[tuple[int, int], float] = {}
     scans: list[tuple[float, float, float, Any, float]] = []
     # Running correction: drift accumulates, so each scan starts from the
@@ -1311,11 +1311,11 @@ def _session_poses(captures, match, refine):
         scans.append((x, y, theta, points, weight))
         placed += 1
 
-    # -- fermeture de boucle, entre les deux passes ------------------------
-    # Elle rend None quand elle n'a rien a dire -- trop peu de scans, aucun
-    # retour sur zone, trop peu de fermetures retenues -- et le dit dans le
-    # log. Une exception ne doit pas couter la carte : une session non
-    # optimisee vaut infiniment mieux qu'une session perdue.
+    # -- loop closure, between the two passes -------------------------------
+    # It returns None when it has nothing to say -- too few scans, no revisit,
+    # too few closures kept -- and says so in the log. An exception must not
+    # cost the map: an unoptimised session is worth infinitely more than a lost
+    # one.
     if refine and scans:
         try:
             better = slam.refine_poses(
@@ -1375,10 +1375,10 @@ def build_session_grids(
 
     CPU-bound; call it from the executor.
     """
-    # -- le suiveur a-t-il deja tout fait pendant le menage ? --------------
-    # Si oui, la passe 1 et l'appariement sont derriere nous : il ne reste que
-    # le graphe et la projection. C'est ce qui fait tomber la fusion de cinq
-    # minutes a une vingtaine de secondes sur un Raspberry Pi 5.
+    # -- did the tracker already do it all during the cleaning? -------------
+    # If so, pass 1 and the pairing are behind us: only the graph and the
+    # projection are left. That is what takes the merge from five minutes down
+    # to about twenty seconds on a Raspberry Pi 5.
     if tracker is not None:
         scans = tracker.scans
         better = tracker.refined()
@@ -1493,28 +1493,27 @@ def scan_points(payload: dict[str, Any]) -> list[tuple[int, int]]:
 
 
 class SessionTracker:
-    """Place les scans et ferme les boucles au fil du menage.
+    """Place the scans and close the loops as the cleaning goes.
 
-    La passe 1 est causale : `match_pose` ne regarde que les murs deja poses,
-    donc la pose d'un scan ne bouge plus une fois placee. L'ICP fait a
-    l'arrivee d'un scan rend donc exactement ce qu'il rendrait a la fin --
-    verifie sur le run du 27/08 : 9 410 paires appariees dans les deux ordres,
-    ecart **0,000000 mm** sur la transformation comme sur le residu.
+    Pass 1 is causal: `match_pose` only looks at walls already laid down, so a
+    scan's pose stops moving once placed. The ICP done as a scan arrives
+    therefore returns exactly what it would return at the end -- checked on the
+    run of 27/08: 9410 pairs matched in both orders, difference **0.000000 mm**
+    on the transform and on the residual alike.
 
-    L'interet n'est pas seulement d'aller plus vite. Le nombre de paires
-    candidates croit comme le **carre** du nombre de scans : 481 scans en
-    donnent 9 410, mais 750 scans en donneraient six fois plus, et la fusion
-    repasserait a dix minutes sur un Pi 5 -- vingt sur un Pi 4, sur lequel
-    tourne une bonne part des installations. Etale au fil de l'eau, le cout
-    devient **constant par scan** au lieu de quadratique a la fin.
+    Speed is not the only point. The number of candidate pairs grows as the
+    **square** of the scan count: 481 scans give 9410, but 750 scans would give
+    six times more, and the merge would be back to ten minutes on a Pi 5 --
+    twenty on a Pi 4, which a good share of installs run. Spread as it goes,
+    the cost becomes **constant per scan** instead of quadratic at the end.
 
-    ⚠ Le suiveur travaille sur *toutes* les captures. `_drop_slow_scans`
-    n'est decide qu'a la fin, sur la mediane du run entier, et retirer un scan
-    changerait les poses de tous les suivants -- `match_pose` s'accumule. Le
-    contrat est donc : le resultat n'est utilisable que si le filtre ne retire
-    rien. C'est le cas quasi systematique (une seule fois sur neuf runs, deux
-    scans sur 501), et `usable()` le dit franchement plutot que de rendre un
-    resultat approximatif.
+    ⚠ The tracker works on *every* capture. `_drop_slow_scans` is only
+    decided at the end, on the median of the whole run, and removing a scan
+    would change the poses of all the ones after it -- `match_pose` accumulates.
+    The contract is therefore: the result is only usable if the filter removes
+    nothing. That is almost always the case (once in nine runs, two scans out
+    of 501), and `usable()` says so plainly rather than returning an
+    approximate result.
     """
 
     __slots__ = ("_clouds", "_dth", "_dx", "_dy", "_edges", "_matching",
@@ -1543,13 +1542,13 @@ class SessionTracker:
         # from the log rather than by replaying the captures. See match_pose().
         self.refused = 0
 
-    # ── pendant le menage ────────────────────────────────────────────
+    # ── during the cleaning ─────────────────────────────────────────
 
     def add(self, capture) -> None:
-        """Place un scan et ferme ses retours sur zone avec les precedents.
+        """Place a scan and close its revisits against the earlier ones.
 
-        Reproduit ligne pour ligne la passe 1 de build_session_grids, puis
-        apparie. Tout ecart ici invaliderait l'equivalence demontree.
+        Reproduces pass 1 of build_session_grids line for line, then pairs. Any
+        divergence here would invalidate the equivalence that was demonstrated.
         """
         x, y, theta, points = capture[:4]
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
@@ -1591,7 +1590,7 @@ class SessionTracker:
         self._close_loops(k)
 
     def _close_loops(self, k: int) -> None:
-        """Les retours sur zone que ce scan ferme avec les precedents."""
+        """The revisits this scan closes against the earlier ones."""
         xk, yk = self._poses[k][0], self._poses[k][1]
         lim = slam.LOOP_MAX_DIST_M * slam.LOOP_MAX_DIST_M
         for j in range(k - slam.LOOP_MIN_GAP + 1):
@@ -1617,25 +1616,25 @@ class SessionTracker:
             self._edges.append((j, k, (px, py, pth), w))
             self.matched += 1
 
-    # ── a la fin ─────────────────────────────────────────────────────
+    # ── at the end ───────────────────────────────────────────────────
 
     def usable(self, dropped: int) -> bool:
-        """Le suiveur ne vaut que si le filtre de rotation n'a rien retire.
+        """The tracker is worth nothing unless the rotation filter removed nothing.
 
-        Retirer un scan changerait la pose de tous les suivants, puisque
-        `match_pose` s'accumule -- le resultat serait faux, pas approximatif.
-        Le critere n'est donc PAS un compte de poses (add() ecarte deja les
-        scans de poids nul, ce qui est un autre filtre), mais bien : combien
-        `_drop_slow_scans` a-t-il retire ?
+        Removing a scan would change the pose of every scan after it, since
+        `match_pose` accumulates -- the result would be wrong, not approximate.
+        So the criterion is NOT a pose count (add() already drops zero-weight
+        scans, which is a different filter), but precisely: how many did
+        `_drop_slow_scans` remove?
         """
         return dropped == 0 and bool(self._poses)
 
     def refined(self):
-        """Poses optimisees. Rend None -- en disant pourquoi -- s'il n'y a
-        pas de quoi contraindre le graphe."""
+        """Optimised poses. Returns None -- saying why -- when there is not
+        enough to constrain the graph."""
         n = len(self._poses)
         if n < slam.MIN_SCANS:
-            _LOGGER.debug("SLAM: %d scans, trop peu pour fermer une boucle", n)
+            _LOGGER.debug("SLAM: %d scans, too few to close a loop", n)
             return None
         if self.matched < n // 4:
             _LOGGER.info(
@@ -1650,11 +1649,11 @@ class SessionTracker:
         ]
         edges.extend(self._edges)
         refined = slam.optimise(self._poses, edges)
-        # Le succes doit se voir autant que l'echec. Sans cette ligne, un
-        # suiveur qui a travaille est indiscernable d'un suiveur qui n'a
-        # jamais ete alimente -- constate sur le run du 27/08 au soir, ou il a
-        # fallu comparer la translation de fusion a un rejeu hors ligne pour
-        # savoir laquelle des deux situations on regardait.
+        # Success has to be as visible as failure. Without this line a tracker
+        # that did its work is indistinguishable from one that was never fed --
+        # seen on the run of the evening of 27/08, where the merge translation
+        # had to be compared against an offline replay to tell which of the two
+        # was being looked at.
         moved = sorted(
             math.hypot(refined[k][0] - self._poses[k][0],
                        refined[k][1] - self._poses[k][1])
@@ -1673,58 +1672,56 @@ class SessionTracker:
         return self._placed
 
     def walls_so_far(self) -> dict[tuple[int, int], float]:
-        """Les murs vus depuis le debut du menage, dans le repere du run.
+        """The walls seen since the cleaning began, in the run's own frame.
 
-        C'est la copie de `_scratch`, que la passe 1 tient deja a jour pour
-        l'appariement : la meme accumulation, cellule par cellule, que la
-        passe 2 de `build_session_grids` produirait sur les memes scans. Placer
-        la session en cours sur la carte ne coute donc aucune geometrie
-        supplementaire -- seulement l'ajustement lui-meme.
+        It is a copy of `_scratch`, which pass 1 already keeps up to date for
+        the matching: the same accumulation, cell by cell, that pass 2 of
+        `build_session_grids` would produce on the same scans. Placing the run
+        in progress on the map therefore costs no extra geometry -- only the
+        fit itself.
 
-        Ce n'est pas tout a fait ce que la fusion verra : elle projettera
-        depuis les poses fermees par le graphe, pas depuis les poses causales.
-        L'ecart est de quelques centimetres, sans effet sur le choix d'un quart
-        de tour.
+        It is not quite what the merge will see: that projects from the poses
+        the graph closed, not from the causal ones. The difference is a few
+        centimetres, with no effect on the choice of a quarter turn.
 
-        ⚠ Le dictionnaire est copie : `add()` tourne dans l'executeur, et le
-        rendre tel quel ferait iterer l'appelant sur une structure en cours de
-        modification.
+        ⚠ The dictionary is copied: `add()` runs in the executor, and handing
+        it over as-is would have the caller iterate a structure being modified.
         """
         return dict(self._scratch)
 
     @property
     def scans(self):
-        """(x, y, theta_deg, points, weight) par scan place."""
+        """(x, y, theta_deg, points, weight) per placed scan."""
         return [
             (p[0], p[1], math.degrees(p[2]), pts, w)
             for p, pts, w in zip(self._poses, self._points, self._weights)
         ]
 
     def add_many(self, captures) -> None:
-        """Absorbe un lot. Appele depuis l'executeur : un tick de rattrapage
-        peut apporter deux douzaines de scans, et ~83 ms de CPU chacun dans la
-        boucle d'evenements est exactement ce qui rend la maison lente."""
+        """Take in a batch. Called from the executor: a catch-up tick can bring
+        two dozen scans, and ~83 ms of CPU each inside the event loop is
+        exactly what makes the house feel slow."""
         for capture in captures:
             self.add(capture)
 
     @property
     def raw_poses(self) -> list[tuple[float, float]]:
-        """Les poses telles que le robot les a rapportees, une par scan place.
+        """The poses as the robot reported them, one per placed scan.
 
-        Appariees a `scans` par l'indice : c'est ce que `fit_rigid` demande.
+        Paired with `scans` by index: that is what `fit_rigid` asks for.
         """
         return list(self._raw)
 
     @property
     def correction(self) -> tuple[float, float, float]:
-        """Le deplacement rigide que le recalage a fait subir au menage.
+        """The rigid movement the matching put the cleaning through.
 
-        (tx, ty, degres), en metres et degres : `pose_carte ~= R(d) . brute + t`.
-        Le rejeu la reclame pour dessiner le trajet dans le meme repere que les
-        murs.
+        (tx, ty, degrees), in metres and degrees: `map_pose ~= R(d) . raw + t`.
+        The replay asks for it so it can draw the path in the same frame as the
+        walls.
 
-        Sur les poses causales, donc utilisable **pendant** le menage. La
-        fusion, elle, refait l'ajustement contre les poses fermees par le
-        graphe -- voir `build_session_grids`.
+        Fitted on the causal poses, so usable **during** the cleaning. The
+        merge refits it against the poses the graph closed -- see
+        `build_session_grids`.
         """
         return fit_rigid(self._raw, [(p[0], p[1]) for p in self._poses])
