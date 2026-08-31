@@ -1,4 +1,5 @@
 #include "data_logger.h"
+#include <esp_core_dump.h>
 #include "neato_serial.h"
 #include "system_manager.h"
 #include <WiFi.h>
@@ -536,7 +537,53 @@ void DataLogger::logBootEvent() {
             break;
     }
 
-    logEvent("boot", {{"reason", reasonStr, FIELD_STRING}, {"heap", String(ESP.getFreeHeap()), FIELD_INT}});
+    std::vector<Field> fields = {{"reason", reasonStr, FIELD_STRING}, {"heap", String(ESP.getFreeHeap()), FIELD_INT}};
+
+    // What the crash actually was, from the core dump the panic handler already
+    // wrote to flash.
+    //
+    // "PANIC" says a crash happened; it does not say where. The dump in the
+    // coredump partition does, and the summary API reads it in place -- so a
+    // crash at four in the morning explains itself in the log instead of
+    // needing the bridge unplugged from the robot and read over USB, which is
+    // the only other way to reach that partition.
+    //
+    // Carried on the boot event rather than logged on its own, because the boot
+    // event is already the thing that reaches syslog: LOG() writes to the
+    // serial console, which nobody is attached to. Learnt the hard way.
+    //
+    // On RISC-V the fields that need no ELF to be useful are `exc_task` (which
+    // separates the AsyncTCP web server from the Arduino loop), `mcause` (2 is
+    // an illegal instruction, 5 a load access fault, 7 a store) and `mtval`
+    // (the address that faulted). A load or store fault on an address that is
+    // not a plausible pointer is what a corrupted object looks like. `pc` and
+    // `ra` need addr2line against the matching firmware.elf.
+    //
+    // The dump is deliberately not erased: the panic handler overwrites it on
+    // the next crash, so keeping it costs nothing, and erasing it would throw
+    // away the only evidence there is.
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+    if (esp_core_dump_image_check() == ESP_OK) {
+        // ~1.1 KB, so heap rather than the setup task's stack.
+        auto *cd = static_cast<esp_core_dump_summary_t *>(malloc(sizeof(esp_core_dump_summary_t)));
+        if (cd) {
+            if (esp_core_dump_get_summary(cd) == ESP_OK) {
+                fields.push_back({"crash_task", String(cd->exc_task), FIELD_STRING});
+                fields.push_back({"crash_pc", "0x" + String(cd->exc_pc, HEX), FIELD_STRING});
+                fields.push_back({"crash_ra", "0x" + String(cd->ex_info.ra, HEX), FIELD_STRING});
+                fields.push_back({"crash_sp", "0x" + String(cd->ex_info.sp, HEX), FIELD_STRING});
+                fields.push_back({"crash_mcause", String(cd->ex_info.mcause), FIELD_INT});
+                fields.push_back({"crash_mtval", "0x" + String(cd->ex_info.mtval, HEX), FIELD_STRING});
+                // Ties those addresses to one build. Resolving them against a
+                // different firmware.elf would produce confident nonsense.
+                fields.push_back({"crash_elf", String(reinterpret_cast<char *>(cd->app_elf_sha256)), FIELD_STRING});
+            }
+            free(cd);
+        }
+    }
+#endif
+
+    logEvent("boot", fields);
 }
 
 // -- NeatoSerial logger hook -------------------------------------------------
