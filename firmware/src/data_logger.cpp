@@ -640,6 +640,9 @@ void DataLogger::onCommand(const String& cmd, CommandStatus status, unsigned lon
         case CMD_QUEUE_FULL:
             statusStr = "queue_full";
             break;
+        case CMD_INVALID:
+            statusStr = "invalid";
+            break;
         default:
             statusStr = "unknown";
             break;

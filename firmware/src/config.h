@@ -107,7 +107,8 @@ enum CommandStatus {
     CMD_PARSE_FAILED, // Got response but parse failed (not used yet)
     CMD_SERIAL_ERROR, // UART error or other serial issue (e.g. response desync)
     CMD_UNSUPPORTED, // Robot responded with "Unknown Cmd" — command not available
-    CMD_QUEUE_FULL // Command rejected because the serial queue was full
+    CMD_QUEUE_FULL, // Command rejected because the serial queue was full
+    CMD_INVALID // Command rejected before it reached the queue (empty or null-buffer String)
 };
 
 // Timing intervals (milliseconds)

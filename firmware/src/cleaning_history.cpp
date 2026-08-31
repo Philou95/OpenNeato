@@ -308,7 +308,14 @@ void CleaningHistory::tick() {
             int lastSlash = hsName.lastIndexOf('/');
             if (lastSlash >= 0)
                 hsName = hsName.substring(lastSlash + 1);
-            metaCache[hsName] = {pendingSessionJson, pendingSummaryJson};
+            // Member-wise, and by copy. Assigning a whole CachedMeta move-assigns its
+            // Strings, and String::operator=(String&&) memmoves from the source
+            // buffer without ever checking it for null -- which is exactly what an
+            // unset String holds. Same defect as the serial queue panic of
+            // 2026-08-31, same fix: String::operator=(const String&) does check.
+            CachedMeta& metaEntry = metaCache[hsName];
+            metaEntry.session = pendingSessionJson;
+            metaEntry.summary = pendingSummaryJson;
             pendingSessionJson = "";
             pendingSummaryJson = "";
 
@@ -1387,8 +1394,15 @@ std::vector<HistorySessionInfo> CleaningHistory::listSessions() {
                 if (isValidMetaLine(lastLine, "\"type\":\"summary\"")) {
                     info.summary = lastLine;
                 }
-                // Cache for subsequent requests
-                metaCache[name] = {info.session, info.summary};
+                // Cache for subsequent requests. Member-wise and by copy: see the
+                // note at the compression site. `info.summary` is left unset
+                // whenever the last line is not a valid summary -- precisely what
+                // an interrupted session leaves behind, and this bridge has been
+                // interrupting them -- and move-assigning that over a cached
+                // entry reads address zero.
+                CachedMeta& metaEntry = metaCache[name];
+                metaEntry.session = info.session;
+                metaEntry.summary = info.summary;
             }
 
             result.push_back(info);

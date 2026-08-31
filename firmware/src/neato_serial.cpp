@@ -163,6 +163,39 @@ void NeatoSerial::tick() {
 
 bool NeatoSerial::enqueue(const String& command, std::function<void(bool, const String&)> callback,
                           CommandPriority priority, bool waitForResponse) {
+    // A command whose String carries a null buffer must never reach the queue.
+    // Arduino's String is legitimately allowed to be in that state -- the
+    // String(nullptr) constructor, a failed allocation, and every concatenation
+    // with a null-buffer operand all end in invalidate() -- and
+    // String::operator=(String&&) then memmoves from that null pointer without
+    // ever checking it. One such entry turns the next queue.erase(), which
+    // move-assigns every remaining entry down a slot, into a load from address
+    // zero.
+    //
+    // That is the panic of 2026-08-31 23:26, read straight off the stored core
+    // dump rather than reasoned about:
+    //
+    //     loopTask, mcause 5 (load access fault), mtval 0x0
+    //     NeatoSerial::tick():102 -> dequeueNext() -> queue.erase(begin())
+    //       -> __copy_m<CommandEntry*> -> CommandEntry::operator=(CommandEntry&&)
+    //         -> String::operator=(String&&) -> String::move() -> memmove(dst, 0, 1)
+    //
+    // An empty command is meaningless on the wire anyway -- it would go out as a
+    // bare terminator -- so reject it rather than repair it. The return address
+    // rides along on the log line because which caller built it is the one thing
+    // the dump cannot say, and guessing at it is what this whole night was spent
+    // not doing.
+    if (command.isEmpty()) {
+        auto caller = reinterpret_cast<uint32_t>(__builtin_return_address(0));
+        LOG("NEATO", "Rejecting empty command from 0x%08x", static_cast<unsigned>(caller));
+        if (loggerCallback)
+            loggerCallback("<empty command from 0x" + String(caller, HEX) + ">", CMD_INVALID, 0, "",
+                           static_cast<int>(queue.size()), 0, 0);
+        if (callback)
+            callback(false, "");
+        return false;
+    }
+
     if (static_cast<int>(queue.size()) >= NEATO_QUEUE_MAX_SIZE) {
         LOG("NEATO", "Queue full, rejecting: %s", command.c_str());
         if (loggerCallback)

@@ -711,6 +711,33 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Ok"
+  /api/coredump:
+    get:
+      tags:
+        - System
+      summary: Read the crash dump the panic handler last wrote to flash
+      description: >
+        Returns the stored core-dump summary, or 404 when the coredump partition
+        holds nothing. Reading does not erase: the dump survives until the next
+        panic overwrites it, which is what allows a dump to be collected from a
+        firmware built after the crash it belongs to. On RISC-V targets `stack`
+        is the raw stack of the crashing task as hex, lowest address first,
+        starting at `sp`; the return addresses in it resolve with addr2line
+        against the ELF whose id matches `elf`. On Xtensa targets the summary
+        carries a real backtrace instead, returned as `backtrace`.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoreDump"
+        "404":
+          description: No core dump stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/system:
     get:
       tags:
@@ -996,6 +1023,56 @@ components:
         - dayOffset
         - hour
         - minute
+    CoreDump:
+      type: object
+      description: >
+        Summary of the crash dump held in the coredump partition. Present until
+        the next panic overwrites it, so it may describe an earlier boot than the
+        current one -- check `elf` against the running firmware before trusting
+        the addresses.
+      properties:
+        task:
+          type: string
+          description: Name of the task that faulted, e.g. loopTask
+        pc:
+          type: string
+          description: Program counter at the fault, hex
+        elf:
+          type: string
+          description: >
+            Id of the firmware image that produced this dump. Resolving the
+            addresses against any other build yields confident nonsense.
+        ra:
+          type: string
+          description: Return address register, hex (RISC-V only)
+        sp:
+          type: string
+          description: Stack pointer at the fault, hex (RISC-V only)
+        cause:
+          type: integer
+          description: >
+            mcause on RISC-V (2 illegal instruction, 5 load access fault,
+            7 store access fault), exception cause on Xtensa
+        addr:
+          type: string
+          description: Faulting address, hex (mtval on RISC-V)
+        stackSize:
+          type: integer
+          description: Bytes of stack captured (RISC-V only)
+        stack:
+          type: string
+          description: >
+            Raw stack of the crashing task as hex, lowest address first, starting
+            at `sp` (RISC-V only)
+        depth:
+          type: integer
+          description: Number of backtrace frames (Xtensa only)
+        corrupted:
+          type: boolean
+          description: Whether the backtrace walk hit an inconsistency (Xtensa only)
+        backtrace:
+          type: string
+          description: Space-separated frame addresses, hex (Xtensa only)
     Error:
       type: object
       properties:

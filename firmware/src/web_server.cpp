@@ -11,6 +11,7 @@
 #include "wifi_manager.h"
 #include "scheduler.h"
 #include <SPIFFS.h>
+#include <esp_core_dump.h>
 
 unsigned long WebServer::lastApiActivity = 0;
 unsigned long WebServer::pendingSince[WebServer::PENDING_SLOTS] = {0};
@@ -345,6 +346,80 @@ void WebServer::registerSystemRoutes() {
         return 200;
     });
 
+
+    // GET /api/coredump -- the stored crash dump, verbatim.
+    //
+    // The boot event carries the registers the summary names, and on RISC-V
+    // that is two frames: the faulting PC and whatever `ra` held. Two frames
+    // were not enough for the crash of 2026-08-31 23:26 -- `ra` landed inside
+    // String::move(), which is reached from 82 call sites in this binary, so
+    // the caller is the one thing that matters and the one thing missing.
+    //
+    // On RISC-V `exc_bt_info` is not a backtrace array but the raw stack of the
+    // crashing task, so every return address is already sitting in flash; they
+    // only have to be read off the host and resolved against the ELF of the
+    // build that crashed.
+    //
+    // Read-only, and it does not erase. The panic handler overwrites the dump
+    // on the next crash and nothing else touches it -- which is exactly why
+    // this endpoint could be added *after* the crash it was needed for and
+    // still find that crash waiting.
+    loggedRoute("/api/coredump", HTTP_GET, [this](AsyncWebServerRequest *request) -> int {
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+        if (esp_core_dump_image_check() != ESP_OK) {
+            sendError(request, 404, "no core dump stored");
+            return 404;
+        }
+        // ~1.1 KB, so heap rather than the AsyncTCP task's stack.
+        auto *cd = static_cast<esp_core_dump_summary_t *>(malloc(sizeof(esp_core_dump_summary_t)));
+        if (!cd) {
+            sendError(request, 507, "out of memory");
+            return 507;
+        }
+        if (esp_core_dump_get_summary(cd) != ESP_OK) {
+            free(cd);
+            sendError(request, 500, "core dump unreadable");
+            return 500;
+        }
+        std::vector<Field> fields = {
+                {"task", String(cd->exc_task), FIELD_STRING},
+                {"pc", "0x" + String(cd->exc_pc, HEX), FIELD_STRING},
+                {"elf", String(reinterpret_cast<char *>(cd->app_elf_sha256)), FIELD_STRING},
+        };
+#if CONFIG_IDF_TARGET_ARCH_RISCV
+        fields.push_back({"ra", "0x" + String(cd->ex_info.ra, HEX), FIELD_STRING});
+        fields.push_back({"sp", "0x" + String(cd->ex_info.sp, HEX), FIELD_STRING});
+        fields.push_back({"cause", String(cd->ex_info.mcause), FIELD_INT});
+        fields.push_back({"addr", "0x" + String(cd->ex_info.mtval, HEX), FIELD_STRING});
+        // The crashing task's stack, lowest address first, starting at `sp`.
+        // Hex rather than base64 so it can be read with nothing but a shell.
+        String stack;
+        stack.reserve(cd->exc_bt_info.dump_size * 2 + 1);
+        for (uint32_t i = 0; i < cd->exc_bt_info.dump_size; i++) {
+            char b[3];
+            snprintf(b, sizeof(b), "%02x", cd->exc_bt_info.stackdump[i]);
+            stack += b;
+        }
+        fields.push_back({"stackSize", String(cd->exc_bt_info.dump_size), FIELD_INT});
+        fields.push_back({"stack", stack, FIELD_STRING});
+#else
+        fields.push_back({"cause", String(cd->ex_info.exc_cause), FIELD_INT});
+        fields.push_back({"addr", "0x" + String(cd->ex_info.exc_vaddr, HEX), FIELD_STRING});
+        String bt;
+        for (uint32_t i = 0; i < cd->exc_bt_info.depth && i < 16; i++)
+            bt += (i ? " 0x" : "0x") + String(cd->exc_bt_info.bt[i], HEX);
+        fields.push_back({"depth", String(cd->exc_bt_info.depth), FIELD_INT});
+        fields.push_back({"corrupted", cd->exc_bt_info.corrupted ? "true" : "false", FIELD_BOOL});
+        fields.push_back({"backtrace", bt, FIELD_STRING});
+#endif
+        free(cd);
+        request->send(200, "application/json", fieldsToJson(fields));
+        return 200;
+#else
+        sendError(request, 501, "core dump support not built into this firmware");
+        return 501;
+#endif
+    });
     // Actions defer their reboot for 500ms, allowing the response to flush.
     registerPostRoute("/api/system/restart", sysMgr, &SystemManager::restart);
     registerPostRoute("/api/system/reset", sysMgr, &SystemManager::factoryReset);
