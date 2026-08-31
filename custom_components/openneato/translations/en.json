@@ -61,6 +61,12 @@
       "free_heap": {
         "name": "Free heap"
       },
+      "reset_reason": {
+        "name": "Reset reason"
+      },
+      "boot_count": {
+        "name": "Boot count"
+      },
       "storage_used": {
         "name": "Storage used"
       },

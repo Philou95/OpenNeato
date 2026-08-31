@@ -128,6 +128,11 @@ enum CommandStatus {
 // NVS (Non-Volatile Storage) — single shared namespace for all settings
 #define NVS_NAMESPACE "neato"
 
+// NVS keys — system
+// Bumped on every boot, so a restart nobody was watching still leaves a count
+// behind. Paired with esp_reset_reason() in /api/system.
+#define NVS_KEY_BOOT_COUNT "boot_count"
+
 // NVS keys — WiFi
 #define NVS_KEY_WIFI_SSID "wifi_ssid"
 #define NVS_KEY_WIFI_PASS "wifi_pass"

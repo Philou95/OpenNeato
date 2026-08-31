@@ -29,6 +29,14 @@ struct SystemHealth : public JsonSerializable {
     unsigned long httpOldestPendingMs = 0;
     unsigned long httpServedFast = 0;
     unsigned long httpServedSlow = 0;
+    // Why this boot happened, and how many boots there have been. The bridge
+    // restarted 5 to 8 times a day for the week to 2026-08-31 with the heap at
+    // 124 KB and the RSSI at -67 dBm right up to the moment it went -- so
+    // neither of the two things already reported could say what caused it, and
+    // the boot event that could is only written when logging is on, which it is
+    // not by default. Here it costs nothing and is always there.
+    String resetReason;
+    uint32_t bootCount = 0;
 
     std::vector<Field> toFields() const override;
 };
@@ -95,6 +103,12 @@ private:
 
     // Heap watchdog state
     unsigned long heapLowSince = 0; // millis() when heap first dropped below threshold (0 = healthy)
+
+    // Read once in begin(): esp_reset_reason() is fixed for the life of a boot,
+    // and the counter is bumped in NVS there so a restart no one watched still
+    // leaves a trace.
+    String resetReason;
+    uint32_t bootCount = 0;
 
     NtpSyncCallback ntpSyncCallback;
 };

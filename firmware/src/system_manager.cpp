@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <ctime>
 #include <esp_idf_version.h>
+#include <esp_system.h>
 
 SystemManager::SystemManager(Preferences& prefs) : LoopTask(5000), prefs(prefs) {
     TaskRegistry::add(this);
@@ -11,7 +12,46 @@ SystemManager::SystemManager(Preferences& prefs) : LoopTask(5000), prefs(prefs) 
 
 // -- Lifecycle ---------------------------------------------------------------
 
+// Names match DataLogger::logBootEvent() so the two agree when both are read.
+static const char *resetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:
+            return "POWERON";
+        case ESP_RST_EXT:
+            return "EXT";
+        case ESP_RST_SW:
+            return "SW_RESET";
+        case ESP_RST_PANIC:
+            return "PANIC";
+        case ESP_RST_INT_WDT:
+            return "INT_WDT";
+        case ESP_RST_TASK_WDT:
+            return "TASK_WDT";
+        case ESP_RST_WDT:
+            return "WDT";
+        case ESP_RST_DEEPSLEEP:
+            return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:
+            return "BROWNOUT";
+        case ESP_RST_SDIO:
+            return "SDIO";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 void SystemManager::begin() {
+    // Why we are running. A brownout, a panic and a watchdog bite all look
+    // identical from the outside -- the device is simply back with uptime near
+    // zero -- and telling them apart is the whole difference between fixing the
+    // power supply and fixing the code.
+    resetReason = resetReasonName(esp_reset_reason());
+    // No begin()/end() around this: main.cpp opens the namespace once for the
+    // lifetime of the device, and closing it here would pull the handle out
+    // from under every other manager.
+    bootCount = prefs.getUInt(NVS_KEY_BOOT_COUNT, 0) + 1;
+    prefs.putUInt(NVS_KEY_BOOT_COUNT, bootCount);
+    LOG("SYS", "Boot #%u, reason %s", bootCount, resetReason.c_str());
     // NTP is configured by SettingsManager via applyTimezone() after settings are loaded
     LOG("SYS", "System manager initialized (NTP pending timezone from settings)");
 }
@@ -164,6 +204,8 @@ std::vector<Field> SystemHealth::toFields() const {
             {"httpOldestPendingMs", String(httpOldestPendingMs), FIELD_INT},
             {"httpServedFast", String(httpServedFast), FIELD_INT},
             {"httpServedSlow", String(httpServedSlow), FIELD_INT},
+            {"resetReason", resetReason, FIELD_STRING},
+            {"bootCount", String(bootCount), FIELD_INT},
     };
 }
 
@@ -182,6 +224,8 @@ SystemHealth SystemManager::getSystemHealth(const String& tz) const {
     h.time = now();
     h.timeSource = ntpSynced ? "ntp" : (fallbackSet ? "fallback" : "millis");
     h.tz = tz;
+    h.resetReason = resetReason;
+    h.bootCount = bootCount;
 
     // Compute DST-aware local time string via localtime_r (same conversion the
     // scheduler uses). The POSIX TZ string applied via configTzTime() handles

@@ -277,6 +277,31 @@ SENSOR_DESCRIPTIONS: tuple[OpenNeatoSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         state_class=SensorStateClass.MEASUREMENT,
     ),
+    # Why the bridge last restarted, and how many times it has. Recorded rather
+    # than merely readable because the restarts happen unattended -- 5 to 8 a
+    # day for the week to 2026-08-31 -- and the two figures already recorded,
+    # heap and RSSI, were both healthy right up to each one. Only the history
+    # of these two can say whether it is the supply (BROWNOUT), the code
+    # (PANIC), or the watchdogs (TASK_WDT / SW_RESET).
+    OpenNeatoSensorEntityDescription(
+        key="system_reset_reason",
+        translation_key="reset_reason",
+        name="Reset reason",
+        section="system",
+        field="resetReason",
+        icon="mdi:restart-alert",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    OpenNeatoSensorEntityDescription(
+        key="system_boot_count",
+        translation_key="boot_count",
+        name="Boot count",
+        section="system",
+        field="bootCount",
+        icon="mdi:counter",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
     OpenNeatoSensorEntityDescription(
         key="system_fs_used",
         translation_key="storage_used",
