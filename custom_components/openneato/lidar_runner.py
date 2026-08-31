@@ -778,6 +778,16 @@ class LidarMapRunner:
         # puisque match_pose s'accumule. Cas rare -- une fois sur neuf runs,
         # deux scans sur 501 -- et on le dit au lieu de le taire.
         tracker, self._tracker = self._tracker, None
+        if tracker is not None and tracker.refused:
+            # Une poignee est normale ; une grosse part dit que le menage s'est
+            # passe la ou le recalage ne voit rien -- un couloir, ou la position
+            # le long du couloir n'est pas observable. Ca se lit dans le log au
+            # lieu de se deviner en rejouant les captures.
+            _LOGGER.info(
+                "LIDAR mapping: %d scans sur %d laisses a l'odometrie, la "
+                "recherche de recalage butait sur le bord de sa fenetre",
+                tracker.refused, tracker.placed,
+            )
         if tracker is not None and not tracker.usable(dropped):
             _LOGGER.info(
                 "SLAM: le filtre de rotation a retire %d scans, le suivi au fil "

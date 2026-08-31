@@ -1148,16 +1148,44 @@ def match_pose(
     y: float,
     theta: float,
     points: list[tuple[int, int]],
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, bool]:
     """Nudge a pose so its scan lands on the map already built.
 
     Coarse pass then fine pass around the winner, which costs a fraction of a
     single flat search over the same span.
+
+    The fourth value says the coarse pass finished **on the edge of its
+    translation window**, which means the best pose it could see was the last
+    one it was allowed to try -- the optimum is somewhere outside. A clipped
+    search has not converged on anything, so what comes back is the boundary,
+    not a measurement, and the caller is expected to leave the pose alone
+    rather than move it there.
+
+    Why this matters is not subtle. Measured over seven cleanings, the share of
+    matched scans whose coarse pass railed in translation:
+
+        runs that completed        run 6 5.8%   run 7 4.2%   run 9 1.9%   run 10 5.7%
+        runs that gave up mid-run  run 8  39%   run 11  12%   run 14  44%
+
+    The three that gave up did so because the clipped nudges accumulate: on the
+    30 August run, scans 14, 15 and 16 each pushed 0.24 m the same way while the
+    robot drove straight down a corridor at a constant heading -- exactly where
+    position along the corridor is unobservable and the matcher slides the scan
+    back towards the denser, already-mapped end. Three of those took the running
+    correction past MATCH_MAX_DRIFT_M, and the runaway guard then threw the
+    whole thing away 2% into a 668-scan cleaning.
+
+    Refusing them ends all three give-ups and costs the healthy runs 7 to 23
+    refusals out of ~450. Only translation: the angular window rails often and
+    harmlessly, and refusing that as well starves the matcher -- tried, and it
+    makes run 8 worse than doing nothing at all.
     """
     sparse = points[::MATCH_STRIDE]
     bx, by, bt = x, y, theta
-    for step, span, astep, aspan in MATCH_PASSES:
+    railed = False
+    for pass_no, (step, span, astep, aspan) in enumerate(MATCH_PASSES):
         best_score: float | None = None
+        ci = cj = 0
         cx, cy, ct = bx, by, bt
         for i in range(-span, span + 1):
             for j in range(-span, span + 1):
@@ -1165,9 +1193,15 @@ def match_pose(
                     px, py, pt = bx + i * step, by + j * step, bt + k * astep
                     score = _match_score(walls, px, py, pt, sparse)
                     if best_score is None or score > best_score:
-                        best_score, cx, cy, ct = score, px, py, pt
+                        best_score, ci, cj = score, i, j
+                        cx, cy, ct = px, py, pt
+        # Judged on the coarse pass alone: the fine pass only refines inside
+        # the cell the coarse one chose, so it is the coarse window that says
+        # whether the optimum was reachable at all.
+        if not pass_no:
+            railed = abs(ci) == span or abs(cj) == span
         bx, by, bt = cx, cy, ct
-    return bx, by, bt
+    return bx, by, bt, railed
 
 
 def fit_rigid(
@@ -1247,6 +1281,7 @@ def _session_poses(captures, match, refine):
     # handed to the replay can be fitted against where the scan actually ended
     # up rather than averaged. See fit_rigid().
     raw_poses: list[tuple[float, float]] = []
+    refused = 0
     for capture in captures:
         x, y, theta, points = capture[:4]
         weight = scan_weight(capture[5], capture[6]) if len(capture) >= 7 else 1.0
@@ -1255,15 +1290,22 @@ def _session_poses(captures, match, refine):
         raw_poses.append((x, y))
         x, y, theta = x + dx, y + dy, theta + dtheta
         if matching and placed >= MATCH_SEED:
-            mx, my, mtheta = match_pose(scratch, x, y, theta, points)
-            dx, dy, dtheta = dx + (mx - x), dy + (my - y), dtheta + (mtheta - theta)
-            if math.hypot(dx, dy) > MATCH_MAX_DRIFT_M:
-                # Runaway: stop correcting rather than invent a pose.
-                _LOGGER.debug("scan matching gave up after %.2f m of drift", math.hypot(dx, dy))
-                dx = dy = dtheta = 0.0
-                matching = False
+            mx, my, mtheta, railed = match_pose(scratch, x, y, theta, points)
+            if railed:
+                # The search was clipped, so it found no optimum to move to.
+                # Odometry alone beats the edge of a window. See match_pose().
+                refused += 1
             else:
-                x, y, theta = mx, my, mtheta
+                dx, dy, dtheta = (
+                    dx + (mx - x), dy + (my - y), dtheta + (mtheta - theta)
+                )
+                if math.hypot(dx, dy) > MATCH_MAX_DRIFT_M:
+                    # Runaway: stop correcting rather than invent a pose.
+                    _LOGGER.debug("scan matching gave up after %.2f m of drift", math.hypot(dx, dy))
+                    dx = dy = dtheta = 0.0
+                    matching = False
+                else:
+                    x, y, theta = mx, my, mtheta
         for cell in project_scan(x, y, theta, points):
             scratch[cell] = scratch.get(cell, 0.0) + weight
         scans.append((x, y, theta, points, weight))
@@ -1290,6 +1332,11 @@ def _session_poses(captures, match, refine):
                 (better[k][0], better[k][1], math.degrees(better[k][2]), s_[3], s_[4])
                 for k, s_ in enumerate(scans)
             ]
+    if refused:
+        _LOGGER.debug(
+            "scan matching left %d of %d scans on odometry: the search was "
+            "clipped and had no optimum to offer", refused, placed,
+        )
     # Fitted last, against the poses as the graph left them: the replay has to
     # land on the walls the *projection* used, not on the causal pass.
     correction = fit_rigid(raw_poses, [(s_[0], s_[1]) for s_ in scans])
@@ -1472,7 +1519,7 @@ class SessionTracker:
 
     __slots__ = ("_clouds", "_dth", "_dx", "_dy", "_edges", "_matching",
                  "_placed", "_points", "_poses", "_raw", "_scratch",
-                 "_weights", "candidates", "matched")
+                 "_weights", "candidates", "matched", "refused")
 
     def __init__(self) -> None:
         self._scratch: dict[tuple[int, int], float] = {}
@@ -1490,6 +1537,11 @@ class SessionTracker:
         self._placed = 0
         self.candidates = 0
         self.matched = 0
+        # Scans left on odometry because the match search was clipped. Counted
+        # rather than merely skipped: a handful is normal, a large share means
+        # the run is somewhere the matcher cannot see -- which is worth knowing
+        # from the log rather than by replaying the captures. See match_pose().
+        self.refused = 0
 
     # ── pendant le menage ────────────────────────────────────────────
 
@@ -1506,20 +1558,25 @@ class SessionTracker:
         self._raw.append((x, y))
         x, y, theta = x + self._dx, y + self._dy, theta + self._dth
         if self._matching and self._placed >= MATCH_SEED:
-            mx, my, mtheta = match_pose(self._scratch, x, y, theta, points)
-            self._dx += mx - x
-            self._dy += my - y
-            self._dth += mtheta - theta
-            if math.hypot(self._dx, self._dy) > MATCH_MAX_DRIFT_M:
-                # Runaway: stop correcting rather than invent a pose.
-                _LOGGER.debug(
-                    "scan matching gave up after %.2f m of drift",
-                    math.hypot(self._dx, self._dy),
-                )
-                self._dx = self._dy = self._dth = 0.0
-                self._matching = False
+            mx, my, mtheta, railed = match_pose(self._scratch, x, y, theta, points)
+            if railed:
+                # The search was clipped, so it found no optimum to move to.
+                # Odometry alone beats the edge of a window. See match_pose().
+                self.refused += 1
             else:
-                x, y, theta = mx, my, mtheta
+                self._dx += mx - x
+                self._dy += my - y
+                self._dth += mtheta - theta
+                if math.hypot(self._dx, self._dy) > MATCH_MAX_DRIFT_M:
+                    # Runaway: stop correcting rather than invent a pose.
+                    _LOGGER.debug(
+                        "scan matching gave up after %.2f m of drift",
+                        math.hypot(self._dx, self._dy),
+                    )
+                    self._dx = self._dy = self._dth = 0.0
+                    self._matching = False
+                else:
+                    x, y, theta = mx, my, mtheta
         for cell in project_scan(x, y, theta, points):
             self._scratch[cell] = self._scratch.get(cell, 0.0) + weight
 
