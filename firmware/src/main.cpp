@@ -46,11 +46,13 @@ bool webServerStarted = false;
 // the UART state machine, the LIDAR sampling loop, the history writer -- and
 // idle polling alone had never come close enough to show it.
 //
-// 16 KB rather than a measured minimum: the margin costs 8 KB of a heap that
-// idles at 150 KB free, and being wrong in this direction only wastes memory,
-// while being wrong in the other direction bricks the bridge for the length of a
-// cleaning. `loopStackFree` on /api/system reports the real high-water mark, so
-// this number can be argued with from data instead of guessed at again.
+// Measured on the cleaning of 2026-09-01 14:43, once /api/system could report it:
+// a cleaning drives this stack to **13172 bytes**, reached within ninety seconds
+// of leaving the dock and flat thereafter. Against the old 8192 that is not a
+// tight margin, it is five kilobytes over -- the overflow was certain, and the
+// hundred-odd bytes that 4268c0e added by taking a mutex in isBusy() are beside
+// the point. 16 KB leaves 3212 bytes spare, which `loopStackHwm` on /api/system
+// makes checkable on every cleaning rather than assumed.
 size_t getArduinoLoopTaskStackSize(void) {
     return 16384;
 }
