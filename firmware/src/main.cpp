@@ -35,6 +35,26 @@ WebServer webServer(server, neatoSerial, dataLogger, systemManager, firmwareMana
 // Tracks whether web server has been started (may be deferred if WiFi was slow at boot)
 bool webServerStarted = false;
 
+// The Arduino core gives loopTask 8 KB and declares this getter weak so a sketch
+// can say otherwise. 8 KB is not enough here.
+//
+// On 2026-09-01 14:34 the bridge entered a reboot loop the moment a cleaning
+// started -- a panic every twenty seconds, and the core dump named it outright:
+// vApplicationStackOverflowHook, reached from vTaskSwitchContext on the systick
+// interrupt. Not a wild pointer; FreeRTOS noticing loopTask had run off the end
+// of its stack. Everything that runs while cleaning sits on this one task --
+// the UART state machine, the LIDAR sampling loop, the history writer -- and
+// idle polling alone had never come close enough to show it.
+//
+// 16 KB rather than a measured minimum: the margin costs 8 KB of a heap that
+// idles at 150 KB free, and being wrong in this direction only wastes memory,
+// while being wrong in the other direction bricks the bridge for the length of a
+// cleaning. `loopStackFree` on /api/system reports the real high-water mark, so
+// this number can be argued with from data instead of guessed at again.
+size_t getArduinoLoopTaskStackSize(void) {
+    return 16384;
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000); // Wait for serial to be ready

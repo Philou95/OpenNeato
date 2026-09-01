@@ -81,6 +81,9 @@ void SystemManager::feedTaskWdt() {
 }
 
 void SystemManager::tick() {
+    // On loopTask, so nullptr means loopTask -- see the note in the header.
+    loopStackHwm = uxTaskGetStackHighWaterMark(nullptr);
+
     // Detect NTP sync transition
     if (!ntpSynced) {
         time_t t = time(nullptr);
@@ -206,6 +209,7 @@ std::vector<Field> SystemHealth::toFields() const {
             {"httpServedSlow", String(httpServedSlow), FIELD_INT},
             {"resetReason", resetReason, FIELD_STRING},
             {"bootCount", String(bootCount), FIELD_INT},
+            {"loopStackHwm", String(loopStackHwm), FIELD_INT},
     };
 }
 
@@ -226,6 +230,7 @@ SystemHealth SystemManager::getSystemHealth(const String& tz) const {
     h.tz = tz;
     h.resetReason = resetReason;
     h.bootCount = bootCount;
+    h.loopStackHwm = loopStackHwm;
 
     // Compute DST-aware local time string via localtime_r (same conversion the
     // scheduler uses). The POSIX TZ string applied via configTzTime() handles

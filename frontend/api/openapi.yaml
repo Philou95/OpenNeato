@@ -1612,6 +1612,38 @@ components:
         isDst:
           type: boolean
           description: True when daylight saving time is active
+        httpOldestPendingMs:
+          type: number
+          description: >
+            Age of the oldest HTTP request still in flight, in ms. What the
+            network watchdog watches: on 2026-08-28 heap and RSSI were both
+            healthy while nothing larger than 70 bytes could leave the device.
+        httpServedFast:
+          type: number
+          description: Requests served under the watchdog's threshold since boot
+        httpServedSlow:
+          type: number
+          description: Requests that took longer than that threshold since boot
+        resetReason:
+          type: string
+          description: >
+            Why this boot happened -- POWERON, EXT, SW_RESET, PANIC, INT_WDT,
+            TASK_WDT, WDT, DEEPSLEEP, BROWNOUT, SDIO or UNKNOWN. A brownout, a
+            panic and a watchdog bite are indistinguishable from outside, and
+            telling them apart is the difference between fixing the power supply
+            and fixing the code.
+        bootCount:
+          type: number
+          description: Boots since the counter was created, persisted in NVS
+        loopStackHwm:
+          type: number
+          description: >
+            Smallest free space the Arduino loop task's stack has ever had, as
+            returned by uxTaskGetStackHighWaterMark(). The default 8 KB stack
+            overflowed on 2026-09-01 once a cleaning put the LIDAR sampling loop
+            on the same task as the UART state machine; it is 16 KB now, and this
+            is how that number can be argued with from measurement rather than
+            guessed at again.
       required:
         - heap
         - heapTotal

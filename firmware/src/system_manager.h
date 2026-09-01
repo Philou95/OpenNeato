@@ -37,6 +37,13 @@ struct SystemHealth : public JsonSerializable {
     // not by default. Here it costs nothing and is always there.
     String resetReason;
     uint32_t bootCount = 0;
+    // Smallest free space loopTask's stack has ever had, as returned by
+    // uxTaskGetStackHighWaterMark(). Exposed because the bridge spent
+    // 2026-09-01 14:34 in a reboot loop from a stack overflow nobody could see
+    // coming: the default 8 KB was enough for idle polling and not enough once
+    // a cleaning put the LIDAR loop on the same task. A margin that is only ever
+    // discovered by exhausting it is not a margin.
+    uint32_t loopStackHwm = 0;
 
     std::vector<Field> toFields() const override;
 };
@@ -109,6 +116,11 @@ private:
     // leaves a trace.
     String resetReason;
     uint32_t bootCount = 0;
+
+    // Sampled in tick(), which runs on loopTask -- the task being measured.
+    // getSystemHealth() runs on the AsyncTCP task and would otherwise report the
+    // web server's stack instead.
+    uint32_t loopStackHwm = 0;
 
     NtpSyncCallback ntpSyncCallback;
 };
