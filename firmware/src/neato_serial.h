@@ -2,6 +2,8 @@
 #define NEATO_SERIAL_H
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <functional>
 #include <vector>
 #include "config.h"
@@ -138,14 +140,46 @@ public:
 
     // -- Status --------------------------------------------------------------
 
-    bool isBusy() const { return state != QUEUE_IDLE || !queue.empty(); }
-    int queueDepth() const { return static_cast<int>(queue.size()); }
+    // Both read `queue`, which the AsyncTCP task writes -- see queueMutex below.
+    bool isBusy() const;
+    int queueDepth() const;
 
 private:
     void tick() override; // Called every loop() iteration (intervalMs = 0 — UART state machine)
 
     HardwareSerial& uart = Serial1;
     std::vector<CommandEntry> queue;
+
+    // -- Two tasks, one queue ------------------------------------------------
+    //
+    // enqueue() runs on the **AsyncTCP** task: the HTTP handlers reach it in a
+    // straight line -- GET /api/error -> getErr() -> errCache.get() -> the
+    // fetcher -> enqueue() -> queue.insert(). tick(), dequeueNext() and
+    // queue.erase() run on the **Arduino loop** task. Until 2026-09-01 none of
+    // it was synchronised: the same defect AsyncCache had one layer up, and the
+    // same shape -- a std::vector mutated from both sides.
+    //
+    // What it leaves behind is a CommandEntry whose `command` String has a null
+    // buffer, and the outcome depends only on where that entry sits when
+    // erase() shifts the rest down a slot:
+    //
+    //   * as the *destination* of the shift it is simply overwritten, and the
+    //     command goes out empty. The robot echoes nothing that matches, the
+    //     bridge logs a desync and answers 504. Four times on 2026-08-31/09-01,
+    //     every one of them on /api/error.
+    //   * as the *source*, String::move() memmoves from address zero and the
+    //     device panics. Four times in the same window.
+    //
+    // Same rule as AsyncCache: the queue is only ever touched under this mutex,
+    // and **no callback is invoked while holding it** -- a rejected caller's
+    // callback is free to enqueue again.
+    //
+    // Created in-class rather than in the constructor because the caches above
+    // already do exactly this and have run for hours: FreeRTOS is up by the time
+    // static constructors execute.
+    mutable SemaphoreHandle_t queueMutex = xSemaphoreCreateMutex();
+    void takeQueue() const { xSemaphoreTake(queueMutex, portMAX_DELAY); }
+    void giveQueue() const { xSemaphoreGive(queueMutex); }
     QueueState state = QUEUE_IDLE;
     bool manualCleanActive = false;
 

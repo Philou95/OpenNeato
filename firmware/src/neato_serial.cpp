@@ -98,9 +98,10 @@ void NeatoSerial::tick() {
 
     switch (state) {
         case QUEUE_IDLE:
-            if (!queue.empty()) {
-                dequeueNext();
-            }
+            // No queue.empty() here: `queue` is written by the AsyncTCP task and
+            // reading it unlocked is the very thing this file now avoids.
+            // dequeueNext() makes the same check under the mutex.
+            dequeueNext();
             break;
 
         case QUEUE_SENDING:
@@ -189,28 +190,42 @@ bool NeatoSerial::enqueue(const String& command, std::function<void(bool, const 
         auto caller = reinterpret_cast<uint32_t>(__builtin_return_address(0));
         LOG("NEATO", "Rejecting empty command from 0x%08x", static_cast<unsigned>(caller));
         if (loggerCallback)
-            loggerCallback("<empty command from 0x" + String(caller, HEX) + ">", CMD_INVALID, 0, "",
-                           static_cast<int>(queue.size()), 0, 0);
+            loggerCallback("<empty command from 0x" + String(caller, HEX) + ">", CMD_INVALID, 0, "", queueDepth(), 0,
+                           0);
         if (callback)
             callback(false, "");
         return false;
     }
 
-    if (static_cast<int>(queue.size()) >= NEATO_QUEUE_MAX_SIZE) {
+    // Everything decided under the lock, everything *done* outside it. A rejected
+    // caller's callback is free to enqueue again, and firing it while holding the
+    // mutex would deadlock the first time it did.
+    int depth = 0;
+    bool full = false;
+
+    takeQueue();
+    depth = static_cast<int>(queue.size());
+    if (depth >= NEATO_QUEUE_MAX_SIZE) {
+        full = true;
+    } else {
+        // Lower number = higher priority. Keep FIFO order within same priority.
+        auto it = queue.begin();
+        for (; it != queue.end(); ++it) {
+            if (it->priority > priority)
+                break;
+        }
+        queue.insert(it, {command, static_cast<uint8_t>(priority), callback, waitForResponse});
+    }
+    giveQueue();
+
+    if (full) {
         LOG("NEATO", "Queue full, rejecting: %s", command.c_str());
         if (loggerCallback)
-            loggerCallback(command, CMD_QUEUE_FULL, 0, "", static_cast<int>(queue.size()), 0, 0);
+            loggerCallback(command, CMD_QUEUE_FULL, 0, "", depth, 0, 0);
         if (callback)
             callback(false, "");
         return false;
     }
-    // Lower number = higher priority. Keep FIFO order within same priority.
-    auto it = queue.begin();
-    for (; it != queue.end(); ++it) {
-        if (it->priority > priority)
-            break;
-    }
-    queue.insert(it, {command, static_cast<uint8_t>(priority), callback, waitForResponse});
     return true;
 }
 
@@ -221,14 +236,22 @@ std::function<void(bool, const String&)> NeatoSerial::wrapAction(std::function<v
 }
 
 void NeatoSerial::dequeueNext() {
-    if (queue.empty())
-        return;
+    // `entry` is copy-assigned, not move-assigned, and deliberately so: copying a
+    // String checks the source buffer for null, moving one does not.
+    CommandEntry entry;
 
+    takeQueue();
+    if (queue.empty()) {
+        giveQueue();
+        return;
+    }
     // Capture queue depth before dequeue (for logging)
     queueDepthAtStart = static_cast<int>(queue.size());
-
-    CommandEntry entry = queue.front();
+    entry = queue.front();
+    // The shift this performs is what read address zero on 2026-08-31; it must
+    // not run while the AsyncTCP task is inserting.
     queue.erase(queue.begin());
+    giveQueue();
 
     currentCommand = entry.command;
     currentCallback = entry.callback;
@@ -236,6 +259,24 @@ void NeatoSerial::dequeueNext() {
     responseBuffer = "";
 
     state = QUEUE_SENDING;
+}
+
+// Both are called from the AsyncTCP task (HTTP handlers) as well as the loop
+// task, so both read the queue under the mutex. `state` is written only by the
+// loop task and is read here unlocked: a torn read of an enum can only make
+// isBusy() briefly disagree, which no caller acts on irreversibly.
+bool NeatoSerial::isBusy() const {
+    takeQueue();
+    bool busy = !queue.empty();
+    giveQueue();
+    return state != QUEUE_IDLE || busy;
+}
+
+int NeatoSerial::queueDepth() const {
+    takeQueue();
+    int depth = static_cast<int>(queue.size());
+    giveQueue();
+    return depth;
 }
 
 void NeatoSerial::flushUartRx() {
