@@ -610,6 +610,29 @@ bool parseRobotState(const String& raw, RobotState& out) {
     return out.uiState.length() > 0;
 }
 
+// The 201-242 band is nominally "informational", and mostly is -- a full bin,
+// a brush due for a change. But the persistent-map failures live in it too,
+// and those are not information: on 2026-09-02 alert 234
+// (UI_ALERT_PM_LOAD_FAIL) stopped every cleaning on this robot for 26 hours
+// while the UI reported it as a warning. Classify by token, not by range, so a
+// blocker reads as one.
+static const char *const BLOCKING_ALERTS[] = {
+        "UI_ALERT_PM_LOAD_FAIL", // measured: refuses to leave the dock
+        "UI_ALERT_PM_SETUP_FAIL", // same subsystem, same start-time failure
+        "UI_ALERT_PM_START_CLEAN_FAIL", // names the thing it prevents
+        "UI_ALERT_PERSISTENT_RELOCALIZATION_FAIL",
+};
+
+static String classifyAlert(int code, const String& raw) {
+    if (code < 201 || code > 242)
+        return "error";
+    for (const char *token: BLOCKING_ALERTS) {
+        if (raw.indexOf(token) >= 0)
+            return "error";
+    }
+    return "warning";
+}
+
 bool parseErrorData(const String& raw, ErrorData& out) {
     // Empty or whitespace-only response = no error
     String trimmed = raw;
@@ -647,7 +670,7 @@ bool parseErrorData(const String& raw, ErrorData& out) {
             if (code > 0 && code != 200) {
                 out.hasError = true;
                 out.errorCode = code;
-                out.kind = (code >= 201 && code <= 242) ? "warning" : "error";
+                out.kind = classifyAlert(code, trimmed);
                 out.errorMessage = trimmed;
                 out.displayMessage = lookupDisplayMessage(trimmed);
                 if (out.displayMessage.isEmpty()) {
