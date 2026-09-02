@@ -60,6 +60,17 @@ ICP_POINT_STRIDE = 2
 
 LOOP_MIN_GAP = 40          # minimum scans apart to call it a revisit
 LOOP_MAX_DIST_M = 1.2      # beyond this the two scans do not see the same thing
+# Every candidate costs one ICP, and that is where the whole refinement budget
+# goes. Measured on the real trajectory of 02/09 (1754 poses): the unbounded
+# search returns 192 390 pairs, and the count grows faster than the session
+# does -- 7 per pose at an eighth of the run, 110 per pose at the end. The
+# optimiser needs nothing like that many: refine_poses only asks for n/4
+# accepted closures, so eight offers per pose leaves a factor of thirty of
+# headroom while cutting the ICP count by ~14x.
+LOOP_MAX_PER_NODE = 8      # revisits kept per scan, closest first
+# Consecutive indices describe the same revisit and constrain the graph twice
+# for twice the cost. Kept partners must be this far apart.
+LOOP_MIN_SEPARATION = 20
 
 # A wrong closure link is worse than no link: it drags the whole trajectory
 # towards an invented position. Hence a double rejection, on the residual AND
@@ -308,17 +319,32 @@ def clouds(scans, max_range_m, lidar_behind_m):
     return out
 
 
-def loop_candidates(poses, min_gap=LOOP_MIN_GAP, max_dist=LOOP_MAX_DIST_M):
+def loop_candidates(
+    poses,
+    min_gap=LOOP_MIN_GAP,
+    max_dist=LOOP_MAX_DIST_M,
+    per_node=LOOP_MAX_PER_NODE,
+    min_sep=LOOP_MIN_SEPARATION,
+):
     """Scan pairs close in space and far apart in time.
 
     That is the definition of a revisit: the robot passes where it has already
     been, late enough that its pose has drifted in between.
+
+    Bounded to `per_node` partners per scan, closest first, and no two kept
+    partners within `min_sep` of each other. Unbounded, a thorough run offers
+    tens of thousands of pairs per hundred poses and refine_poses spends an ICP
+    on every one -- the cost is quadratic in how densely the robot revisits
+    itself, which is exactly what improves as the map gets better. Keeping the
+    tightest few loses nothing: a borderline pair is the one ICP rejects
+    anyway, and near-duplicate partners constrain the same revisit twice.
     """
     lim = max_dist * max_dist
     out = []
     n = len(poses)
     for a in range(n):
         xa, ya = poses[a][0], poses[a][1]
+        near = []
         for b in range(a + min_gap, n):
             dx = poses[b][0] - xa
             if dx > max_dist or dx < -max_dist:
@@ -326,7 +352,17 @@ def loop_candidates(poses, min_gap=LOOP_MIN_GAP, max_dist=LOOP_MAX_DIST_M):
             dy = poses[b][1] - ya
             d2 = dx * dx + dy * dy
             if d2 <= lim:
-                out.append((a, b))
+                near.append((d2, b))
+        if not near:
+            continue
+        near.sort()
+        kept = []
+        for _d2, b in near:
+            if all(abs(b - k) >= min_sep for k in kept):
+                kept.append(b)
+                if len(kept) >= per_node:
+                    break
+        out.extend((a, b) for b in kept)
     return out
 
 
@@ -348,31 +384,56 @@ def refine_poses(scans, poses, max_range_m, lidar_behind_m):
         return None
 
     cl = clouds(scans, max_range_m, lidar_behind_m)
+
+    # Odometry: the trajectory as scan-to-map matching established it.
+    odometry = [
+        (k, k + 1, relative(poses[k], poses[k + 1]), 1.0)
+        for k in range(n - 1)
+    ]
+
+    def close_loops(cands):
+        """Run one ICP per candidate; return the accepted edges and residuals."""
+        found, residuals = [], []
+        for a, b in cands:
+            z0 = relative(poses[a], poses[b])
+            x, y, th, res, fit = icp(cl[b], cl[a], z0[0], z0[1], z0[2])
+            if fit < ACCEPT_MIN_FIT or res > ACCEPT_MAX_RES_M:
+                continue
+            # Weight: a tight agreement counts for more than a borderline one.
+            w = min(
+                2.0,
+                (fit / ACCEPT_MIN_FIT) * (ACCEPT_MAX_RES_M / max(res, 1e-3)) * 0.25,
+            )
+            found.append((a, b, (x, y, th), w))
+            residuals.append(res)
+        return found, residuals
+
+    # Bounded search first -- it is ~20x cheaper. Widening only happens if the
+    # narrow set genuinely cannot constrain the graph, so the common case pays
+    # the cheap path and the rare one is no worse off than before the bound.
     cands = loop_candidates(poses)
     if not cands:
         _LOGGER.info("SLAM: no revisit found over %d scans", n)
         return None
+    closures, residuals = close_loops(cands)
 
-    # Odometry: the trajectory as scan-to-map matching established it.
-    edges = [
-        (k, k + 1, relative(poses[k], poses[k + 1]), 1.0)
-        for k in range(n - 1)
-    ]
-    n_odo = len(edges)
-    residuals = []
-    for a, b in cands:
-        z0 = relative(poses[a], poses[b])
-        x, y, th, res, fit = icp(cl[b], cl[a], z0[0], z0[1], z0[2])
-        if fit < ACCEPT_MIN_FIT or res > ACCEPT_MAX_RES_M:
-            continue
-        # Weight: a tight agreement counts for more than a borderline one.
-        w = min(
-            2.0,
-            (fit / ACCEPT_MIN_FIT) * (ACCEPT_MAX_RES_M / max(res, 1e-3)) * 0.25,
+    if len(closures) < n // 4:
+        # Only per_node grows. Relaxing min_sep as well would let the greedy
+        # pick fill its quota with different, closer-together partners, and the
+        # widened set would then *drop* pairs the narrow pass had accepted --
+        # checked against the real trajectory, and it is not a superset that
+        # way. Same separation, deeper quota, is.
+        wider = loop_candidates(poses, per_node=LOOP_MAX_PER_NODE * 4)
+        _LOGGER.info(
+            "SLAM: %d closures of %d candidates, short of the %d needed -- "
+            "widening the search to %d candidates",
+            len(closures), len(cands), n // 4, len(wider),
         )
-        edges.append((a, b, (x, y, th), w))
-        residuals.append(res)
+        cands = wider
+        closures, residuals = close_loops(cands)
 
+    edges = odometry + closures
+    n_odo = len(odometry)
     kept = len(edges) - n_odo
     if kept < n // 4:
         _LOGGER.info(
