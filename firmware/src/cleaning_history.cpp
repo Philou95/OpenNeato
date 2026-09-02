@@ -1,4 +1,5 @@
 #include "cleaning_history.h"
+#include "fs_lock.h"
 #include "json_fields.h"
 #include "neato_serial.h"
 #include "system_manager.h"
@@ -284,6 +285,11 @@ String CleaningHistory::takeScanBatch(uint32_t after) {
 }
 
 void CleaningHistory::tick() {
+    // Everything below touches SPIFFS from the loop task. AsyncTCP reaches the
+    // same device through readSession() and LogReader::read(), so the two are
+    // serialised here rather than at each of the 83 call sites.
+    FsLock lock;
+
     // Before any early return: a reader must be able to drain the buffer even
     // while the session is compressing or a serial fetch is latched.
     serviceScanBuffer();
@@ -1443,6 +1449,7 @@ bool CleaningHistory::isWatched() const {
 }
 
 std::shared_ptr<LogReader> CleaningHistory::readSession(const String& filename) {
+    FsLock lock; // runs on AsyncTCP, against the loop's snapshot writes
     String path = String(HISTORY_DIR) + "/" + filename;
 
     // Someone is following the run in progress. Note the time so the loop
@@ -1471,6 +1478,7 @@ std::shared_ptr<LogReader> CleaningHistory::readSession(const String& filename) 
 }
 
 bool CleaningHistory::deleteSession(const String& filename) {
+    FsLock lock; // delete from an HTTP handler
     String path = String(HISTORY_DIR) + "/" + filename;
     if (!SPIFFS.exists(path))
         return false;
@@ -1480,6 +1488,7 @@ bool CleaningHistory::deleteSession(const String& filename) {
 }
 
 void CleaningHistory::deleteAllSessions() {
+    FsLock lock; // delete from an HTTP handler
     File root = SPIFFS.open(HISTORY_DIR);
     if (!root || !root.isDirectory())
         return;
@@ -1502,6 +1511,7 @@ void CleaningHistory::deleteAllSessions() {
 // -- Session import (compress-on-write from browser upload) -------------------
 
 bool CleaningHistory::beginImport(const String& filename) {
+    FsLock lock; // import runs on AsyncTCP
     importError = "";
 
     if (importing) {
@@ -1548,6 +1558,7 @@ bool CleaningHistory::beginImport(const String& filename) {
 }
 
 bool CleaningHistory::writeImportChunk(const uint8_t *data, size_t len) {
+    FsLock lock; // import runs on AsyncTCP
     if (!importing || !importFile) {
         importError = "No import in progress";
         return false;
@@ -1599,6 +1610,7 @@ bool CleaningHistory::writeImportChunk(const uint8_t *data, size_t len) {
 }
 
 bool CleaningHistory::endImport() {
+    FsLock lock; // import runs on AsyncTCP
     if (!importing || !importFile) {
         importError = "No import in progress";
         return false;

@@ -1,6 +1,7 @@
 #ifndef DATA_LOGGER_H
 #define DATA_LOGGER_H
 
+#include "fs_lock.h"
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 #include <SPIFFS.h>
@@ -44,7 +45,10 @@ struct PlainLogReader : public LogReader {
         if (file)
             file.close();
     }
-    size_t read(uint8_t *buffer, size_t maxLen) override { return file.read(buffer, maxLen); }
+    size_t read(uint8_t *buffer, size_t maxLen) override {
+        FsLock lock; // AsyncTCP streams this while the loop writes snapshots
+        return file.read(buffer, maxLen);
+    }
 };
 
 // Buffered log reader — serves file content followed by unflushed

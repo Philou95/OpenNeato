@@ -1,4 +1,5 @@
 #include "data_logger.h"
+#include "fs_lock.h"
 #include <esp_core_dump.h>
 #include "neato_serial.h"
 #include "system_manager.h"
@@ -9,6 +10,7 @@
 // -- CompressedLogReader (streaming decompression) ---------------------------
 
 size_t CompressedLogReader::read(uint8_t *buffer, size_t maxLen) {
+    FsLock lock; // AsyncTCP streams this while the loop writes snapshots
     if (finished)
         return 0;
 
@@ -63,6 +65,7 @@ size_t CompressedLogReader::read(uint8_t *buffer, size_t maxLen) {
 // -- BufferedLogReader (file + unflushed buffer) -----------------------------
 
 size_t BufferedLogReader::read(uint8_t *buffer, size_t maxLen) {
+    FsLock lock; // AsyncTCP streams this while the loop writes snapshots
     size_t total = 0;
 
     // Phase 1: drain the file
@@ -139,6 +142,7 @@ void DataLogger::begin() {
 }
 
 void DataLogger::tick() {
+    FsLock lock; // loop task, same device as the readers above
     // Flush write buffer to filesystem when interval elapsed or buffer full
     if (!writeBuffer.empty()) {
         bool intervalElapsed = millis() - lastFlushMs >= LOG_FLUSH_INTERVAL_MS;
@@ -695,6 +699,7 @@ std::vector<LogFileInfo> DataLogger::listLogs() {
 }
 
 std::shared_ptr<LogReader> DataLogger::readLog(const String& filename) {
+    FsLock lock; // runs on AsyncTCP
     if (!fsReady)
         return nullptr;
 
@@ -731,6 +736,7 @@ std::shared_ptr<LogReader> DataLogger::readLog(const String& filename) {
 }
 
 bool DataLogger::deleteLog(const String& filename) {
+    FsLock lock; // runs on AsyncTCP
     if (!fsReady)
         return false;
 
@@ -745,6 +751,7 @@ bool DataLogger::deleteLog(const String& filename) {
 }
 
 void DataLogger::deleteAllLogs() {
+    FsLock lock; // runs on AsyncTCP
     if (!fsReady)
         return;
 
