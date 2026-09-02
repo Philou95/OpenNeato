@@ -1590,16 +1590,40 @@ class SessionTracker:
         self._close_loops(k)
 
     def _close_loops(self, k: int) -> None:
-        """The revisits this scan closes against the earlier ones."""
+        """The revisits this scan closes against the earlier ones.
+
+        Bounded to the closest slam.LOOP_MAX_PER_NODE earlier scans, no two
+        within slam.LOOP_MIN_SEPARATION of each other. Unbounded, this is the
+        quadratic term the class docstring warns about: every arriving scan
+        ICPs against every earlier one it passes near, so a longer or more
+        thorough run costs more than proportionally more. Spreading that over
+        the cleaning, which is what this class does, moves the cost without
+        reducing it -- 5656 closures of 8637 candidates on run6, and it grows.
+
+        The closest revisits are also the ones ICP accepts: 65% of candidates
+        were kept unbounded, and near-duplicate partners constrain the same
+        revisit several times over for the same price each.
+        """
         xk, yk = self._poses[k][0], self._poses[k][1]
         lim = slam.LOOP_MAX_DIST_M * slam.LOOP_MAX_DIST_M
+        near = []
         for j in range(k - slam.LOOP_MIN_GAP + 1):
             dx = self._poses[j][0] - xk
             if dx > slam.LOOP_MAX_DIST_M or dx < -slam.LOOP_MAX_DIST_M:
                 continue
             dy = self._poses[j][1] - yk
-            if dx * dx + dy * dy > lim:
+            d2 = dx * dx + dy * dy
+            if d2 > lim:
                 continue
+            near.append((d2, j))
+        near.sort()
+        chosen: list[int] = []
+        for _d2, j in near:
+            if all(abs(j - c) >= slam.LOOP_MIN_SEPARATION for c in chosen):
+                chosen.append(j)
+                if len(chosen) >= slam.LOOP_MAX_PER_NODE:
+                    break
+        for j in chosen:
             self.candidates += 1
             z0 = slam.relative(self._poses[j], self._poses[k])
             px, py, pth, res, fit = slam.icp(
