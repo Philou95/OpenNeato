@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.7.1";
+const CARD_VERSION = "2.7.2";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -1286,6 +1286,13 @@ class OpenNeatoReplayCard extends HTMLElement {
         // Navigation mode, recorded per session by the firmware since the
         // header gained "nav". Sessions taped before that simply omit it.
         if (info.nav) bits.push(info.nav);
+        // A finished run whose summary cannot be read drops every figure below
+        // and comes out looking exactly like one still being written -- which
+        // is how Philou read it on 03/09, and he was right to: nothing on the
+        // line said otherwise. The summary is the last record in the file, so
+        // losing it means the recording is damaged, and a replay that stops
+        // early is the visible half of that. Say it on the line itself.
+        if (!s.summary) bits.push("recording damaged");
         if (sum.areaCovered) bits.push(`${sum.areaCovered} m²`);
         if (sum.distanceTraveled) bits.push(`${sum.distanceTraveled} m`);
         if (sum.duration) bits.push(formatClock(sum.duration));
