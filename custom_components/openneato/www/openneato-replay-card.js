@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.5.3";
+const CARD_VERSION = "2.7.1";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -296,6 +296,14 @@ class OpenNeatoReplayCard extends HTMLElement {
         this._planSig = null;
         // Deadline for the "map being rebuilt" notice, see _watchTick().
         this._mergeUntil = 0;
+        // Deadline for the *other* wait, which is not a merge and must not be
+        // announced as one: the firmware goes on compressing the run for about
+        // three quarters of a minute after the map has been rebuilt, and the
+        // replay is unreadable that whole time. Measured 03/09/2026 -- merge
+        // done 12:52:15, session readable 12:53:04. Kept apart from
+        // `_mergeUntil` so the two windows can say different things while both
+        // asking for the fast tick.
+        this._awaitingUntil = 0;
         this._wasRecording = false;
         // The robot answered nothing last time we asked. Kept apart from the
         // merge window because the two say different things and share one
@@ -949,7 +957,10 @@ class OpenNeatoReplayCard extends HTMLElement {
                 const cx = u.x + w / 2;
                 const cy = u.y + h / 2;
                 const factor = Math.exp(-e.deltaY * 0.0015);
-                const wanted = Math.min(8, Math.max(1, this._tf.zoom * factor));
+                // Down to _minZoom(), not to 1. The card already had a floor of
+                // its own and the wheel refused to reach it: below the fit is
+                // where you go to see the whole plan with room around it.
+                const wanted = Math.min(8, Math.max(this._minZoom(), this._tf.zoom * factor));
                 const next = this._snapZoom(wanted);
                 const applied = next / this._tf.zoom;
                 // Keep the world point under the cursor fixed across the zoom.
@@ -999,6 +1010,11 @@ class OpenNeatoReplayCard extends HTMLElement {
             // one -- so this only ever needed the filter lifting.
             this._sessions = res.sessions || [];
             this._planSig = planSignature(res.floorplan);
+            // The backend knows a merge is running; a page opened after the
+            // robot docked never watched the run end and so could not work it
+            // out. Taken here, on the very first listing, because this is the
+            // load that used to sit on an error at the twenty-second rate.
+            if (res.merging) this._mergeUntil = Date.now() + MERGE_WAIT_MS;
             if (this._sessions.length === 0) {
                 this._fail("No cleaning sessions yet");
                 // Still watch: the first clean of a new install has to be able
@@ -1041,6 +1057,9 @@ class OpenNeatoReplayCard extends HTMLElement {
         // and both deserve an answer sooner than twenty seconds.
         if (recording || this._wasRecording) delay = LIVE_REFRESH_MS;
         else if (Date.now() < this._mergeUntil) delay = MERGE_POLL_MS;
+        // Waiting on the firmware to finish filing the run is just as much a
+        // reason to keep asking as waiting on the merge.
+        else if (Date.now() < this._awaitingUntil) delay = MERGE_POLL_MS;
         this._liveTimer = setTimeout(() => this._watchTick(), delay);
     }
 
@@ -1074,6 +1093,21 @@ class OpenNeatoReplayCard extends HTMLElement {
             // ever built is exactly the change worth reacting to.
             const planChanged = planSig !== this._planSig;
             this._planSig = planSig;
+            // The backend knows whether a merge is running; the card only ever
+            // guessed. Where it speaks, it decides -- in both directions, which
+            // is the half that was missing: the notice used to be armed by the
+            // guess below and had nothing to take it down again until its own
+            // five-minute deadline.
+            //
+            // `=== false` rather than falsy: a backend too old to send the
+            // field must leave the guess in charge, not be read as "no merge".
+            if (res.merging === true && !this._mergeUntil) {
+                this._mergeUntil = Date.now() + MERGE_WAIT_MS;
+                this._updateNotice();
+            } else if (res.merging === false && this._mergeUntil) {
+                this._mergeUntil = 0;
+                this._updateNotice();
+            }
             const live = this._sessions.find((s) => s.recording);
             this._noLiveTicks = live ? 0 : this._noLiveTicks + 1;
 
@@ -1110,9 +1144,19 @@ class OpenNeatoReplayCard extends HTMLElement {
             // being written. A run ending and the bridge going quiet in the
             // far corner of the house look identical from here, and only one
             // of them is followed by a merge.
+            //
+            // ⚠ The listing this reads lags the merge badly. The firmware only
+            // stops calling a run "recording" once it has finished compressing
+            // it, which on 03/09/2026 was 12:53:03 -- 48 s after the map had
+            // been rebuilt at 12:52:14.9. So by the time this fires, the merge
+            // it is predicting has usually already happened, and it would put
+            // the notice back up for five minutes with nothing left to clear
+            // it. Only guess where the backend has not answered.
             if (!live && this._wasRecording && this._noLiveTicks >= 2) {
                 this._wasRecording = false;
-                this._mergeUntil = Date.now() + MERGE_WAIT_MS;
+                if (res.merging !== false) {
+                    this._mergeUntil = Date.now() + MERGE_WAIT_MS;
+                }
                 this._updateNotice();
             }
 
@@ -1167,7 +1211,15 @@ class OpenNeatoReplayCard extends HTMLElement {
             // it is: the listing is answered from Home Assistant's own cache
             // and so proves nothing about the radio, and this fetch is the
             // only thing that does. It is what takes the notice back down.
-            if (current.recording || this._offline) {
+            //
+            // And whenever there is nothing on screen. A page opened during
+            // the minute the firmware spends compressing a run gets
+            // `session_gone` for it, and neither of the two conditions above
+            // is then true: the run is finished, the robot answered perfectly
+            // well. The card had no map, no reason to ask again, and stayed on
+            // that message until the viewer reloaded the page -- which is the
+            // whole reason the map "never updated" after a cleaning.
+            if (current.recording || this._offline || !this._session) {
                 // Keep the viewer's pan, zoom and scrub position: this is a
                 // background refresh, not a fresh selection.
                 await this._selectSession(current.name, { keepView: true });
@@ -1284,6 +1336,8 @@ class OpenNeatoReplayCard extends HTMLElement {
             }
             this._session = new Session(raw);
             this._offline = false;
+            // Whatever we were waiting for has arrived.
+            this._awaitingUntil = 0;
             this._updateNotice();
             if (!keepView) this._tf = { panX: 0, panY: 0, zoom: 1 };
             this._cov.sig = "";
@@ -1326,6 +1380,27 @@ class OpenNeatoReplayCard extends HTMLElement {
                 this._selectedName = previousName;
                 this._loading = false;
                 this._restoreDom();
+                this._updateNotice();
+            } else if (err && err.code === "session_gone") {
+                // A page opened in the minute the firmware spends compressing
+                // the run it has just recorded. The backend goes out of its
+                // way to mark this "not a fault" -- and the two branches above
+                // honoured that only for a card that already had a map on
+                // screen. A page just opened never has one, so it fell through
+                // to the raw backend text, "Session <name> is no longer on the
+                // robot", which reads like the map has been lost.
+                //
+                // Not `_fail`: nothing has failed, the run is a few seconds
+                // from being readable under its new name. Keep the name -- it
+                // survives the rename, `stableName` matches both -- and let
+                // the watch bring it in.
+                this._setOverlay("The last cleaning is still being filed by the robot…");
+                this._enableControls(false);
+                // `_awaitingUntil`, not `_mergeUntil`: this wait outlives the
+                // merge by three quarters of a minute, and calling it a merge
+                // is what left "Rebuilding the map…" on screen long after the
+                // map had been rebuilt.
+                this._awaitingUntil = Date.now() + MERGE_WAIT_MS;
                 this._updateNotice();
             } else if (err && err.code === "fetch_failed") {
                 // Nothing to fall back on -- the page was opened while the
@@ -1438,6 +1513,12 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._setNotice(this._offline
                 ? "Rebuilding the map — the robot is not answering yet"
                 : "Rebuilding the map…");
+        } else if (Date.now() < this._awaitingUntil) {
+            // The map is already rebuilt and on screen -- what is still coming
+            // is the run's own replay, which the firmware is compressing. Two
+            // different waits, and saying "rebuilding" for this one is a plain
+            // untruth about work that has finished.
+            this._setNotice("Filing the last cleaning…");
         } else if (this._offline) {
             this._setNotice("Robot not answering — showing the last map");
         } else {
@@ -1972,33 +2053,58 @@ class OpenNeatoReplayCard extends HTMLElement {
         return cellM * (this._projScale || 0) * dpr;
     }
 
-    _minZoom() {
-        const unit = this._zoomUnit();
-        return unit > 0 ? Math.max(2, Math.round(unit)) / unit : 1;
+    /* How many cells _lattice() puts in one drawn square at this zoom. */
+    _groupAt(zoom) {
+        const raw = this._zoomUnit() * zoom;
+        return Math.max(1, Math.ceil(MIN_SQUARE_PX / Math.max(raw, 0.001)));
     }
 
-    // The zoom that makes the cell step a whole number of device pixels,
-    // without the one-notch nudge a gesture needs.
-    _quantiseZoom(zoom) {
+    /* Snap onto the ladder of zooms that land the *drawn square* on a whole
+       number of device pixels.
+
+       ⚠ The unit here is the grouped square, not the single cell, and that is
+       the whole correction. _lattice() never draws one cell: it groups them
+       until the square clears MIN_SQUARE_PX. Quantising the single cell was
+       therefore quantising something the renderer does not draw, and since the
+       group is 2 on this map it made only every *second* rung reachable.
+       Measured on Philou's map, 03/09/2026 -- cells 2.5 cm, 111.7 px/m, dpr 1,
+       so 2.79 px per cell and 5.59 per square:
+
+         reachable before   1.0741x (crops the plan by 13 px of 810)
+                            0.7160x (throws away 28% of the scale)
+         skipped between    0.8951x  <- exact, whole plan, 124 px to spare
+
+       He asked for it in one line: "y'a pas de zoom intermediaire possible
+       entre trop zoome et trop dezoome ?". There was, and the arithmetic was
+       hiding it. */
+    _quantiseZoom(zoom, roundFn = Math.round) {
         const unit = this._zoomUnit();
         if (!(unit > 0)) return zoom;
-        const period = Math.min(
-            Math.round(unit * 8),
-            Math.max(Math.max(2, Math.round(unit)), Math.max(2, Math.round(unit * zoom))),
-        );
-        return period / unit;
+        const u = unit * this._groupAt(zoom);
+        const period = Math.max(MIN_SQUARE_PX, roundFn(u * zoom));
+        return Math.min(8, period / u);
+    }
+
+    /* The largest exact rung at or below the fit -- the whole plan, drawn on a
+       lattice that lands on whole pixels. Flooring rather than rounding is what
+       stops the card zooming *into* a view that was solved to fit exactly. */
+    _minZoom() {
+        const unit = this._zoomUnit();
+        if (!(unit > 0)) return 1;
+        return Math.min(1, this._quantiseZoom(1, Math.floor));
     }
 
     _snapZoom(zoom) {
         const unit = this._zoomUnit();
         if (!(unit > 0)) return zoom;
-        const current = Math.max(2, Math.round(unit * this._tf.zoom));
-        let period = Math.max(2, Math.round(unit * zoom));
+        const u = unit * this._groupAt(zoom);
+        const current = Math.max(MIN_SQUARE_PX, Math.round(u * this._tf.zoom));
+        let period = Math.max(MIN_SQUARE_PX, Math.round(u * zoom));
         // A small notch can round to the period already in use, which would
         // read as the zoom being stuck. Always move at least one pixel.
         if (period === current) period = zoom > this._tf.zoom ? current + 1 : current - 1;
-        period = Math.min(Math.round(unit * 8), Math.max(Math.max(2, Math.round(unit)), period));
-        return period / unit;
+        period = Math.max(MIN_SQUARE_PX, period);
+        return Math.max(this._minZoom(), Math.min(8, period / u));
     }
 
     // Where a map cell lands on screen, laid out from the data's own indices.
@@ -2109,7 +2215,25 @@ class OpenNeatoReplayCard extends HTMLElement {
         // first wheel notch because that snapped the zoom -- quantising it
         // here means the first frame is already on the grid every later one
         // uses.
-        const quantised = this._quantiseZoom(this._tf.zoom);
+        //
+        // ⚠ But never *upward* from the fitted zoom. 1 is the value
+        // _projection() was solved for -- the one that makes the whole plan
+        // fit the frame -- and snapping it up to the next whole-pixel step is
+        // what cropped the plan the fit had just been computed to contain:
+        // 2.79 px per cell rounded to 3, the map was drawn at 1.074x, and it
+        // overflowed by 13 px of 810, touching on both sides. Philou reported
+        // it as "je n'arrive pas a afficher la totalite du plan".
+        //
+        // ⚠ Leaving the fit unquantised was tried and is wrong: the lattice
+        // rounds its period whatever the zoom does, so an unrounded zoom just
+        // moves the mismatch into the drawing, where the squares drift out of
+        // step with the cells they stand for and the map reads as a bad weave.
+        // Philou, in three words: "quadrillage pas beau". The zoom has to be
+        // exact; it is *which way it is rounded* that was the bug.
+        const quantised = this._quantiseZoom(
+            this._tf.zoom,
+            this._tf.zoom <= 1 ? Math.floor : Math.round,
+        );
         if (quantised !== this._tf.zoom) this._tf.zoom = quantised;
         const tNow = this._time;
 
