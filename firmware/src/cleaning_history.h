@@ -225,8 +225,21 @@ private:
     bool compressInputDone = false;
     String compressSrcPath;
     String compressDstPath;
+    // compressStep() returns true both when it finishes and when it gives up,
+    // and the caller used to treat the two the same -- so a failed compression
+    // deleted the raw .jsonl exactly like a good one. That is what made the
+    // corruption of 2026-09-03 unrecoverable: the only intact copy of the run
+    // was removed a few milliseconds after the compressed one came out short.
+    bool compressFailed = false;
+    // Bytes handed to the encoder, against bytes it wrote out. Not a checksum
+    // -- it cannot say the stream decodes -- but it catches the failure that
+    // actually happened, which is output silently going missing.
+    size_t compressBytesIn = 0;
+    size_t compressBytesOut = 0;
+    size_t compressSrcSize = 0;
 
-    bool compressStep(); // Returns true when done
+    bool compressStep(); // Returns true when done or on failure; see compressFailed
+    bool abortCompression(const char *why);
 
     // -- Collection lifecycle ------------------------------------------------
     void checkState();

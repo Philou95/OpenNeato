@@ -155,16 +155,22 @@ void DataLogger::tick() {
     // Incremental compression (one chunk per loop iteration)
     if (compressing) {
         if (compressStep()) {
-            // Compression complete — clean up source file
-            compressSrc.close();
-            compressDst.close();
+            // Only on success. compressStep() returns true when it gives up as
+            // well, and the error paths keep the renamed archive on purpose --
+            // it is the uncompressed fallback. Deleting it here regardless is
+            // the defect that cost a cleaning replay in cleaning_history.cpp on
+            // 2026-09-03; the failure itself is already logged where it happens.
+            if (!compressFailed) {
+                compressSrc.close();
+                compressDst.close();
 
-            LOG("DLOG", "Compressed %u -> %u bytes (%.0f%%)", compressTotalIn, compressTotalOut,
-                compressTotalIn > 0
-                        ? (100.0f * static_cast<float>(compressTotalOut) / static_cast<float>(compressTotalIn))
-                        : 0.0f);
+                LOG("DLOG", "Compressed %u -> %u bytes (%.0f%%)", compressTotalIn, compressTotalOut,
+                    compressTotalIn > 0
+                            ? (100.0f * static_cast<float>(compressTotalOut) / static_cast<float>(compressTotalIn))
+                            : 0.0f);
 
-            SPIFFS.remove(pendingSrcPath);
+                SPIFFS.remove(pendingSrcPath);
+            }
             compressing = false;
         }
     }
@@ -285,6 +291,7 @@ void DataLogger::startCompression() {
     compressInputDone = false;
     compressTotalIn = 0;
     compressTotalOut = 0;
+    compressFailed = false;
     compressing = true;
 }
 
@@ -312,6 +319,7 @@ bool DataLogger::compressStep() {
                     compressDst.close();
                     SPIFFS.remove(pendingDstPath);
                     compressing = false;
+                    compressFailed = true;
                     // Fall back to uncompressed archive (source already renamed)
                     return true;
                 }
@@ -329,10 +337,22 @@ bool DataLogger::compressStep() {
                         compressDst.close();
                         SPIFFS.remove(pendingDstPath);
                         compressing = false;
+                        compressFailed = true;
                         return true;
                     }
                     if (outSz > 0) {
-                        compressDst.write(outBuf, outSz);
+                        // Unchecked, this loses bytes out of the middle of a
+                        // heatshrink stream and every byte after them decodes
+                        // against the wrong back-references.
+                        if (compressDst.write(outBuf, outSz) != outSz) {
+                            LOG("DLOG", "Short write, aborting compression");
+                            compressSrc.close();
+                            compressDst.close();
+                            SPIFFS.remove(pendingDstPath);
+                            compressing = false;
+                            compressFailed = true;
+                            return true;
+                        }
                         compressTotalOut += outSz;
                     }
                 } while (pres == HSER_POLL_MORE);
@@ -349,6 +369,7 @@ bool DataLogger::compressStep() {
         compressDst.close();
         SPIFFS.remove(pendingDstPath);
         compressing = false;
+        compressFailed = true;
         return true;
     }
 
@@ -363,10 +384,19 @@ bool DataLogger::compressStep() {
             compressDst.close();
             SPIFFS.remove(pendingDstPath);
             compressing = false;
+            compressFailed = true;
             return true;
         }
         if (outSz > 0) {
-            compressDst.write(outBuf, outSz);
+            if (compressDst.write(outBuf, outSz) != outSz) {
+                LOG("DLOG", "Short write during finish, aborting compression");
+                compressSrc.close();
+                compressDst.close();
+                SPIFFS.remove(pendingDstPath);
+                compressing = false;
+                compressFailed = true;
+                return true;
+            }
             compressTotalOut += outSz;
         }
     } while (pres == HSER_POLL_MORE);

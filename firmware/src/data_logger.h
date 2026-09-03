@@ -170,7 +170,14 @@ private:
     size_t compressTotalOut = 0;
 
     void startCompression();
-    bool compressStep(); // Returns true when compression is complete
+    // Set by compressStep() when it gives up. It returns true either way, and
+    // the caller used to delete the source archive on both -- the same defect
+    // that cost a cleaning replay in cleaning_history.cpp on 2026-09-03. Here
+    // the source is the renamed uncompressed archive, which the error paths
+    // deliberately keep as the fallback, and which the caller then removed.
+    bool compressFailed = false;
+
+    bool compressStep(); // Returns true when done or on failure; see compressFailed
 
     void enforceLimits();
     Ticker enforceLimitsTicker; // Throttle enforceLimits to once per 30s instead of every 50ms tick

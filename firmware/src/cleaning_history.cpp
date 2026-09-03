@@ -303,11 +303,24 @@ void CleaningHistory::tick() {
     // Run incremental compression when a session just finished
     if (compressing) {
         if (compressStep()) {
+            // Failure already closed the handles, removed the half-written .hs
+            // and cleared `compressing`. All that is left is to not do the two
+            // things success does: deleting the raw file, which is now the only
+            // copy of the run, and caching metadata for a file that no longer
+            // exists. This branch is the whole reason a bad compression used to
+            // cost the cleaning -- compressStep() returns true either way.
+            if (compressFailed) {
+                listJsonDirty = true;
+                setInterval(HISTORY_INTERVAL_IDLE_MS);
+                return;
+            }
+
             // Compression done - remove raw source and cache metadata
             compressSrc.close();
             compressDst.close();
             SPIFFS.remove(compressSrcPath);
-            LOG("HIST", "Compression done: %s", compressDstPath.c_str());
+            LOG("HIST", "Compression done: %s (%u -> %u bytes)", compressDstPath.c_str(),
+                static_cast<unsigned>(compressBytesIn), static_cast<unsigned>(compressBytesOut));
 
             // Cache session/summary from memory (avoids decompressing on next list request)
             String hsName = compressDstPath;
@@ -549,8 +562,15 @@ void CleaningHistory::stopCollection() {
             heatshrink_encoder_reset(&compressEncoder);
             compressInputDone = false;
             compressing = true;
+            compressFailed = false;
+            compressBytesIn = 0;
+            compressBytesOut = 0;
+            // Read once, here: compressSrc is consumed by the time the tally
+            // is checked, and size() on a spent handle is not worth trusting.
+            compressSrcSize = compressSrc.size();
             setInterval(HISTORY_COMPRESS_INTERVAL_MS);
-            LOG("HIST", "Starting compression: %s -> %s", compressSrcPath.c_str(), compressDstPath.c_str());
+            LOG("HIST", "Starting compression: %s -> %s (%u bytes)", compressSrcPath.c_str(), compressDstPath.c_str(),
+                static_cast<unsigned>(compressSrcSize));
         } else {
             // Compression failed - keep raw file
             if (compressSrc)
@@ -563,6 +583,23 @@ void CleaningHistory::stopCollection() {
 }
 
 // -- Incremental compression (called from tick) ------------------------------
+
+// Give up on the compressed copy and say so, loudly enough to find later.
+//
+// compressSrcPath is deliberately left alone: the raw .jsonl is the only
+// intact copy of the run at this point, and the caller must not delete it. It
+// costs four times the flash of the compressed one, which is a cheap price for
+// a cleaning that can still be replayed.
+bool CleaningHistory::abortCompression(const char *why) {
+    LOG("HIST", "Compression failed (%s) after %u in / %u out -- keeping %s", why,
+        static_cast<unsigned>(compressBytesIn), static_cast<unsigned>(compressBytesOut), compressSrcPath.c_str());
+    compressSrc.close();
+    compressDst.close();
+    SPIFFS.remove(compressDstPath);
+    compressing = false;
+    compressFailed = true;
+    return true;
+}
 
 bool CleaningHistory::compressStep() {
     static const size_t CHUNK_SIZE = 512;
@@ -579,30 +616,29 @@ bool CleaningHistory::compressStep() {
                 size_t sunk = 0;
                 HSE_sink_res sres =
                         heatshrink_encoder_sink(&compressEncoder, inBuf + offset, bytesRead - offset, &sunk);
-                if (sres < 0) {
-                    LOG("HIST", "Heatshrink sink error");
-                    compressSrc.close();
-                    compressDst.close();
-                    SPIFFS.remove(compressDstPath);
-                    compressing = false;
-                    return true;
-                }
+                if (sres < 0)
+                    return abortCompression("sink");
                 offset += sunk;
+                compressBytesIn += sunk;
 
                 size_t outSz = 0;
                 HSE_poll_res pres;
                 do {
                     pres = heatshrink_encoder_poll(&compressEncoder, outBuf, CHUNK_SIZE, &outSz);
-                    if (pres < 0) {
-                        LOG("HIST", "Heatshrink poll error");
-                        compressSrc.close();
-                        compressDst.close();
-                        SPIFFS.remove(compressDstPath);
-                        compressing = false;
-                        return true;
-                    }
+                    if (pres < 0)
+                        return abortCompression("poll");
                     if (outSz > 0) {
-                        compressDst.write(outBuf, outSz);
+                        // The write that was never checked. SPIFFS can write
+                        // short, and heatshrink output is a stream: lose a few
+                        // bytes here and every byte after them decodes against
+                        // the wrong back-references. The 21:30 run of
+                        // 2026-09-03 came out readable for 1022 of its 1776
+                        // snapshots and then dissolved into fragments of its
+                        // own earlier text, which is exactly what that looks
+                        // like from the far end.
+                        if (compressDst.write(outBuf, outSz) != outSz)
+                            return abortCompression("short write");
+                        compressBytesOut += outSz;
                     }
                 } while (pres == HSER_POLL_MORE);
             }
@@ -612,33 +648,37 @@ bool CleaningHistory::compressStep() {
 
     // Input exhausted — finish encoding
     HSE_finish_res fres = heatshrink_encoder_finish(&compressEncoder);
-    if (fres < 0) {
-        LOG("HIST", "Heatshrink finish error");
-        compressSrc.close();
-        compressDst.close();
-        SPIFFS.remove(compressDstPath);
-        compressing = false;
-        return true;
-    }
+    if (fres < 0)
+        return abortCompression("finish");
 
     size_t outSz = 0;
     HSE_poll_res pres;
     do {
         pres = heatshrink_encoder_poll(&compressEncoder, outBuf, CHUNK_SIZE, &outSz);
-        if (pres < 0) {
-            LOG("HIST", "Heatshrink poll error during finish");
-            compressSrc.close();
-            compressDst.close();
-            SPIFFS.remove(compressDstPath);
-            compressing = false;
-            return true;
-        }
+        if (pres < 0)
+            return abortCompression("poll during finish");
         if (outSz > 0) {
-            compressDst.write(outBuf, outSz);
+            if (compressDst.write(outBuf, outSz) != outSz)
+                return abortCompression("short write during finish");
+            compressBytesOut += outSz;
         }
     } while (pres == HSER_POLL_MORE);
 
-    return (fres == HSER_FINISH_DONE);
+    if (fres != HSER_FINISH_DONE)
+        return false;
+
+    // The encoder said it was done, but that only means it emptied its own
+    // buffers -- it knows nothing about what reached the flash. Compare what
+    // went in against the file we set out to compress: a source read that
+    // stopped early is just as silent as a write that did.
+    if (compressBytesIn != compressSrcSize)
+        return abortCompression("input short of source");
+
+    // An empty output for a non-empty input is not a compression, it is a loss.
+    if (compressBytesOut == 0 && compressBytesIn > 0)
+        return abortCompression("no output");
+
+    return true;
 }
 
 // -- Session header/summary --------------------------------------------------
@@ -722,7 +762,16 @@ void CleaningHistory::flushWriteBuffer() {
         batch += line;
         batch += '\n';
     }
-    activeFile.write(reinterpret_cast<const uint8_t *>(batch.c_str()), batch.length());
+    // A short write here loses whole snapshots out of the middle of the run,
+    // and the file stays valid JSONL either way -- there is nothing downstream
+    // that could notice. Say so while the buffer is still in hand: the lines
+    // are dropped regardless (retrying into a full or failing filesystem is
+    // how a 2 s tick turns into a stall), but a gap in a replay should never
+    // be the first anyone hears of it.
+    size_t written = activeFile.write(reinterpret_cast<const uint8_t *>(batch.c_str()), batch.length());
+    if (written != batch.length())
+        LOG("HIST", "Short write: %u of %u bytes, %u lines lost", static_cast<unsigned>(written),
+            static_cast<unsigned>(batch.length()), static_cast<unsigned>(writeBuffer.size()));
     activeFile.flush();
     writeBuffer.clear();
     lastFlushMs = millis();
