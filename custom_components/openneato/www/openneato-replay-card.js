@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.7.2";
+const CARD_VERSION = "2.7.3";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -962,15 +962,20 @@ class OpenNeatoReplayCard extends HTMLElement {
                 // where you go to see the whole plan with room around it.
                 const wanted = Math.min(8, Math.max(this._minZoom(), this._tf.zoom * factor));
                 const next = this._snapZoom(wanted);
-                const applied = next / this._tf.zoom;
                 // Keep the world point under the cursor fixed across the zoom.
-                this._tf.panX = cx - (cx - this._tf.panX) * applied;
-                this._tf.panY = cy - (cy - this._tf.panY) * applied;
-                this._tf.zoom = next;
+                this._zoomAbout(next, cx, cy);
                 if (next <= this._minZoom()) {
-                    this._tf.zoom = this._minZoom();
-                    this._tf.panX = 0;
-                    this._tf.panY = 0;
+                    // All the way out: recentre rather than let the viewer keep
+                    // a pan that has nowhere left to go.
+                    //
+                    // ⚠ Centred is not `pan = 0`. The scale is about the canvas
+                    // origin, so the pan that puts the middle of the content in
+                    // the middle of the frame is (size/2)(1 - zoom); zeroing it
+                    // was only ever right because the floor used to be 1.
+                    const z = this._minZoom();
+                    this._tf.zoom = z;
+                    this._tf.panX = (w / 2) * (1 - z);
+                    this._tf.panY = (h / 2) * (1 - z);
                 }
                 this._dirty = true;
                 this._scheduleRender();
@@ -2161,6 +2166,20 @@ class OpenNeatoReplayCard extends HTMLElement {
         return group > 1 ? Math.floor(cell / group) : cell;
     }
 
+    /* Change the zoom while holding one point of the canvas still.
+   
+       The transform is `pan + zoom * p`, scaled about the origin, so moving the
+       zoom without moving the pan slides everything toward or away from the top
+       left corner. The wheel handler has always done this arithmetic inline;
+       the render-time snap did not, and that is the whole of the off-centre
+       first frame. Same formula, one place. */
+    _zoomAbout(zoom, cx, cy) {
+        const applied = zoom / this._tf.zoom;
+        this._tf.panX = cx - (cx - this._tf.panX) * applied;
+        this._tf.panY = cy - (cy - this._tf.panY) * applied;
+        this._tf.zoom = zoom;
+    }
+
     _applyTransform(ctx, dpr, displayW, displayH) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.scale(dpr, dpr);
@@ -2241,7 +2260,16 @@ class OpenNeatoReplayCard extends HTMLElement {
             this._tf.zoom,
             this._tf.zoom <= 1 ? Math.floor : Math.round,
         );
-        if (quantised !== this._tf.zoom) this._tf.zoom = quantised;
+        if (quantised !== this._tf.zoom) {
+            // ⚠ The pan has to move with it. _applyTransform() scales about the
+            // canvas *origin*, not its centre, so `pan` of zero only means
+            // "centred" at a zoom of exactly 1 -- which is what the fitted zoom
+            // used to be, which is why nobody had to think about it. At 0.89x
+            // the whole map slid 46 px toward the top-left corner, and the
+            // 90-degree view rotation turned that into 44 px right and 46 px up.
+            // Measured on Philou's screen before this line existed.
+            this._zoomAbout(quantised, displayW / 2, displayH / 2);
+        }
         const tNow = this._time;
 
         // Grid first, and square to the screen rather than to the world: once
