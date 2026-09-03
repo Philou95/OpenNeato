@@ -116,6 +116,21 @@ def _floorplan_payload(hass: HomeAssistant, entry_id: str) -> dict[str, Any] | N
     return None
 
 
+def _merging(hass: HomeAssistant, entry_id: str) -> bool:
+    """Whether the map is being rebuilt around the run that just ended.
+
+    The card infers this by watching a listing go from "recording" to not, so
+    a page opened after the robot docked -- the common case, since that is
+    when someone goes to look at the map -- could not tell a merge from a
+    missing session, and showed the failure it got instead. Reading the flag
+    lets that page say what is happening and poll at the fast rate straight
+    away, rather than waiting out the twenty-second idle tick.
+    """
+    stored = hass.data.get(DOMAIN, {}).get(entry_id)
+    mapper = stored.get("mapper") if isinstance(stored, dict) else None
+    return bool(getattr(mapper, "merging", False))
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "openneato/sessions",
@@ -183,6 +198,9 @@ async def ws_list_sessions(
             # here rides out of radio range in one corner of the house on
             # nearly every run, so this is the common case, not the exotic one.
             "robot_available": isinstance(history, list),
+            # Said on every listing so a card that has just been opened knows
+            # as much as one that watched the run end.
+            "merging": _merging(hass, entry_id),
             "floorplan": _floorplan_payload(hass, entry_id),
         },
     )

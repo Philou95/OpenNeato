@@ -271,6 +271,12 @@ class LidarMapRunner:
         self._last_seq = 0
         self._empty_drains = 0
         self.last_report: dict[str, Any] = {}
+        # True from the moment a run ends until the map has been rebuilt around
+        # it. A card cannot work this out for itself on a page opened after the
+        # robot docked: it only knows a merge is under way if it watched the
+        # run end, and that page is exactly the one that used to sit on an
+        # error for a minute with no explanation. So the backend says it.
+        self.merging = False
 
     async def async_load(self) -> None:
         """Restore the accumulated map from storage."""
@@ -781,6 +787,19 @@ class LidarMapRunner:
     # ── completion ──────────────────────────────────────────────────
 
     async def _finish(self) -> None:
+        """End the run, then rebuild the map -- saying so for as long as it takes.
+
+        Cleared in a `finally` rather than at the end: the merge leaves by one
+        of eight `return`s and can raise on any of them, and a merge that fails
+        must not leave every card announcing one for ever.
+        """
+        self.merging = True
+        try:
+            await self._merge_run()
+        finally:
+            self.merging = False
+
+    async def _merge_run(self) -> None:
         self._collecting = False
         self._stop_timer()
         captures, self._captures = self._captures, []
