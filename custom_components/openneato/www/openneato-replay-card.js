@@ -11,7 +11,7 @@
  * (openneato/sessions, openneato/session) — the browser only draws.
  */
 
-const CARD_VERSION = "2.7.3";
+const CARD_VERSION = "2.7.4";
 
 // Breathing room around the fitted map, in CSS pixels. Kept small: the fit
 // already leaves slack wherever the run is not the shape of the card, and
@@ -21,8 +21,6 @@ const MAP_PAD = 8;
 // period. The reference plan works out at a period of 3 px with a 1 px gutter,
 // so a third; a quarter reads the same and leaves more colour in the square.
 const GRID_GUTTER_RATIO = 0.28;
-// How far off the square a map may be before its angle is kept as measured.
-const SQUARE_SNAP_DEG = 3;
 // Smallest square worth drawing, in device pixels. Below this the map reads as
 // a dither rather than a grid, so several map cells are grouped into one
 // square instead -- the data stays as fine as it is, and zooming in takes the
@@ -1926,25 +1924,36 @@ class OpenNeatoReplayCard extends HTMLElement {
         return Number(configured) || 0;
     }
 
-    // Straightening angle, snapped to the square when it is nearly there.
+    // Straightening angle, always square when the card picks it itself.
     //
     // The cell grid steps by `period` device pixels, and period is a whole
     // number. At 90.55 deg a step of one cell is (-0.06, 6.00) pixels, not
     // (0, 6): rounding each cell's position then makes some gaps five pixels
     // and others six, and at low zoom that is a fifth of a cell -- the grid
-    // stops looking regular. Snapping the last half-degree makes every step
+    // stops looking regular. Only a whole quarter turn makes every step
     // exactly (0, period), so the grid is perfect at every zoom.
     //
-    // What it costs is the half-degree itself: walls run at 0.55 deg across
-    // the cell grid and staircase by about one cell over the whole map. That
-    // is a cell and a half on this floor, against an irregular grid
-    // everywhere, so it is the better trade. A map genuinely off-square by
-    // more than SQUARE_SNAP_DEG keeps its angle -- there the slant is real and
-    // reads as a rotated grid rather than a defect.
+    // This used to snap only the last SQUARE_SNAP_DEG = 3 degrees and keep any
+    // larger angle as measured, on the reasoning that a real slant should read
+    // as a rotated map rather than as a defect. The reasoning was wrong,
+    // because the angle is measured off the walls and the walls move: on
+    // 2026-09-05 the estimate went 1.85 -> 2.70 -> 4.45 deg over three merges
+    // and crossed the threshold twice, so the same home was drawn square one
+    // day and stepped the next. **A grid that changes because a cleaning was
+    // merged is a defect whatever the angle is.** Philou called it, and the
+    // grid staying put beats the walls being straightened.
+    //
+    // What it costs is the straightening: a map off-square by 4 deg is drawn
+    // 4 deg off. That is the map's own problem to fix -- see the orientation
+    // drift -- and it is visible rather than hidden, which is the point.
+    //
+    // An angle the viewer asked for in the card config is theirs and is
+    // honoured as given; only the automatic choice is squared.
     _rotationDeg() {
         const raw = this._baseRotationDeg() + (this._autoQuarter || 0);
-        const quarter = Math.round(raw / 90) * 90;
-        return Math.abs(raw - quarter) <= SQUARE_SNAP_DEG ? quarter : raw;
+        const configured = this._config.rotation;
+        if (configured !== "auto" && configured !== undefined) return raw;
+        return Math.round(raw / 90) * 90;
     }
 
     // Quarter turn that makes the map fill the card.
