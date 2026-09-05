@@ -479,7 +479,15 @@ class LidarMapRunner:
         if fit is None:
             return True
 
-        quarter, dx, dy, overlap, fine, scores = fit
+        quarter, dx, dy, overlap, fine, scores, clipped = fit
+        if clipped:
+            # Only the display is at stake here, and a saturated fit still
+            # beats leaving the run in the robot's own frame. The merge is
+            # where it matters, and the merge refuses it.
+            _LOGGER.debug(
+                "LIDAR mapping: le placement provisoire a sature la recherche "
+                "d'angle (%.1f deg) -- la fusion tranchera", quarter * 90 + fine,
+            )
         margin, ratio = quarter_margin(scores, quarter)
         if margin < LIVE_MIN_MARGIN or ratio < LIVE_MIN_RATIO:
             # Not decisive enough to beat the raw frame. Nothing is lost: the

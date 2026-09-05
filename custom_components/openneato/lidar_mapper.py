@@ -307,6 +307,19 @@ MAX_CONSECUTIVE_REJECTS = 3
 # below what a 5 cm grid can express anyway.
 FINE_SPAN_DEG = 8.0
 FINE_STEP_DEG = 0.5
+# How far the sweep may be widened when its own best answer sits on its edge.
+# A best angle equal to the span was chosen by the span, not by the data: the
+# real optimum is further out, and the difference is rotation the merge stamps
+# into the map. On 2026-09-05 a session came off the dock a quarter turn out,
+# the sweep saturated at -8.0 deg, and what it could not reach moved walls by
+# up to 3 cells at the far end of the map -- which is what doubled them.
+# Widening stays a refinement of the chosen quarter rather than the free
+# rotation hunt the original design ruled out: 24 deg is nowhere near the
+# 45 deg at which a neighbouring quarter would start to look better.
+FINE_SPAN_MAX_DEG = 24.0
+# The step is itself leftover rotation -- half of it, worst case, which is
+# 1.6 cm at 150 cells out. Halved again around the winner, for two more angles.
+FINE_POLISH_STEP_DEG = 0.25
 FINE_SEARCH_CELLS = 4
 # A tilt has to *earn* its place. Two cleanings never cover quite the same
 # ground, so the overlap they can reach is capped by that difference rather
@@ -481,12 +494,15 @@ def align_to_reference(
     new_walls: dict[tuple[int, int], int],
     ref_walls: dict[tuple[int, int], int],
     search_cells: int = 8,
-) -> tuple[int, int, int, float, float, tuple[float, float, float, float]]:
+) -> tuple[int, int, int, float, float, tuple[float, float, float, float], bool]:
     """Fit a new session's walls onto the accumulated map.
 
     Tries the four quarter turns, each with a small translation search, then
     refines the angle, and returns
-    (quarter, dx, dy, overlap, fine_deg, quarter_scores).
+    (quarter, dx, dy, overlap, fine_deg, quarter_scores, clipped).
+    `clipped` says the angle search ran to its limit and stopped there, so the
+    fit is the best it could reach rather than the best there is -- see
+    FINE_SPAN_MAX_DEG. A clipped fit must be placed, never merged.
     Overlap is the share of the new session's wall cells that coincide with the
     reference, so 1.0 is perfect.
 
@@ -514,7 +530,7 @@ def align_to_reference(
     what happens.
     """
     if not ref_walls or not new_walls:
-        return 0, 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0)
+        return 0, 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0), False
 
     ref = set(ref_walls)
     fcx = sum(c[0] for c in ref) / len(ref)
@@ -564,26 +580,51 @@ def align_to_reference(
     best_fine = 0.0
     # Beat the untilted fit by a clear margin, not by a rounding error.
     floor_score = score * (1.0 + FINE_MIN_GAIN)
-    steps = int(FINE_SPAN_DEG / FINE_STEP_DEG)
-    for step in range(-steps, steps + 1):
-        fine = step * FINE_STEP_DEG
-        if not fine:
-            continue
-        turned = _rotate_cells_fine(base, fine)
-        tcx = sum(c[0] for c in turned) / len(turned)
-        tcy = sum(c[1] for c in turned) / len(turned)
-        seeds = {(dx, dy), (round(fcx - tcx), round(fcy - tcy))}
-        for sx, sy in seeds:
-            for ddx in range(sx - FINE_SEARCH_CELLS, sx + FINE_SEARCH_CELLS + 1):
-                for ddy in range(sy - FINE_SEARCH_CELLS, sy + FINE_SEARCH_CELLS + 1):
-                    hit = 0
-                    for cx, cy in turned:
-                        if (cx + ddx, cy + ddy) in ref:
-                            hit += 1
-                    value = hit / min(len(turned), len(ref))
-                    if value > max(score, floor_score):
-                        score, dx, dy, best_fine = value, ddx, ddy, fine
-    return quarter, dx, dy, score, best_fine, scores
+
+    def sweep(angles: Iterable[float]) -> None:
+        """Try each angle, keeping whichever beats what we already hold."""
+        nonlocal score, dx, dy, best_fine
+        for fine in angles:
+            if not fine:
+                continue
+            turned = _rotate_cells_fine(base, fine)
+            tcx = sum(c[0] for c in turned) / len(turned)
+            tcy = sum(c[1] for c in turned) / len(turned)
+            seeds = {(dx, dy), (round(fcx - tcx), round(fcy - tcy))}
+            for sx, sy in seeds:
+                for ddx in range(sx - FINE_SEARCH_CELLS, sx + FINE_SEARCH_CELLS + 1):
+                    for ddy in range(sy - FINE_SEARCH_CELLS, sy + FINE_SEARCH_CELLS + 1):
+                        hit = 0
+                        for cx, cy in turned:
+                            if (cx + ddx, cy + ddy) in ref:
+                                hit += 1
+                        value = hit / min(len(turned), len(ref))
+                        if value > max(score, floor_score):
+                            score, dx, dy, best_fine = value, ddx, ddy, fine
+
+    span = FINE_SPAN_DEG
+    steps = int(span / FINE_STEP_DEG)
+    sweep(step * FINE_STEP_DEG for step in range(-steps, steps + 1))
+
+    # A winner sitting on the edge of the sweep was chosen by the edge. Ask
+    # again further out, in that direction only, rather than accept a fit whose
+    # leftover rotation the merge would stamp into the map for good.
+    while abs(best_fine) >= span - 1e-9 and span < FINE_SPAN_MAX_DEG:
+        wider = min(span + FINE_SPAN_DEG, FINE_SPAN_MAX_DEG)
+        sign = 1.0 if best_fine > 0 else -1.0
+        first = round(span / FINE_STEP_DEG) + 1
+        last = round(wider / FINE_STEP_DEG)
+        sweep(sign * step * FINE_STEP_DEG for step in range(first, last + 1))
+        span = wider
+
+    # Still on the edge with the sweep as wide as it is allowed to go. The fit
+    # is the best reachable, not the best there is, and the caller has to know.
+    clipped = best_fine != 0.0 and abs(best_fine) >= span - 1e-9
+
+    if best_fine:
+        sweep((best_fine - FINE_POLISH_STEP_DEG, best_fine + FINE_POLISH_STEP_DEG))
+
+    return quarter, dx, dy, score, best_fine, scores, clipped
 
 
 def quarter_margin(
@@ -602,29 +643,40 @@ def quarter_margin(
     return scores[quarter] - others, scores[quarter] / others
 
 
-def manhattan_angle(cells: Iterable[tuple[int, int]]) -> float:
+def manhattan_angle(
+    cells: Iterable[tuple[int, int]],
+    weights: dict[tuple[int, int], float] | None = None,
+) -> float:
     """Angle, in degrees, between the walls and the axes.
 
     Assumes a broadly rectangular home: the right angle is the one that makes
     wall cells share an x or a y coordinate as much as possible, because a
     wall collapses into a single histogram bin only when axis-parallel.
     Returns a value in (-45, 45].
+
+    `weights` -- the hit counts -- let a wall seen on twenty cleanings say more
+    about which way the home faces than a cell that scraped past the threshold
+    once. Unweighted, the session merged on 2026-09-05 moved this estimate by
+    1.2 deg on its own, and the whole plan was then drawn tilted.
     """
-    pts = [(cx * CELL_M, cy * CELL_M) for cx, cy in cells]
+    pts = [
+        (cx * CELL_M, cy * CELL_M, weights.get((cx, cy), 1.0) if weights else 1.0)
+        for cx, cy in cells
+    ]
     if len(pts) < 20:
         return 0.0
 
     def peakiness(deg: float) -> float:
         r = math.radians(deg)
         c, s = math.cos(r), math.sin(r)
-        hx: dict[int, int] = {}
-        hy: dict[int, int] = {}
+        hx: dict[int, float] = {}
+        hy: dict[int, float] = {}
         inv = 1.0 / CELL_M
-        for x, y in pts:
+        for x, y, w in pts:
             bx = round((x * c - y * s) * inv)
             by = round((x * s + y * c) * inv)
-            hx[bx] = hx.get(bx, 0) + 1
-            hy[by] = hy.get(by, 0) + 1
+            hx[bx] = hx.get(bx, 0.0) + w
+            hy[by] = hy.get(by, 0.0) + w
         return sum(n * n for n in hx.values()) + sum(n * n for n in hy.values())
 
     coarse = max(range(90), key=lambda d: peakiness(float(d)))
@@ -862,7 +914,7 @@ class AccumulatedMap:
         }
 
         if self.walls:
-            quarter, dx, dy, overlap, fine, scores = align_to_reference(
+            quarter, dx, dy, overlap, fine, scores, clipped = align_to_reference(
                 walls, self.walls
             )
             # The overlap says whether the session looks like the map, the
@@ -874,6 +926,30 @@ class AccumulatedMap:
                 quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3),
                 margin=round(margin, 3),
             )
+            if clipped and contribute:
+                # The angle search ran to its limit, so this is the best fit the
+                # sweep could reach and not the best there is -- and what it
+                # could not reach is rotation the merge would stamp into the
+                # map. One degree left over moves a wall 2.6 cells at 150 cells
+                # out, which is what doubled the walls on 2026-09-05.
+                #
+                # The overlap never notices: that merge scored 63%, comfortably
+                # above MERGE_MIN_OVERLAP, because overlap counts cells that
+                # coincide and a small rotation still lands most of them on the
+                # map. So place the session -- it still replays -- take none of
+                # its geometry, and do not count it against the map: a refusal
+                # here would push towards MAX_CONSECUTIVE_REJECTS, and the
+                # session is not the thing at fault.
+                report["clipped"] = True
+                report["contributed"] = False
+                contribute = False
+                _LOGGER.warning(
+                    "LIDAR map: the angle search ran to its %.0f deg limit on "
+                    "this session (%.1f deg, %.0f%% overlap); placing it but "
+                    "merging nothing -- the rotation it could not resolve would "
+                    "smear the walls",
+                    FINE_SPAN_MAX_DEG, quarter * 90 + fine, 100 * overlap,
+                )
             if overlap < MERGE_MIN_OVERLAP and not contribute:
                 # Nothing of it was going into the map anyway, so a poor fit
                 # costs nothing and must not be counted against the map. Keep
@@ -1054,8 +1130,8 @@ class AccumulatedMap:
         view, not of the image.
         """
         threshold = wall_threshold(self.walls)  # hoisted: one sort, not one per cell
-        wall_cells = [c for c, n in self.walls.items() if n >= threshold]
-        skew = manhattan_angle(wall_cells)
+        kept = {c: n for c, n in self.walls.items() if n >= threshold}
+        skew = manhattan_angle(kept, kept)
         return round((-skew) + self.quarter_lock * 90 + user_offset, 2) % 360
 
 
