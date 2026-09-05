@@ -317,6 +317,16 @@ FINE_STEP_DEG = 0.5
 # rotation hunt the original design ruled out: 24 deg is nowhere near the
 # 45 deg at which a neighbouring quarter would start to look better.
 FINE_SPAN_MAX_DEG = 24.0
+# Wall cells a grid must have before its own angle is read off it rather than
+# searched for. manhattan_angle() wants a home's worth of wall to lock on to;
+# the run in progress is placed from as little as forty scans, and its angle
+# early on is noise. Below this the old bounded sweep still runs, which is
+# what that path has always used.
+ANGLE_MIN_CELLS = 200
+# How far either side of the measured angle the polish looks. The measurement
+# lands within a degree (seven rotations from 5 to 128 deg, worst error 0.65),
+# so this is about the estimator's own spread and nothing more.
+ANGLE_POLISH_SPAN_DEG = 2.0
 # The step is itself leftover rotation -- half of it, worst case, which is
 # 1.6 cm at 150 cells out. Halved again around the winner, for two more angles.
 FINE_POLISH_STEP_DEG = 0.25
@@ -490,6 +500,36 @@ def _rotate_cells_fine(
     ]
 
 
+def _measured_turn(
+    new_walls: dict[tuple[int, int], int], ref_walls: dict[tuple[int, int], int]
+) -> float | None:
+    """How far the session must turn to sit the way the map does, modulo 90.
+
+    Both angles are read off the strong cells only -- three quarters of a
+    session's grid is stray, and the strays carry no direction. None when
+    either grid is too thin to carry an angle, which hands the caller back to
+    the bounded sweep.
+    """
+
+    def angle_of(cells: dict[tuple[int, int], int]) -> float | None:
+        if len(cells) < ANGLE_MIN_CELLS:
+            return None
+        threshold = wall_threshold(cells)
+        kept = {c: n for c, n in cells.items() if n >= threshold}
+        if len(kept) < ANGLE_MIN_CELLS:
+            return None
+        return manhattan_angle(kept, kept)
+
+    a_new = angle_of(new_walls)
+    a_ref = angle_of(ref_walls)
+    if a_new is None or a_ref is None:
+        return None
+    # manhattan_angle returns the turn that straightens a grid, so the turn
+    # from one to the other is their difference, folded into (-45, 45].
+    turn = (a_new - a_ref) % 90.0
+    return turn - 90.0 if turn > 45.0 else turn
+
+
 def align_to_reference(
     new_walls: dict[tuple[int, int], int],
     ref_walls: dict[tuple[int, int], int],
@@ -524,10 +564,21 @@ def align_to_reference(
     1.5 deg, which freezes the map: every later session compares against the
     same stale reference and is refused in turn.
 
-    So the quarter search is followed by a fine sweep of +-FINE_SPAN_DEG around
-    it. It stays a refinement, never a free rotation hunt -- the original worry
-    about false matches was about searching all angles, and that is still not
-    what happens.
+    That angle is **measured, not searched**. manhattan_angle() reads it off
+    the walls modulo a quarter turn, so it is right whatever the robot did
+    coming off its dock, and only the four-fold ambiguity is left for the
+    quarter search below to resolve. Bounding a sweep around the quarters
+    instead -- which is what this did until 2026-09-05 -- covers only about
+    half the circle: measured against the stored map with a known rotation
+    applied, 5, 13 and 82 deg were found and **37, 45, 61 and 128 deg were
+    not**, each collapsing to 0.09-0.11 overlap. That is below
+    MERGE_MIN_OVERLAP, so three such cleanings in a row would have discarded
+    the accumulated map. The measurement gets all seven inside 0.65 deg, and
+    costs four candidate angles where the sweep cost thirty-three.
+
+    The bounded sweep is still there for a grid too thin to carry an angle --
+    the run in progress, placed from forty scans -- which is the one case the
+    measurement cannot serve. See ANGLE_MIN_CELLS.
     """
     if not ref_walls or not new_walls:
         return 0, 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0), False
@@ -535,12 +586,19 @@ def align_to_reference(
     ref = set(ref_walls)
     fcx = sum(c[0] for c in ref) / len(ref)
     fcy = sum(c[1] for c in ref) / len(ref)
+
+    measured = _measured_turn(new_walls, ref_walls)
+    base_fine = measured if measured is not None else 0.0
     best = (0, 0, 0, -1.0)
     # The best each quarter could do, kept so the winner can be compared with
     # the field rather than only with a threshold.
     per_quarter = [0.0, 0.0, 0.0, 0.0]
     for quarter in range(4):
+        # Quarter first then the fine angle, in that order, because that is the
+        # order merge_session() applies them in and the rounding differs.
         rotated = _rotate_cells(new_walls, quarter)
+        if base_fine:
+            rotated = _rotate_cells_fine(rotated, base_fine)
         rcx = sum(c[0] for c in rotated) / len(rotated)
         rcy = sum(c[1] for c in rotated) / len(rotated)
         # Two seeds, because either can be the wrong guess:
@@ -577,7 +635,7 @@ def align_to_reference(
     # bodily, and that shift has to be absorbed rather than counted as error.
     quarter, dx, dy, score = best
     base = _rotate_cells(new_walls, quarter)
-    best_fine = 0.0
+    best_fine = base_fine
     # Beat the untilted fit by a clear margin, not by a rounding error.
     floor_score = score * (1.0 + FINE_MIN_GAIN)
 
@@ -601,6 +659,14 @@ def align_to_reference(
                         value = hit / min(len(turned), len(ref))
                         if value > max(score, floor_score):
                             score, dx, dy, best_fine = value, ddx, ddy, fine
+
+    if measured is not None:
+        # The angle is known; all that is left is the estimator's own spread.
+        steps = round(ANGLE_POLISH_SPAN_DEG / FINE_STEP_DEG)
+        sweep(measured + step * FINE_STEP_DEG for step in range(-steps, steps + 1))
+        if best_fine:
+            sweep((best_fine - FINE_POLISH_STEP_DEG, best_fine + FINE_POLISH_STEP_DEG))
+        return quarter, dx, dy, score, best_fine, scores, False
 
     span = FINE_SPAN_DEG
     steps = int(span / FINE_STEP_DEG)
