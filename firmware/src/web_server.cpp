@@ -569,8 +569,16 @@ void WebServer::registerMapRoutes() {
             return;
         }
 
-        // Download specific session
-        auto reader = historyMgr.readSession(suffix);
+        // Download specific session, or -- with `?since=<bytes>` -- only the
+        // part of it the caller does not already hold. The answer says where
+        // it starts in `X-Since`, which is 0 when the offset could not be
+        // honoured and the body is therefore the whole file.
+        size_t since = 0;
+        if (request->hasParam("since"))
+            since = strtoul(request->getParam("since")->value().c_str(), nullptr, 10);
+
+        size_t servedFrom = 0;
+        auto reader = historyMgr.readSession(suffix, since, &servedFrom);
         if (!reader) {
             logger.logRequest(HTTP_GET, request->url().c_str(), 404, millis() - startMs);
             sendError(request, 404, "session not found");
@@ -584,6 +592,7 @@ void WebServer::registerMapRoutes() {
                 [reader](uint8_t *buffer, size_t maxLen, size_t) -> size_t { return reader->read(buffer, maxLen); });
 
         response->addHeader("Content-Disposition", "attachment; filename=\"" + downloadName(suffix) + "\"");
+        response->addHeader("X-Since", String((uint32_t) servedFrom));
 
         request->send(response);
     });

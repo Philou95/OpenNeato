@@ -89,7 +89,14 @@ public:
     const String& getListJson();
     void invalidateListJson() { listJsonDirty = true; }
 
-    std::shared_ptr<LogReader> readSession(const String& filename);
+    // `since` is a byte offset the caller already holds; the reader resumes
+    // there instead of at the start of the file. Honoured for a plain
+    // `.jsonl` only -- a compressed session would have to be decompressed
+    // from the start anyway, which is the whole cost this avoids.
+    // `servedFrom`, when given, receives the offset actually served. It is 0
+    // whenever the request could not be honoured, which tells the caller to
+    // replace what it holds rather than append to it.
+    std::shared_ptr<LogReader> readSession(const String& filename, size_t since = 0, size_t *servedFrom = nullptr);
     bool deleteSession(const String& filename);
     void deleteAllSessions();
 

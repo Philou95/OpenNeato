@@ -1497,9 +1497,12 @@ bool CleaningHistory::isWatched() const {
     return lastWatchedMs != 0 && millis() - lastWatchedMs < HISTORY_WATCHER_TIMEOUT_MS;
 }
 
-std::shared_ptr<LogReader> CleaningHistory::readSession(const String& filename) {
+std::shared_ptr<LogReader> CleaningHistory::readSession(const String& filename, size_t since, size_t *servedFrom) {
     FsLock lock; // runs on AsyncTCP, against the loop's snapshot writes
     String path = String(HISTORY_DIR) + "/" + filename;
+
+    if (servedFrom)
+        *servedFrom = 0;
 
     // Someone is following the run in progress. Note the time so the loop
     // flushes more often from now on -- the flush itself stays in the loop
@@ -1522,6 +1525,20 @@ std::shared_ptr<LogReader> CleaningHistory::readSession(const String& filename) 
 
     if (filename.endsWith(".hs")) {
         return std::make_shared<CompressedLogReader>(std::move(f));
+    }
+
+    // Resume where the caller left off. Whoever watches the map re-reads the
+    // session every few seconds for the length of a clean; reading the whole
+    // file back each time is the read pressure under which the write path
+    // loses bytes, and the run being watched is the one it damages.
+    //
+    // An offset past the end is not this file -- deleted and restarted under
+    // the caller, most likely. Serve it whole and leave `servedFrom` at 0 so
+    // the caller knows what it got.
+    if (since > 0 && since <= f.size()) {
+        f.seek(since);
+        if (servedFrom)
+            *servedFrom = since;
     }
     return std::make_shared<PlainLogReader>(std::move(f));
 }

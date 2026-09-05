@@ -83,6 +83,16 @@ class OpenNeatoApiClient:
         # in-progress "recording" sessions whose data keeps growing).
         self._history_inflight: dict[str, Task] = {}
 
+        # What we already hold of the session we are following, and its name.
+        # A run in progress is fetched again every few seconds for as long as
+        # somebody has the map on screen -- around 1200 times over an hour --
+        # and downloading the whole file each time is the read pressure under
+        # which the bridge loses bytes out of the very file it is writing.
+        # Held for one session only: the buffer is replaced, not added to,
+        # the moment a different name is asked for.
+        self._history_name: str | None = None
+        self._history_held = b""
+
     @property
     def base_url(self) -> str:
         """Return the base URL."""
@@ -358,10 +368,17 @@ class OpenNeatoApiClient:
         done for the polled endpoints: retrying those would add requests to a
         bridge that is already struggling, which is the wrong direction.
         """
+        # Ask only for what has been appended since we last looked. The
+        # firmware says where it actually starts serving; anything other than
+        # the offset we asked for means it could not honour it, and the body
+        # is then the whole file.
+        since = len(self._history_held) if self._history_name == filename else 0
+
         last: Exception | None = None
         for attempt in range(1, HISTORY_ATTEMPTS + 1):
             try:
-                return await self._fetch_history_once(filename)
+                served_from, body = await self._fetch_history_once(filename, since)
+                return self._join_history(filename, since, served_from, body)
             except aiohttp.ClientPayloadError as err:
                 last = err
                 if attempt < HISTORY_ATTEMPTS:
@@ -379,7 +396,36 @@ class OpenNeatoApiClient:
             f"OpenNeato at {self._host} cut the session download short: {last}"
         ) from last
 
-    async def _fetch_history_once(self, filename: str) -> str:
+    def _join_history(
+        self, filename: str, since: int, served_from: int, body: bytes
+    ) -> str:
+        """Join a tail onto what we hold, and keep the result for next time.
+
+        Only whole lines are kept. A body that stops mid-line -- the robot was
+        part-way through appending a snapshot when we read -- has to be asked
+        for again from the start of that line: committed as it stands, the
+        broken line would stay broken for the rest of the run, since every
+        later fetch starts after it.
+        """
+        if since and served_from == since:
+            combined = self._history_held + body
+        else:
+            # An offset the firmware refused, or a firmware too old to know
+            # about `since` at all. Either way the body stands alone.
+            combined = body
+
+        if len(combined) > MAX_HISTORY_RESPONSE_BYTES:
+            self._history_name, self._history_held = None, b""
+            raise OpenNeatoApiError(
+                f"Session {filename} exceeds size cap "
+                f"({MAX_HISTORY_RESPONSE_BYTES} bytes)"
+            )
+
+        self._history_name = filename
+        self._history_held = combined[: combined.rfind(b"\n") + 1]
+        return combined.decode("utf-8", errors="replace")
+
+    async def _fetch_history_once(self, filename: str, since: int = 0) -> tuple[int, bytes]:
         """One attempt at the download.
 
         `filename` originates from the ESP32's /api/history listing and
@@ -394,11 +440,19 @@ class OpenNeatoApiClient:
                 f"Invalid session filename: {filename!r}"
             )
         url = f"{self._base_url}/api/history/{filename}"
-        _LOGGER.debug("GET %s", url)
+        params = {"since": str(since)} if since else None
+        _LOGGER.debug("GET %s since=%d", url, since)
         try:
             async with timeout(TIMEOUT):
-                async with self._session.get(url) as response:
+                async with self._session.get(url, params=params) as response:
                     response.raise_for_status()
+                    # Where the body actually starts. Absent on a firmware
+                    # that predates the header, which serves whole files --
+                    # 0 is the right reading of that.
+                    try:
+                        served_from = int(response.headers.get("X-Since", 0))
+                    except ValueError:
+                        served_from = 0
                     # The firmware serves this endpoint as an HTTP chunked
                     # transfer with no Content-Length (beginChunkedResponse
                     # in web_server.cpp). On a chunked aiohttp response,
@@ -422,7 +476,7 @@ class OpenNeatoApiClient:
                     # response.content (the streaming path doesn't
                     # populate the response's _body buffer that
                     # get_encoding's chardet fallback needs).
-                    return bytes(buf).decode("utf-8", errors="replace")
+                    return served_from, bytes(buf)
         except aiohttp.ClientConnectionError as err:
             raise OpenNeatoConnectionError(
                 f"Unable to connect to OpenNeato at {self._host}: {err}"
