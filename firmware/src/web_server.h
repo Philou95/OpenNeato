@@ -92,6 +92,12 @@ private:
     static void sendError(AsyncWebServerRequest *request, int code, const String& msg);
     static void sendOk(AsyncWebServerRequest *request);
 
+    // Answer with a response whose buffer filling is serialised. Every reply
+    // written from the loop task -- which is every reply to a paused request --
+    // has to go through here, or the acknowledgement racing in on the AsyncTCP
+    // task writes the body a second time. See locked_response.h.
+    static void sendLocked(AsyncWebServerRequest *request, int code, const char *contentType, const String& body);
+
     // Wrap server.on() with automatic request timing and logging.
     // Handler returns the HTTP status code it sent; the wrapper logs it.
     using SyncHandler = std::function<int(AsyncWebServerRequest *)>;
@@ -314,7 +320,7 @@ void WebServer::registerGetRoute(const char *path, Mgr& mgr, Method method,
                     return;
                 }
                 logger.logRequest(HTTP_GET, path, 200, elapsed);
-                req->send(200, "application/json", data.toJson());
+                sendLocked(req.get(), 200, "application/json", data.toJson());
             }
         };
         detail::DispatchGet<Mgr, Method, T, UserArgsTuple, NArgs>::invoke(mgr, method, request, names, cb,

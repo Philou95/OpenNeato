@@ -8,6 +8,7 @@
 #include "manual_clean_manager.h"
 #include "notification_manager.h"
 #include "cleaning_history.h"
+#include "locked_response.h"
 #include "wifi_manager.h"
 #include "scheduler.h"
 #include <SPIFFS.h>
@@ -121,12 +122,19 @@ void WebServer::sendGzipAsset(AsyncWebServerRequest *request, const uint8_t *dat
     request->send(response);
 }
 
+void WebServer::sendLocked(AsyncWebServerRequest *request, int code, const char *contentType, const String& body) {
+    request->send(new LockedResponse(code, contentType, body));
+}
+
+// Both of these answer paused requests from the loop task as often as not, so
+// they take the guarded path unconditionally rather than leaving each caller to
+// remember which task it is on.
 void WebServer::sendError(AsyncWebServerRequest *request, int code, const String& msg) {
-    request->send(code, "application/json", fieldsToJson({{"error", msg, FIELD_STRING}}));
+    sendLocked(request, code, "application/json", fieldsToJson({{"error", msg, FIELD_STRING}}));
 }
 
 void WebServer::sendOk(AsyncWebServerRequest *request) {
-    request->send(200, "application/json", fieldsToJson({{"ok", "true", FIELD_BOOL}}));
+    sendLocked(request, 200, "application/json", fieldsToJson({{"ok", "true", FIELD_BOOL}}));
 }
 
 void WebServer::begin() {
@@ -229,7 +237,7 @@ void WebServer::registerApiRoutes() {
             if (auto req = weak.lock()) {
                 unsigned long elapsed = millis() - startMs;
                 logger.logRequest(HTTP_POST, "/api/serial", 200, elapsed);
-                req->send(200, "text/plain", response);
+                sendLocked(req.get(), 200, "text/plain", response);
             }
         });
         if (!ok) {
