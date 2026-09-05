@@ -67,6 +67,43 @@ static bool parsePose(const String& raw, float& x, float& y, float& theta, float
 // takes from the file's head, which is always newer than anything still in the
 // ring, so appending it to the back keeps the order.
 
+namespace {
+
+    // The finished scan batch crosses a task boundary, and until 2026-09-05 it
+    // crossed it unguarded. loopTask publishes it in buildBatch() and clears it in
+    // serviceScanBuffer(); the AsyncTCP task reads it in takeScanBatch() -- which
+    // *copies* an Arduino String, meaning it reads the length, allocates, then
+    // memcpy's the buffer. Nothing stopped loopTask from running `batchJson = ""`
+    // between those steps and freeing the buffer mid-copy.
+    //
+    // Measured that day: two panics in twenty-two minutes, the first on loopTask
+    // and the second on async_tcp -- the two sides of exactly this pair -- both
+    // reaching abort() through the C++ throw path, which is what a corrupted heap
+    // hands the next allocation. The browser had been left on the map page for the
+    // whole clean, so the batch was drained every few seconds all run: the more HA
+    // polls, the more often the two tasks meet here.
+    //
+    // Third instance of the same shape after the AsyncCache race (3f3922b) and the
+    // null String buffer in the serial queue (ff624ae). Recursive for the reason
+    // FsLock is: the guarded methods call one another.
+    SemaphoreHandle_t batchMutex() {
+        static SemaphoreHandle_t mutex = xSemaphoreCreateRecursiveMutex();
+        return mutex;
+    }
+
+    // Scoped guard for batchJson and the two sequence numbers that describe it.
+    // Held for assignments and reads only -- never across serial or flash I/O, so
+    // a web handler never waits on a file.
+    struct BatchLock {
+        BatchLock() { xSemaphoreTakeRecursive(batchMutex(), portMAX_DELAY); }
+        ~BatchLock() { xSemaphoreGiveRecursive(batchMutex()); }
+
+        BatchLock(const BatchLock&) = delete;
+        BatchLock& operator=(const BatchLock&) = delete;
+    };
+
+} // namespace
+
 String CleaningHistory::scanStatusJson() {
     String o = "{";
     o += "\"calls\":" + String(nCalls);
@@ -83,7 +120,12 @@ String CleaningHistory::scanStatusJson() {
     o += ",\"collecting\":" + String(collecting ? 1 : 0);
     o += ",\"pending\":" + String(scanPending ? 1 : 0);
     o += ",\"drainAgeMs\":" + String(lastDrainMs ? millis() - lastDrainMs : 0);
-    o += ",\"batchLen\":" + String(static_cast<uint32_t>(batchJson.length()));
+    uint32_t batchLen;
+    {
+        BatchLock lock;
+        batchLen = static_cast<uint32_t>(batchJson.length());
+    }
+    o += ",\"batchLen\":" + String(batchLen);
     // The run in progress is placed on the map from its scans alone today, and
     // waits forty of them to do it. This says which way the frame sits from the
     // first half-minute, so the placement has somewhere to start.
@@ -241,13 +283,17 @@ void CleaningHistory::refillFromSpill() {
 void CleaningHistory::buildBatch() {
     String out;
     out.reserve(LIDAR_BATCH_SCANS * 2200);
+    // Built into locals so the lock covers three assignments and not the JSON,
+    // and so the batch and the sequence numbers that describe it are published
+    // together -- a reader can no longer see one without the other.
+    uint32_t first = 0, last = 0;
     size_t n = 0;
     for (const BufferedScan& b: scanRing) {
         if (n >= LIDAR_BATCH_SCANS)
             break;
         if (n == 0)
-            batchFirstSeq = b.seq;
-        batchLastSeq = b.seq;
+            first = b.seq;
+        last = b.seq;
         out += "{\"seq\":" + String(b.seq) + ",\"ts\":" + String(b.ts);
         out += ",\"x\":" + String(b.x, 3) + ",\"y\":" + String(b.y, 3);
         out += ",\"t\":" + String(b.theta, 1) + ",\"rpm\":" + String(b.rpm, 2);
@@ -261,29 +307,45 @@ void CleaningHistory::buildBatch() {
         out += "]}\n";
         n++;
     }
+    BatchLock lock;
     batchJson = out;
+    batchFirstSeq = first;
+    batchLastSeq = last;
 }
 
 void CleaningHistory::serviceScanBuffer() {
     uint32_t ack = ackedSeq;
     while (!scanRing.empty() && scanRing.front().seq <= ack)
         scanRing.pop_front();
-    if (batchLastSeq && ack >= batchLastSeq) {
-        batchJson = "";
-        batchFirstSeq = 0;
-        batchLastSeq = 0;
+    {
+        BatchLock lock;
+        if (batchLastSeq && ack >= batchLastSeq) {
+            batchJson = "";
+            batchFirstSeq = 0;
+            batchLastSeq = 0;
+        }
     }
+    // Deliberately outside the lock: refillFromSpill() reads flash, and a
+    // handler must never queue behind that.
     if (spilling && scanRing.size() < LIDAR_BUFFER_SCANS)
         refillFromSpill();
-    if (batchJson.isEmpty() && !scanRing.empty())
+    bool empty;
+    {
+        BatchLock lock;
+        empty = batchJson.isEmpty();
+    }
+    if (empty && !scanRing.empty())
         buildBatch();
 }
 
 String CleaningHistory::takeScanBatch(uint32_t after) {
-    // Runs on the AsyncTCP task. Touches no file and no container the loop task
-    // mutates: it reads a finished String and writes one integer.
+    // Runs on the AsyncTCP task, and touches no file. It does read a String the
+    // loop task rewrites, so the test and the copy happen under one lock: the
+    // return copies length-then-buffer, and an unguarded clear in between freed
+    // the buffer mid-copy.
     lastDrainMs = millis();
     ackedSeq = after;
+    BatchLock lock;
     if (batchJson.isEmpty() || batchFirstSeq <= after)
         return String();
     return batchJson;
