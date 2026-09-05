@@ -234,6 +234,18 @@ enum CommandStatus {
 #define HISTORY_MAX_FILES 20 // Maximum number of archived session files to keep
 #define HISTORY_AREA_CELL_M 0.5f // Coarse grid cell size in meters for visited-area estimation
 #define HISTORY_MIN_SNAPSHOTS 3 // Discard sessions with fewer snapshots (too short to render a useful map)
+
+// Frame offset probe -- one extra GetRobotPos per run, see CleaningHistory.
+// Snapshots to wait before asking: the two frames agree at the dock and only
+// part company once the robot has localised, so probing too early measures
+// nothing. Fifteen snapshots is about thirty seconds in, which on 2026-09-05
+// already showed the full 82 deg.
+#define FRAME_PROBE_MIN_SNAPSHOTS 15
+// How still the heading must be for the measurement to mean anything. Smooth
+// and Raw are one serial round trip apart, and at the 24 deg/s the robot turns
+// at, that gap is worth several degrees that have nothing to do with the
+// frames. Only measured while going straight.
+#define FRAME_PROBE_MAX_TURN_DEG 3.0f
 // -- LIDAR delivery buffer ---------------------------------------------------
 // The bridge samples the LIDAR itself while cleaning and holds the scans until
 // Home Assistant collects them. Nobody else records a scan -- the firmware

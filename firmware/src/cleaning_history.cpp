@@ -84,6 +84,11 @@ String CleaningHistory::scanStatusJson() {
     o += ",\"pending\":" + String(scanPending ? 1 : 0);
     o += ",\"drainAgeMs\":" + String(lastDrainMs ? millis() - lastDrainMs : 0);
     o += ",\"batchLen\":" + String(static_cast<uint32_t>(batchJson.length()));
+    // The run in progress is placed on the map from its scans alone today, and
+    // waits forty of them to do it. This says which way the frame sits from the
+    // first half-minute, so the placement has somewhere to start.
+    o += ",\"frameOffsetKnown\":" + String(frameOffsetKnown ? 1 : 0);
+    o += ",\"frameOffset\":" + String(frameOffsetDeg, 2);
     o += "}";
     return o;
 }
@@ -436,6 +441,10 @@ String CleaningHistory::cleanModeFromState(const String& uiState) {
 }
 
 void CleaningHistory::resetSession() {
+    frameOffsetDeg = 0.0f;
+    frameOffsetKnown = false;
+    frameProbeDone = false;
+    frameSteady = false;
     snapshotCount = 0;
     rechargeCount = 0;
     totalDistance = 0.0f;
@@ -723,6 +732,10 @@ void CleaningHistory::writeSessionSummary(int batteryEnd) {
         fields.push_back({"batteryStart", String(batteryStart), FIELD_INT});
     if (batteryEnd >= 0)
         fields.push_back({"batteryEnd", String(batteryEnd), FIELD_INT});
+    // Absent rather than zero when it could not be taken: nothing downstream
+    // should read "no measurement" as "the frames agree".
+    if (frameOffsetKnown)
+        fields.push_back({"frameOffset", String(frameOffsetDeg, 2), FIELD_FLOAT});
     String json = fieldsToJson(fields);
     pendingSummaryJson = json;
     writeLine(json);
@@ -1167,6 +1180,31 @@ void CleaningHistory::collectSnapshot() {
                 // states nobody has observed yet still come out right.
                 neato.getMotors([this, x, y, theta, time](bool motorsOk, const MotorData& motors) {
                     writeSnapshot(x, y, theta, time, motorsOk ? motors.brushRPM : -1);
+
+                    // Once per run, ask for the odometric pose too and keep the
+                    // angle between the two frames. It replaces this tick's scan
+                    // rather than adding to the chain -- one scan in eighteen
+                    // hundred, against a number that says outright which way the
+                    // run was recorded.
+                    if (collecting && !frameProbeDone && frameSteady && snapshotCount >= FRAME_PROBE_MIN_SNAPSHOTS) {
+                        frameProbeDone = true;
+                        neato.getRobotPos(false, [this, theta](bool rawOk, const RobotPosData& rawPos) {
+                            float rx, ry, rtheta, rtime;
+                            if (rawOk && parsePose(rawPos.raw, rx, ry, rtheta, rtime)) {
+                                float d = theta - rtheta;
+                                if (d > 180.0f)
+                                    d -= 360.0f;
+                                if (d < -180.0f)
+                                    d += 360.0f;
+                                frameOffsetDeg = d;
+                                frameOffsetKnown = true;
+                                LOG("HIST", "Frame offset (Smooth - Raw): %.2f deg", d);
+                                dataLogger.logGenericEvent("frame_offset", {{"deg", String(d, 2), FIELD_FLOAT}});
+                            }
+                            sampleScan();
+                        });
+                        return;
+                    }
                     // The chain has just let go of the serial link, so this is
                     // the one moment a scan cannot compete with it. Driving it
                     // from tick() instead never fired: the chain is four round
@@ -1234,6 +1272,17 @@ void CleaningHistory::writeSnapshot(float x, float y, float theta, float time, i
     if (brushRPM >= 0)
         line += ",\"b\":" + String(brushRPM);
     line += "}";
+
+    // Whether the heading is quiet enough to compare the two frames. Read
+    // before updateAccumulators(), which is what moves prevTheta on.
+    if (hasPrevPose) {
+        float turn = theta - prevTheta;
+        if (turn > 180.0f)
+            turn -= 360.0f;
+        if (turn < -180.0f)
+            turn += 360.0f;
+        frameSteady = fabsf(turn) < FRAME_PROBE_MAX_TURN_DEG;
+    }
 
     updateAccumulators(x, y, theta);
     bufferLine(line);

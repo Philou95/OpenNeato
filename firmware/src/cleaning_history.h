@@ -221,6 +221,27 @@ private:
     float originY = 0.0f;
     bool hasPrevPose = false;
 
+    // Angle between the frame the run is recorded in and the robot's odometric
+    // one -- Smooth minus Raw, in degrees.
+    //
+    // The firmware records GetRobotPos Smooth, which is the robot's own
+    // localisation, and that frame turns: measured on 2026-09-05 by reading
+    // both through one run, they agree at the dock, part company once the
+    // robot localises, and end 82.1 deg apart (fitted over 104 paired points,
+    // 7 cm residual). That angle is exactly what the map's merge then has to
+    // undo, and it is why a session can arrive a quarter turn out.
+    //
+    // Measuring it costs one extra serial round trip **per run**, taken once
+    // the robot has moved enough for the frames to have separated and while it
+    // is going straight. The merge still has the last word -- the odometric
+    // frame drifts, and the session's own geometry still has to be fitted to
+    // the walls -- but it starts from a known angle instead of searching for
+    // one, and a merge that disagrees with it is a merge worth doubting.
+    float frameOffsetDeg = 0.0f;
+    bool frameOffsetKnown = false;
+    bool frameProbeDone = false; // one attempt per run, whatever it returns
+    bool frameSteady = false; // heading quiet enough for the two to be compared
+
     // Coarse area coverage — set of visited grid cells
     std::set<uint32_t> visitedCells;
 
