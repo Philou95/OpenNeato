@@ -263,7 +263,16 @@ enum CommandStatus {
 // then bracketed rather than merely preceded by calm. One degree is under the
 // noise of the fits it feeds, and well inside the 0.5 deg the angle search
 // steps by.
-#define FRAME_PROBE_MAX_DRIFT_DEG 1.0f
+// How far the heading may turn across the whole measurement.
+//
+// Generous on purpose. The three reads sit 80 ms apart -- measured on the
+// robot, +/- 0.5 ms over six samples, because that is the serial layer's
+// inter-command delay and not variable latency -- and the two Smooth readings
+// straddle the Raw one, so interpolating between them gives Smooth at the very
+// instant Raw was taken. At a steady turn rate the error cancels outright, and
+// what is left is angular acceleration over 160 ms. This bar rejects the
+// pathological; it is not there to wait for stillness.
+#define FRAME_PROBE_MAX_DRIFT_DEG 30.0f
 // Attempts per run before giving up. Each costs two extra serial round trips
 // and nothing else; a run that never holds still for one simply reports no
 // offset, which is the honest answer.
