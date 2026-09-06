@@ -198,6 +198,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         r = self.make_runner(None, hass)
         r._session_name, r._scan_boot_id, r._last_seq = "100.jsonl", BOOT_A, 7
         r._captures = [(0.5, 0.5, 0, [(0, 1000)], 5, 0, 0)]
+        r._last_persist = runner.time.monotonic() - runner.CAPTURE_PERSIST_S - 1
         await r._persist_captures()
         r._captures.append(r._captures[0])
         restored = self.make_runner(None, hass)
