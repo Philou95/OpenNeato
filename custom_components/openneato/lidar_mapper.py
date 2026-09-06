@@ -329,6 +329,15 @@ ANGLE_MIN_CELLS = 200
 ANGLE_POLISH_SPAN_DEG = 2.0
 # The step is itself leftover rotation -- half of it, worst case, which is
 # 1.6 cm at 150 cells out. Halved again around the winner, for two more angles.
+# How far either side of a supplied angle the sweep still looks.
+#
+# `angle_hint` points the search, it does not answer it. The bridge's frame
+# measurement was 0.01 deg out on one cleaning of 2026-09-05 and 5.71 deg out on
+# the next -- good enough to say which way, not good enough to be believed. Ten
+# degrees covers the worse of the two nearly twice over, and still costs less
+# than the blind sweep it replaces, which reaches 24 deg either side of a
+# quarter and misses everything between.
+FINE_HINT_SPAN_DEG = 10.0
 FINE_POLISH_STEP_DEG = 0.25
 FINE_SEARCH_CELLS = 4
 # A tilt has to *earn* its place. Two cleanings never cover quite the same
@@ -534,6 +543,8 @@ def align_to_reference(
     new_walls: dict[tuple[int, int], int],
     ref_walls: dict[tuple[int, int], int],
     search_cells: int = 8,
+    angle_hint: float | None = None,
+    _aimed: bool = False,
 ) -> tuple[int, int, int, float, float, tuple[float, float, float, float], bool]:
     """Fit a new session's walls onto the accumulated map.
 
@@ -579,16 +590,39 @@ def align_to_reference(
     The bounded sweep is still there for a grid too thin to carry an angle --
     the run in progress, placed from forty scans -- which is the one case the
     measurement cannot serve. See ANGLE_MIN_CELLS.
+
+    `angle_hint` serves that one case, and only it: an angle known by other
+    means, used when the cells cannot answer and never over them. It **points**
+    the sweep rather than replacing it -- the window moves to the hint and keeps
+    its resolution, so an imprecise hint still lands on the right answer. See
+    FINE_HINT_SPAN_DEG for why that matters and what it costs.
     """
     if not ref_walls or not new_walls:
         return 0, 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0), False
+
+    if angle_hint is not None and not _aimed:
+        # Both searches, and the better one wins on overlap. Aiming the search
+        # helps and hurts in different places, measured on a real map with a
+        # hint deliberately 5.71 deg out -- the error the bridge actually made:
+        # aimed rescues 37, 45 and 128 deg, which the blind sweep cannot reach
+        # at all (0.11-0.19 overlap), and loses 82 deg, which the blind sweep
+        # finds exactly. Neither dominates, so nothing is guessed: run both and
+        # keep the higher score. Costs one extra angle search -- 0.14 s on a
+        # display refreshed every five minutes -- and can never be worse than
+        # the blind sweep alone.
+        blind = align_to_reference(new_walls, ref_walls, search_cells, None, True)
+        aimed = align_to_reference(new_walls, ref_walls, search_cells, angle_hint, True)
+        return aimed if aimed[3] > blind[3] else blind
 
     ref = set(ref_walls)
     fcx = sum(c[0] for c in ref) / len(ref)
     fcy = sum(c[1] for c in ref) / len(ref)
 
     measured = _measured_turn(new_walls, ref_walls)
-    base_fine = measured if measured is not None else 0.0
+    # Deliberately separate: `measured` is an answer, `hint` is a direction.
+    # The cells win whenever they can speak.
+    hint = angle_hint if measured is None else None
+    base_fine = measured if measured is not None else (hint or 0.0)
     best = (0, 0, 0, -1.0)
     # The best each quarter could do, kept so the winner can be compared with
     # the field rather than only with a threshold.
@@ -667,6 +701,25 @@ def align_to_reference(
         if best_fine:
             sweep((best_fine - FINE_POLISH_STEP_DEG, best_fine + FINE_POLISH_STEP_DEG))
         return quarter, dx, dy, score, best_fine, scores, False
+
+    if hint is not None:
+        # A window centred on the hint, at the same resolution as the blind
+        # sweep. The quarter loop above already pre-rotated by the hint, so the
+        # angles swept here are the hint plus an offset.
+        # The same absolute grid the blind sweep uses, merely restricted to the
+        # window -- the hint chooses where to look, not what to try. Sweeping
+        # hint + k*step instead offsets the grid by the hint's fraction and
+        # never lands on a round angle: measured, that cost a session at 82 deg
+        # 0.97 overlap down to 0.63, while the blind sweep found it exactly.
+        lo = math.ceil((hint - FINE_HINT_SPAN_DEG) / FINE_STEP_DEG)
+        hi = math.floor((hint + FINE_HINT_SPAN_DEG) / FINE_STEP_DEG)
+        sweep(step * FINE_STEP_DEG for step in range(lo, hi + 1))
+        if best_fine:
+            sweep((best_fine - FINE_POLISH_STEP_DEG, best_fine + FINE_POLISH_STEP_DEG))
+        # On the rim of the window means the hint was worse than it promised.
+        # Reported, so a caller can distrust the fit rather than merge it.
+        return (quarter, dx, dy, score, best_fine, scores,
+                abs(best_fine - hint) >= FINE_HINT_SPAN_DEG - 1e-9)
 
     span = FINE_SPAN_DEG
     steps = int(span / FINE_STEP_DEG)

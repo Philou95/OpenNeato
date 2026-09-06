@@ -250,6 +250,10 @@ class LidarMapRunner:
         self._live_align: tuple[int, int, int, float, float, float, float] | None = None
         self._live_align_at = 0.0
         self._live_stable = 0
+        # Which way round this run is recorded, from the robot rather than the
+        # walls. None until the bridge has measured it. See _frame_angle_hint().
+        self._frame_hint: float | None = None
+        self._frame_hint_done = False
         self._aligning = False
         self._collecting = False
         self._unsub_timer = None
@@ -360,6 +364,8 @@ class LidarMapRunner:
         self._live_align = None
         self._live_align_at = 0.0
         self._live_stable = 0
+        self._frame_hint = None
+        self._frame_hint_done = False
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -410,7 +416,11 @@ class LidarMapRunner:
             self._tracking = False
 
     @staticmethod
-    def _fit_live(tracker: SessionTracker, ref_walls: dict[tuple[int, int], int]):
+    def _fit_live(
+        tracker: SessionTracker,
+        ref_walls: dict[tuple[int, int], int],
+        angle_hint: float | None = None,
+    ):
         """Fit the walls seen so far onto the map. Runs in the executor.
 
         Takes what it works on as an argument rather than reading it off
@@ -421,7 +431,53 @@ class LidarMapRunner:
         walls = tracker.walls_so_far()
         if not walls:
             return None
-        return align_to_reference(walls, ref_walls)
+        return align_to_reference(walls, ref_walls, angle_hint=angle_hint)
+
+    async def _frame_angle_hint(self) -> float | None:
+        """Roughly which way this run is recorded, as the robot itself reports it.
+
+        The firmware measures the angle between the frame it records (the
+        robot's own localisation) and the odometric one, once per run, about
+        thirty seconds in. It needs no walls -- which is exactly what the live
+        placement lacks, forty scans being far short of the grid
+        manhattan_angle() wants.
+
+        ⚠ **A direction, not an answer.** Measured against what the merge then
+        decided, on the two cleanings of 2026-09-05: +2.16 -> -2.15 deg (0.01
+        out) and -86.34 -> +92.05 deg (5.71 out). Right about the quarter both
+        times, unreliable to the degree. align_to_reference() treats it that
+        way: it aims a sweep that keeps its own resolution, and runs the blind
+        search alongside, so a bad hint costs nothing.
+
+        Sign established by those measurements and not by reasoning: the merge
+        applies the opposite of the reported offset. Reduced modulo a quarter
+        turn, the form align_to_reference() works in; the quarter search settles
+        the rest.
+
+        Asked at most once per run -- the value does not change afterwards, and
+        the endpoint answers from RAM in a tenth of a millisecond.
+        """
+        if self._frame_hint is not None or self._frame_hint_done:
+            return self._frame_hint
+        try:
+            status = await self.api.get_lidar_status()
+        except Exception as err:  # noqa: BLE001 -- un affichage ne coute pas un run
+            _LOGGER.debug("LIDAR mapping: etat du pont illisible (%s)", err)
+            return None
+        if not status.get("frameOffsetKnown"):
+            # Not taken yet: the firmware waits for the heading to be quiet, so
+            # a run that starts on a turn takes a few more snapshots.
+            return None
+        self._frame_hint_done = True
+        total = -float(status.get("frameOffset", 0.0))
+        self._frame_hint = total - 90.0 * round(total / 90.0)
+        _LOGGER.info(
+            "LIDAR mapping: le pont donne le repere du run — %+.2f deg, soit "
+            "%+.2f deg modulo un quart ; le placement vise la plutot que "
+            "balayer a l'aveugle",
+            -total, self._frame_hint,
+        )
+        return self._frame_hint
 
     async def _align_live(self) -> bool:
         """Place the run in progress on the map, without waiting for the merge.
@@ -467,9 +523,10 @@ class LidarMapRunner:
         self._live_align_at = now
         self._aligning = True
         scans = self._tracker.placed
+        hint = await self._frame_angle_hint()
         try:
             fit = await self.hass.async_add_executor_job(
-                self._fit_live, self._tracker, self._map.walls
+                self._fit_live, self._tracker, self._map.walls, hint
             )
         except Exception as err:  # noqa: BLE001 -- un affichage ne coute pas un run
             _LOGGER.debug("LIDAR mapping: placement provisoire echoue (%s)", err)
