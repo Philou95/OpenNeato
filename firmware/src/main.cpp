@@ -53,7 +53,7 @@ bool webServerStarted = false;
 // hundred-odd bytes that 4268c0e added by taking a mutex in isBusy() are beside
 // the point. 16 KB leaves 3212 bytes spare, which `loopStackHwm` on /api/system
 // makes checkable on every cleaning rather than assumed.
-size_t getArduinoLoopTaskStackSize(void) {
+size_t getArduinoLoopTaskStackSize() {
     return 16384;
 }
 

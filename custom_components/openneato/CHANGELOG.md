@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* Concurrent history downloads retain their own session prefix, preventing
+  one session's trajectory from being appended to another session's header.
+* Scan acknowledgements include the bridge boot identifier. A bridge restart
+  resets the integration's scan cursor without discarding the new scans, and
+  repeated batches are deduplicated. Saved captures retain their matching cursor.
+* Mapping ticks reserve their busy flag before awaiting tracking work, preventing
+  overlapping ticks from racing scan delivery.
+* Matching firmware publishes protected copies of LIDAR diagnostics and history
+  listings, avoiding concurrent reads of changing containers and strings.
+* Orphan history merging writes a buffered temporary file, verifies it after
+  closing, and retains originals until the replacement is installed. Recovery
+  markers prevent duplicate appends when cleanup is interrupted.
+
+### Upgrade order
+
+Update and restart the Home Assistant integration **before** installing the
+matching firmware. The new integration can read the older buffer protocol,
+but reboot-safe acknowledgements require both updates. An older integration
+cannot acknowledge batches on the new firmware and will repeatedly receive
+the same batch. Downgrading the integration also requires matching older firmware.
+
 ## 1.23.0
 
 ### Added
@@ -801,4 +826,3 @@ defined in strings.json (dead code). All now properly defined
 ## 1.0.0
 
 * Initial Home Assistant custom integration for OpenNeato
-

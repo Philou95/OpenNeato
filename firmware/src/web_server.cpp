@@ -188,7 +188,8 @@ void WebServer::registerApiRoutes() {
         uint32_t after = 0;
         if (request->hasParam("after"))
             after = strtoul(request->getParam("after")->value().c_str(), nullptr, 10);
-        String body = historyMgr.takeScanBatch(after);
+        String bootId = request->hasParam("boot") ? request->getParam("boot")->value() : String();
+        String body = historyMgr.takeScanBatch(after, bootId);
         logger.logRequest(HTTP_GET, "/api/lidar/buffer", 200, millis() - startMs);
         request->send(200, "application/x-ndjson", body);
     });

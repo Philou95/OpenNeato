@@ -2,6 +2,7 @@
 #define CLEANING_HISTORY_H
 
 #include <Arduino.h>
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
@@ -86,7 +87,7 @@ public:
     // writes to SPIFFS, and ESPAsyncWebServer then aborts the response
     // mid-body (truncated JSON) or the client times out. Serving a
     // pre-built String keeps the handler pure-RAM.
-    const String& getListJson();
+    String getListJson();
     void invalidateListJson() { listJsonDirty = true; }
 
     // `since` is a byte offset the caller already holds; the reader resumes
@@ -115,8 +116,10 @@ public:
     //
     // `after` is the highest sequence number the caller already has; every
     // scan up to it is dropped. Idempotent -- repeating a request re-sends the
-    // same batch, and a scan delivered twice only doubles one weight.
-    String takeScanBatch(uint32_t after);
+    // same batch; readers deduplicate using the boot and sequence number.
+    // An acknowledgement is valid only for the boot that produced the scans.
+    // A missing/mismatched boot reads the current batch without discarding it.
+    String takeScanBatch(uint32_t after, const String& bootId);
 
     // Why the buffer is or is not filling, counted in RAM. Cheaper and safer
     // than logging: no SPIFFS write, readable at any moment, and it cannot
@@ -151,6 +154,9 @@ private:
     bool appendSpill(const BufferedScan& scan); // loop task: write one record
     void refillFromSpill(); // loop task: flash -> RAM when there is room
     void buildBatch(); // loop task: the next batch, as NDJSON
+    void publishScanStatus(); // loop task: snapshot all diagnostics for HTTP
+    String scanStatusCache = "{}"; // guarded by BatchLock, like batchJson
+    String scanBootId; // immutable after construction
     bool scanPending = false;
     unsigned long scanStartedMs = 0;
     uint32_t nScanOk = 0, nScanFail = 0, nPoseFail = 0, nPose2Fail = 0;
@@ -170,14 +176,15 @@ private:
     // Buffering only starts once someone has actually collected a batch, and
     // stops again if nobody does. A bridge flashed ahead of the integration
     // must not fill its flash for a reader that never comes.
-    unsigned long lastDrainMs = 0;
+    std::atomic<uint32_t> lastDrainMs{0};
     bool spilling = false; // overflowing to flash
     size_t spillReadOffset = 0;
     // Handed to the HTTP task, built here.
     String batchJson;
     uint32_t batchFirstSeq = 0;
     uint32_t batchLastSeq = 0;
-    volatile uint32_t ackedSeq = 0;
+    uint32_t ackedSeq = 0; // read/written under BatchLock
+    uint32_t lastOfferedSeq = 0; // highest sequence handed to HTTP this boot
 
     NeatoSerial& neato;
     DataLogger& dataLogger;
@@ -194,6 +201,8 @@ private:
     bool fetchPending = false;
     unsigned long fetchStartedMs = 0;
     bool recoveryAttempted = false; // Only try orphan recovery once after boot
+    bool recoveryFilesReady = false;
+    bool restoreRecoveryFiles();
     size_t snapshotCount = 0;
 
     // Active session file (open during collection, closed at end)
@@ -321,8 +330,8 @@ private:
     std::map<String, CachedMeta> metaCache;
 
     // Pre-serialized /api/history listing (see getListJson()).
-    String listJsonCache;
-    bool listJsonDirty = true;
+    String listJsonCache = "[]"; // read/copied and published under BatchLock
+    std::atomic<bool> listJsonDirty{true};
     void rebuildListJson();
 
     // Session/summary JSON captured during stopCollection for cache insertion

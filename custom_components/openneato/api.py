@@ -295,17 +295,25 @@ class OpenNeatoApiClient:
         """
         return await self._get("/api/lidar/status")
 
-    async def get_lidar_buffer(self, after: int) -> str:
+    async def get_lidar_buffer(self, after: int, boot_id: str | None = None) -> str:
         """Collect the scans the bridge buffered while cleaning.
 
         Returns NDJSON, one scan per line, or an empty string when there is
         nothing new. `after` is the highest sequence number already held; the
-        bridge drops everything up to it, which is what clears the buffer.
+        bridge drops everything up to it only when `boot_id` matches the boot
+        identifier returned with those scans. Without it, a new bridge returns
+        the current batch without acknowledging scans. Older firmware accepts
+        the sequence alone.
 
         Raises OpenNeatoApiError with status 404 on a bridge too old to have
         the endpoint, which is the caller's signal to sample the old way.
         """
-        return await self._get_text(f"/api/lidar/buffer?after={int(after)}")
+        path = f"/api/lidar/buffer?after={int(after)}"
+        if boot_id is not None:
+            if not re.fullmatch(r"[0-9a-f]{16}", boot_id):
+                raise OpenNeatoApiError("Invalid scan buffer boot identifier")
+            path += f"&boot={boot_id}"
+        return await self._get_text(path)
 
     async def get_lidar(self) -> dict[str, Any]:
         """Get the latest LDS LIDAR scan (360 points)."""
@@ -381,13 +389,16 @@ class OpenNeatoApiClient:
         # firmware says where it actually starts serving; anything other than
         # the offset we asked for means it could not honour it, and the body
         # is then the whole file.
-        since = len(self._history_held) if self._history_name == filename else 0
+        # Keep the exact prefix this request resumes. Another session can
+        # replace the shared cache while the network request is in flight.
+        prefix = self._history_held if self._history_name == filename else b""
+        since = len(prefix)
 
         last: Exception | None = None
         for attempt in range(1, HISTORY_ATTEMPTS + 1):
             try:
                 served_from, body = await self._fetch_history_once(filename, since)
-                return self._join_history(filename, since, served_from, body)
+                return self._join_history(filename, prefix, served_from, body)
             except aiohttp.ClientPayloadError as err:
                 last = err
                 if attempt < HISTORY_ATTEMPTS:
@@ -406,7 +417,7 @@ class OpenNeatoApiClient:
         ) from last
 
     def _join_history(
-        self, filename: str, since: int, served_from: int, body: bytes
+        self, filename: str, prefix: bytes, served_from: int, body: bytes
     ) -> str:
         """Join a tail onto what we hold, and keep the result for next time.
 
@@ -416,8 +427,8 @@ class OpenNeatoApiClient:
         broken line would stay broken for the rest of the run, since every
         later fetch starts after it.
         """
-        if since and served_from == since:
-            combined = self._history_held + body
+        if prefix and served_from == len(prefix):
+            combined = prefix + body
         else:
             # An offset the firmware refused, or a firmware too old to know
             # about `since` at all. Either way the body stands alone.

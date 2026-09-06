@@ -198,8 +198,9 @@ paths:
       summary: Counters for the LIDAR scan buffer
       description: >-
         Diagnostics for the ring buffer the bridge fills while a cleaning runs.
-        Reported live and reset per session; a reader uses it to tell a quiet
-        buffer from a stalled one.
+        Published by the loop task and copied by HTTP without reading mutable
+        containers. Counters reset on bridge reboot; a reader uses this snapshot
+        to tell a quiet buffer from a stalled one.
       responses:
         "200":
           description: OK
@@ -213,10 +214,13 @@ paths:
         - History
       summary: Drain buffered LIDAR scans as NDJSON
       description: >-
-        One JSON object per line, oldest first. `after` acknowledges everything
-        up to that sequence number, which is what frees the ring: pass the
-        highest `seq` of the previous batch. An empty body means nothing new,
-        which is the normal case between scans and not an error.
+        One JSON object per line, oldest first. Each scan carries a `boot`
+        identifier (16 lowercase hexadecimal characters) and a `seq` number.
+        Echo both as query parameters to acknowledge the scans already consumed.
+        A missing or mismatched `boot`, or an `after` beyond the last offered
+        scan, does not discard any data. On a new boot, reset the client cursor
+        and accept the new sequence numbers. Repeated records within the same
+        boot must be deduplicated. An empty body means nothing new.
       parameters:
         - name: after
           in: query
@@ -226,6 +230,16 @@ paths:
             type: integer
             format: int32
             minimum: 0
+        - name: boot
+          in: query
+          required: false
+          description: >-
+            Identifier from the previous batch. Required for destructive
+            acknowledgement; omit for the first read. Upgrade the HA integration
+            before installing firmware that requires this parameter.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{16}$'
       responses:
         "200":
           description: application/x-ndjson
@@ -1371,9 +1385,13 @@ components:
       type: object
       description: >-
         Counters for the scan ring buffer, as /api/lidar/status reports them.
-        All are cumulative for the current session except the state flags and
+        All are cumulative for the current boot except the state flags and
         the sizes, which are instantaneous.
       properties:
+        boot:
+          type: string
+          description: Scan buffer generation, changes on every bridge reboot
+          pattern: '^[0-9a-f]{16}$'
         calls:
           type: number
           description: Scan attempts made by the bridge
@@ -1419,6 +1437,12 @@ components:
         batchLen:
           type: number
           description: Size in bytes of the batch waiting to be served
+        frameOffsetKnown:
+          type: number
+          description: 1 when the frame offset has been measured, else 0
+        frameOffset:
+          type: number
+          description: Measured Smooth minus Raw heading, in degrees
     LidarScan:
       type: object
       properties:

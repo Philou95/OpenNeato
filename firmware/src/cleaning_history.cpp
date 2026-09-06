@@ -1,9 +1,11 @@
 #include "cleaning_history.h"
 #include "fs_lock.h"
+#include "history_recovery.h"
 #include "json_fields.h"
 #include "neato_serial.h"
 #include "system_manager.h"
 #include <SPIFFS.h>
+#include <esp_system.h>
 #include <cmath>
 
 // Heatshrink decompression can drop a byte that merges two JSONL lines into
@@ -48,6 +50,9 @@ static bool isValidMetaLine(const String& line, const char *expectedTypePrefix) 
 
 CleaningHistory::CleaningHistory(NeatoSerial& neato, DataLogger& logger, SystemManager& sysMgr) :
     LoopTask(HISTORY_INTERVAL_IDLE_MS), neato(neato), dataLogger(logger), systemManager(sysMgr) {
+    char boot[17];
+    snprintf(boot, sizeof(boot), "%08x%08x", static_cast<unsigned>(esp_random()), static_cast<unsigned>(esp_random()));
+    scanBootId = boot;
     TaskRegistry::add(this);
 }
 
@@ -92,7 +97,7 @@ namespace {
         return mutex;
     }
 
-    // Scoped guard for batchJson and the two sequence numbers that describe it.
+    // Scoped guard for published JSON snapshots and scan delivery cursors.
     // Held for assignments and reads only -- never across serial or flash I/O, so
     // a web handler never waits on a file.
     struct BatchLock {
@@ -106,7 +111,15 @@ namespace {
 } // namespace
 
 String CleaningHistory::scanStatusJson() {
+    BatchLock lock;
+    return scanStatusCache;
+}
+
+void CleaningHistory::publishScanStatus() {
+    // Only the loop task reads the deque and the mutable collection state.
+    // HTTP copies this finished snapshot; it never inspects their internals.
     String o = "{";
+    o += "\"boot\":\"" + scanBootId + "\",";
     o += "\"calls\":" + String(nCalls);
     o += ",\"ok\":" + String(nScanOk);
     o += ",\"scanFail\":" + String(nScanFail);
@@ -120,7 +133,8 @@ String CleaningHistory::scanStatusJson() {
     o += ",\"spilling\":" + String(spilling ? 1 : 0);
     o += ",\"collecting\":" + String(collecting ? 1 : 0);
     o += ",\"pending\":" + String(scanPending ? 1 : 0);
-    o += ",\"drainAgeMs\":" + String(lastDrainMs ? millis() - lastDrainMs : 0);
+    uint32_t drainedAt = lastDrainMs.load();
+    o += ",\"drainAgeMs\":" + String(drainedAt ? millis() - drainedAt : 0);
     uint32_t batchLen;
     {
         BatchLock lock;
@@ -133,7 +147,8 @@ String CleaningHistory::scanStatusJson() {
     o += ",\"frameOffsetKnown\":" + String(frameOffsetKnown ? 1 : 0);
     o += ",\"frameOffset\":" + String(frameOffsetDeg, 2);
     o += "}";
-    return o;
+    BatchLock lock;
+    scanStatusCache = o;
 }
 
 void CleaningHistory::sampleScan() {
@@ -295,7 +310,7 @@ void CleaningHistory::buildBatch() {
         if (n == 0)
             first = b.seq;
         last = b.seq;
-        out += "{\"seq\":" + String(b.seq) + ",\"ts\":" + String(b.ts);
+        out += "{\"boot\":\"" + scanBootId + "\",\"seq\":" + String(b.seq) + ",\"ts\":" + String(b.ts);
         out += ",\"x\":" + String(b.x, 3) + ",\"y\":" + String(b.y, 3);
         out += ",\"t\":" + String(b.theta, 1) + ",\"rpm\":" + String(b.rpm, 2);
         out += ",\"mv\":" + String(b.moved, 4) + ",\"tn\":" + String(b.turned, 2);
@@ -315,7 +330,11 @@ void CleaningHistory::buildBatch() {
 }
 
 void CleaningHistory::serviceScanBuffer() {
-    uint32_t ack = ackedSeq;
+    uint32_t ack;
+    {
+        BatchLock lock;
+        ack = ackedSeq;
+    }
     while (!scanRing.empty() && scanRing.front().seq <= ack)
         scanRing.pop_front();
     {
@@ -337,18 +356,23 @@ void CleaningHistory::serviceScanBuffer() {
     }
     if (empty && !scanRing.empty())
         buildBatch();
+    publishScanStatus();
 }
 
-String CleaningHistory::takeScanBatch(uint32_t after) {
+String CleaningHistory::takeScanBatch(uint32_t after, const String& bootId) {
     // Runs on the AsyncTCP task, and touches no file. It does read a String the
     // loop task rewrites, so the test and the copy happen under one lock: the
     // return copies length-then-buffer, and an unguarded clear in between freed
     // the buffer mid-copy.
     lastDrainMs = millis();
-    ackedSeq = after;
     BatchLock lock;
-    if (batchJson.isEmpty() || batchFirstSeq <= after)
+    // Reject stale/future acknowledgements before they can reach the deque.
+    // Late HTTP requests must never move the acknowledged cursor backwards.
+    if (bootId == scanBootId && after <= lastOfferedSeq && after > ackedSeq)
+        ackedSeq = after;
+    if (batchJson.isEmpty() || batchLastSeq <= ackedSeq)
         return String();
+    lastOfferedSeq = std::max(lastOfferedSeq, batchLastSeq);
     return batchJson;
 }
 
@@ -358,6 +382,14 @@ void CleaningHistory::tick() {
     // serialised here rather than at each of the 83 call sites.
     FsLock lock;
 
+    // Restore a target whose transaction stopped between the two renames,
+    // before enumerating history or finalizing any orphan sessions.
+    if (!recoveryFilesReady) {
+        recoveryFilesReady = restoreRecoveryFiles();
+        if (!recoveryFilesReady)
+            return;
+    }
+
     // Before any early return: a reader must be able to drain the buffer even
     // while the session is compressing or a serial fetch is latched.
     serviceScanBuffer();
@@ -365,7 +397,7 @@ void CleaningHistory::tick() {
     // Refresh the cached /api/history listing here rather than in the HTTP
     // handler, so all SPIFFS enumeration stays on the loop task. Skipped
     // while compressing: the source and destination files are in flux.
-    if (listJsonDirty && !compressing)
+    if (!compressing && listJsonDirty.exchange(false))
         rebuildListJson();
 
     // Run incremental compression when a session just finished
@@ -922,7 +954,32 @@ bool CleaningHistory::replayLine(const String& line) {
     return false;
 }
 
+bool CleaningHistory::restoreRecoveryFiles() {
+    std::vector<String> targets;
+    File root = SPIFFS.open(HISTORY_DIR);
+    if (!root || !root.isDirectory())
+        return true;
+    File entry = root.openNextFile();
+    while (entry) {
+        String path = entry.path();
+        if (path.endsWith(".jsonl.rcb"))
+            targets.push_back(path.substring(0, path.length() - 4));
+        entry = root.openNextFile();
+    }
+    root.close();
+    for (const auto& target: targets) {
+        if (!HistoryRecovery::restore(SPIFFS, target)) {
+            dataLogger.logGenericEvent("history_recover_failed",
+                                       {{"path", target, FIELD_STRING}, {"phase", "restore", FIELD_STRING}});
+            return false;
+        }
+        dataLogger.logGenericEvent("history_recover_restore", {{"path", target, FIELD_STRING}});
+    }
+    return true;
+}
+
 bool CleaningHistory::recoverCollection(const String& uiState) {
+    FsLock lock;
     // Only attempt recovery once after boot — avoid scanning filesystem on every clean start
     if (recoveryAttempted)
         return false;
@@ -975,33 +1032,12 @@ bool CleaningHistory::recoverCollection(const String& uiState) {
     // orphans are newest-first; reverse to get chronological order (oldest first)
     std::reverse(orphans.begin(), orphans.end());
 
-    // The oldest orphan becomes the target; newer ones are merged into it then deleted
+    // Verify a replacement before committing it or removing any source.
     String targetPath = orphans[0];
-
-    if (orphans.size() > 1) {
-        File target = SPIFFS.open(targetPath, FILE_APPEND);
-        if (target) {
-            for (size_t i = 1; i < orphans.size(); i++) {
-                File src = SPIFFS.open(orphans[i], FILE_READ);
-                if (!src)
-                    continue;
-                while (src.available()) {
-                    String line = src.readStringUntil('\n');
-                    line.trim();
-                    if (line.isEmpty())
-                        continue;
-                    // Skip duplicate session headers from newer orphans
-                    if (line.indexOf("\"type\":\"session\"") >= 0)
-                        continue;
-                    target.println(line);
-                }
-                src.close();
-                SPIFFS.remove(orphans[i]);
-                LOG("HIST", "Merged orphan %s into %s", orphans[i].c_str(), targetPath.c_str());
-            }
-            target.flush();
-            target.close();
-        }
+    if (!HistoryRecovery::merge(SPIFFS, orphans)) {
+        dataLogger.logGenericEvent("history_recover_failed",
+                                   {{"path", targetPath, FIELD_STRING}, {"phase", "merge", FIELD_STRING}});
+        return false;
     }
 
     // Now replay the merged file to rebuild accumulators
@@ -1534,11 +1570,10 @@ void CleaningHistory::readFirstLastLines(const String& path, bool compressed, St
     }
 }
 
-const String& CleaningHistory::getListJson() {
-    // Cold path only: a request that lands before the first tick() has run.
-    // Every later request is served from RAM.
-    if (listJsonCache.isEmpty())
-        rebuildListJson();
+String CleaningHistory::getListJson() {
+    // Never let HTTP retain a reference to a String the loop can replace.
+    // Before the first tick the published listing is simply empty.
+    BatchLock lock;
     return listJsonCache;
 }
 
@@ -1559,8 +1594,8 @@ void CleaningHistory::rebuildListJson() {
         json += "}";
     }
     json += "]";
+    BatchLock lock;
     listJsonCache = json;
-    listJsonDirty = false;
 }
 
 std::vector<HistorySessionInfo> CleaningHistory::listSessions() {

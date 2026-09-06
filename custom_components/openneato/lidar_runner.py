@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from functools import partial
 from pathlib import Path
@@ -183,15 +184,16 @@ def _mappable(state: str) -> bool:
     )
 
 
-def _parse_scans(text: str) -> tuple[list[tuple], int]:
+def _parse_scans(
+    text: str, after: int = 0, boot_id: str | None = None
+) -> tuple[list[tuple], int, str | None]:
     """NDJSON from the bridge -> capture tuples. CPU-bound; run in the executor.
 
     Returns the scans worth keeping and the highest sequence number seen --
     including the ones dropped for smear, or the bridge would resend them for
     ever.
     """
-    out: list[tuple] = []
-    high = 0
+    records = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -200,7 +202,23 @@ def _parse_scans(text: str) -> tuple[list[tuple], int]:
             rec = json.loads(line)
         except ValueError:
             continue
-        high = max(high, int(rec.get("seq", 0)))
+        if isinstance(rec, dict) and isinstance(rec.get("seq"), int) and rec["seq"] > 0:
+            records.append(rec)
+    if not records:
+        return [], after, boot_id
+    generation = records[0].get("boot")
+    if generation is not None and (
+        not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{16}", generation)
+    ):
+        raise ValueError("Invalid scan buffer boot identifier")
+    if any(rec.get("boot") != generation for rec in records):
+        raise ValueError("Scan batch contains multiple boot identifiers")
+    out: list[tuple] = []
+    high = after if generation == boot_id else 0
+    for rec in records:
+        if rec["seq"] <= high:
+            continue  # A repeated or partially acknowledged batch is normal.
+        high = rec["seq"]
         moved = float(rec.get("mv", 0.0))
         turned = float(rec.get("tn", 0.0))
         if moved > MAX_MOVE_DURING_SCAN_M or turned > MAX_TURN_DURING_SCAN_DEG:
@@ -215,7 +233,7 @@ def _parse_scans(text: str) -> tuple[list[tuple], int]:
             float(rec.get("t", 0.0)), points, float(rec.get("rpm", 0.0)),
             moved, turned,
         ))
-    return out, high
+    return out, high, generation
 
 
 class LidarMapRunner:
@@ -234,6 +252,7 @@ class LidarMapRunner:
         self._bak_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_map_backup")
         self._pending_captures: list | None = None
         self._pending_session: str | None = None
+        self._pending_cursor: tuple[str | None, int] = (None, 0)
         self._last_persist = 0.0
         self._map: AccumulatedMap | None = None
         self._captures: list[tuple[float, float, float, list[tuple[int, int]]]] = []
@@ -273,6 +292,7 @@ class LidarMapRunner:
         # False on a bridge too old to have one.
         self._buffer_ok: bool | None = None
         self._last_seq = 0
+        self._scan_boot_id: str | None = None
         self._empty_drains = 0
         self.last_report: dict[str, Any] = {}
         # True from the moment a run ends until the map has been rebuilt around
@@ -295,6 +315,7 @@ class LidarMapRunner:
         if saved and saved.get("captures"):
             self._pending_captures = saved["captures"]
             self._pending_session = saved.get("session")
+            self._pending_cursor = (saved.get("scan_boot_id"), int(saved.get("last_seq", 0)))
             _LOGGER.info(
                 "LIDAR mapping: %d scans recovered from an interrupted run (%s)",
                 len(self._pending_captures), self._pending_session,
@@ -340,6 +361,7 @@ class LidarMapRunner:
         # cleaning and not the next one.
         if self._pending_captures and self._pending_session == self._session_name:
             self._captures = [tuple(c) for c in self._pending_captures]
+            self._scan_boot_id, self._last_seq = self._pending_cursor
             _LOGGER.info(
                 "LIDAR mapping: resuming %s with %d scans already collected",
                 self._session_name, len(self._captures),
@@ -351,6 +373,7 @@ class LidarMapRunner:
             )
         self._pending_captures = None
         self._pending_session = None
+        self._pending_cursor = (None, 0)
         # Created after any resume: the tracker will take in the restored
         # captures as one batch on the first drain, which is exactly what it
         # would have done had they arrived one by one.
@@ -602,6 +625,15 @@ class LidarMapRunner:
     async def _async_tick(self, _now=None) -> None:
         if self._busy:
             return
+        # Tracking can await an executor for longer than the timer interval.
+        # Reserve the whole tick before that await, including cursor updates.
+        self._busy = True
+        try:
+            await self._sample_tick()
+        finally:
+            self._busy = False
+
+    async def _sample_tick(self) -> None:
         # Before any path that can return early: this is work that has to
         # happen on every tick, whatever the robot's state.
         await self._track_new()
@@ -636,7 +668,6 @@ class LidarMapRunner:
         if time.monotonic() - self._last_health >= HEALTH_EVERY:
             self._check_health()
 
-        self._busy = True
         try:
             # Before sampling, and under the same flag: the fit holds the
             # executor for one to five seconds, and a tick that sampled during
@@ -742,8 +773,6 @@ class LidarMapRunner:
                 await self._persist_captures()
         except Exception as err:  # noqa: BLE001 -- one bad read must never end a run
             _LOGGER.debug("LIDAR mapping: sample failed (%s)", err)
-        finally:
-            self._busy = False
 
 
 
@@ -1013,7 +1042,12 @@ class LidarMapRunner:
         if now - self._last_persist < CAPTURE_PERSIST_S:
             return
         self._last_persist = now
-        payload = {"session": self._session_name, "captures": self._captures}
+        payload = {
+            "session": self._session_name,
+            "captures": list(self._captures),
+            "scan_boot_id": self._scan_boot_id,
+            "last_seq": self._last_seq,
+        }
         self._cap_store.async_delay_save(lambda: payload, 1.0)
 
     async def _drain_buffer(self) -> int | None:
@@ -1026,7 +1060,7 @@ class LidarMapRunner:
         total = 0
         for _ in range(DRAIN_MAX_BATCHES):
             try:
-                text = await self.api.get_lidar_buffer(self._last_seq)
+                text = await self.api.get_lidar_buffer(self._last_seq, self._scan_boot_id)
             except OpenNeatoApiError as err:
                 if "404" not in str(err):
                     raise
@@ -1054,8 +1088,13 @@ class LidarMapRunner:
             # a catch-up tick can bring two dozen of them: building those lists
             # inline is CPU work in the middle of Home Assistant's loop, which
             # is exactly what makes the rest of the house feel slow.
-            scans, high = await self.hass.async_add_executor_job(_parse_scans, text)
-            self._last_seq = max(self._last_seq, high)
+            scans, high, boot_id = await self.hass.async_add_executor_job(
+                _parse_scans, text, self._last_seq, self._scan_boot_id
+            )
+            if boot_id != self._scan_boot_id:
+                _LOGGER.info("LIDAR mapping: new bridge boot, restarting the scan cursor")
+            self._scan_boot_id = boot_id
+            self._last_seq = high
             for x, y, t, points, rpm, moved, turned in scans:
                 self._captures.append(
                     (x, y, t, points, rpm, moved, turned, self._rssi(), self._heap())
