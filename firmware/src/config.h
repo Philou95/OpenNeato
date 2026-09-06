@@ -246,6 +246,28 @@ enum CommandStatus {
 // at, that gap is worth several degrees that have nothing to do with the
 // frames. Only measured while going straight.
 #define FRAME_PROBE_MAX_TURN_DEG 3.0f
+// How far the heading may drift *across* the measurement for it to stand.
+//
+// The steadiness test above looks backwards -- it compares this snapshot with
+// the last -- while the Raw pose is fetched forwards, a serial round trip
+// later. A robot that was still and is about to turn passes it and is measured
+// mid-turn anyway. Seen three times on 2026-09-05/06, and the error is simply
+// the turn rate times that gap:
+//
+//     run    error     rate just after the probe
+//     19:20  +0.01 deg   0.25 deg/s
+//     20:37  +5.71 deg   1.50 deg/s
+//     22:43 -13.84 deg  16.84 deg/s   <- explained to a tenth of a degree
+//
+// So Smooth is read again after Raw and the two must agree: the measurement is
+// then bracketed rather than merely preceded by calm. One degree is under the
+// noise of the fits it feeds, and well inside the 0.5 deg the angle search
+// steps by.
+#define FRAME_PROBE_MAX_DRIFT_DEG 1.0f
+// Attempts per run before giving up. Each costs two extra serial round trips
+// and nothing else; a run that never holds still for one simply reports no
+// offset, which is the honest answer.
+#define FRAME_PROBE_MAX_TRIES 12
 // -- LIDAR delivery buffer ---------------------------------------------------
 // The bridge samples the LIDAR itself while cleaning and holds the scans until
 // Home Assistant collects them. Nobody else records a scan -- the firmware

@@ -506,6 +506,7 @@ void CleaningHistory::resetSession() {
     frameOffsetDeg = 0.0f;
     frameOffsetKnown = false;
     frameProbeDone = false;
+    frameProbeTries = 0;
     frameSteady = false;
     snapshotCount = 0;
     rechargeCount = 0;
@@ -1249,21 +1250,45 @@ void CleaningHistory::collectSnapshot() {
                     // hundred, against a number that says outright which way the
                     // run was recorded.
                     if (collecting && !frameProbeDone && frameSteady && snapshotCount >= FRAME_PROBE_MIN_SNAPSHOTS) {
-                        frameProbeDone = true;
+                        if (++frameProbeTries >= FRAME_PROBE_MAX_TRIES)
+                            frameProbeDone = true;
                         neato.getRobotPos(false, [this, theta](bool rawOk, const RobotPosData& rawPos) {
                             float rx, ry, rtheta, rtime;
-                            if (rawOk && parsePose(rawPos.raw, rx, ry, rtheta, rtime)) {
-                                float d = theta - rtheta;
-                                if (d > 180.0f)
-                                    d -= 360.0f;
-                                if (d < -180.0f)
-                                    d += 360.0f;
-                                frameOffsetDeg = d;
-                                frameOffsetKnown = true;
-                                LOG("HIST", "Frame offset (Smooth - Raw): %.2f deg", d);
-                                dataLogger.logGenericEvent("frame_offset", {{"deg", String(d, 2), FIELD_FLOAT}});
+                            if (!rawOk || !parsePose(rawPos.raw, rx, ry, rtheta, rtime)) {
+                                sampleScan();
+                                return;
                             }
-                            sampleScan();
+                            // Close the bracket: read Smooth again, and keep the
+                            // measurement only if the heading sat still across
+                            // the whole of it. See FRAME_PROBE_MAX_DRIFT_DEG.
+                            neato.invalidateRobotPos();
+                            neato.getRobotPos(true, [this, theta, rtheta](bool ok2, const RobotPosData& pos2) {
+                                float x2, y2, t2, tm2;
+                                if (ok2 && parsePose(pos2.raw, x2, y2, t2, tm2)) {
+                                    float drift = t2 - theta;
+                                    if (drift > 180.0f)
+                                        drift -= 360.0f;
+                                    if (drift < -180.0f)
+                                        drift += 360.0f;
+                                    if (fabsf(drift) < FRAME_PROBE_MAX_DRIFT_DEG) {
+                                        float d = theta - rtheta;
+                                        if (d > 180.0f)
+                                            d -= 360.0f;
+                                        if (d < -180.0f)
+                                            d += 360.0f;
+                                        frameOffsetDeg = d;
+                                        frameOffsetKnown = true;
+                                        frameProbeDone = true;
+                                        LOG("HIST", "Frame offset (Smooth - Raw): %.2f deg, drift %.2f", d, drift);
+                                        dataLogger.logGenericEvent("frame_offset",
+                                                                   {{"deg", String(d, 2), FIELD_FLOAT},
+                                                                    {"drift", String(drift, 2), FIELD_FLOAT}});
+                                    } else {
+                                        LOG("HIST", "Frame offset discarded: turned %.2f deg during the read", drift);
+                                    }
+                                }
+                                sampleScan();
+                            });
                         });
                         return;
                     }

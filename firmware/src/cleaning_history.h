@@ -239,7 +239,8 @@ private:
     // one, and a merge that disagrees with it is a merge worth doubting.
     float frameOffsetDeg = 0.0f;
     bool frameOffsetKnown = false;
-    bool frameProbeDone = false; // one attempt per run, whatever it returns
+    bool frameProbeDone = false; // stop trying: measured, or out of attempts
+    uint8_t frameProbeTries = 0;
     bool frameSteady = false; // heading quiet enough for the two to be compared
 
     // Coarse area coverage — set of visited grid cells
