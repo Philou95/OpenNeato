@@ -15,6 +15,16 @@ Covers concurrent downloads, partial lines and offset fallback, response size
 limits, reboot and duplicate scan handling, saved cursors, and overlapping ticks.
 This does not replace testing inside a running Home Assistant installation.
 
+The dedicated Home Assistant workflow also installs Home Assistant 2026.8.3 on
+Python 3.14 and runs `python tests/ha_smoke.py` in a separate process. That check
+imports all integration modules and exercises setup/unload against real HA APIs,
+with the robot transport and platform forwarding mocked. It does not start a
+real robot or use a Home Assistant token. Correctness lint uses Ruff.
+
+Replay-card checks: `node --check custom_components/openneato/www/openneato-replay-card.js`
+and `node --test tests/replay_card.test.cjs`. They cover duplicate registration,
+heading interpolation, empty replays and coverage timestamp ordering.
+
 ## Firmware recovery transaction
 
 Requires a host C++17 compiler. The harness exercises the actual
@@ -24,6 +34,8 @@ String substitute. For example, with Clang or GCC:
 ```sh
 c++ -std=c++17 -Wall -Wextra -I tests/firmware/stubs -I firmware/src tests/firmware/test_history_recovery.cpp -o test_history_recovery
 ./test_history_recovery
+c++ -std=c++17 -Wall -Wextra -I firmware/src tests/firmware/test_frame_recovery.cpp -o test_frame_recovery
+./test_frame_recovery
 ```
 
 On Windows, use `zig c++` in place of `c++`, output `test_history_recovery.exe`,

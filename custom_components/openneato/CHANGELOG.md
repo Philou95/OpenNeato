@@ -16,6 +16,20 @@
 * Orphan history merging writes a buffered temporary file, verifies it after
   closing, and retains originals until the replacement is installed. Recovery
   markers prevent duplicate appends when cleanup is interrupted.
+* The initial frame measurement is journaled with its timestamp and restored
+  after recovery. Legacy journals without it remain unknown; the probe no longer
+  substitutes a late measurement of odometric drift.
+* Finishing a cleaning waits for an active sampling/tracking tick, drains the
+  remaining buffer and processes every received capture before freezing the merge.
+  An incomplete tracker triggers a full reconstruction instead of losing its tail.
+* Journal and compression failures produce structured diagnostic events and
+  remain visible in RAM through `/api/lidar/status`, including when logging is off.
+
+### Validation
+
+* A dedicated Home Assistant workflow checks Python syntax and correctness,
+  asynchronous regressions, module imports and setup/unload with real HA APIs,
+  replay-card behavior, and native firmware recovery tests.
 
 ### Upgrade order
 

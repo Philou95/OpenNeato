@@ -1443,6 +1443,42 @@ components:
         frameOffset:
           type: number
           description: Measured Smooth minus Raw heading, in degrees
+        frameOffsetTime:
+          type: number
+          description: Robot timestamp of the initial frame measurement, in seconds
+        frameOffsetStatus:
+          type: string
+          enum: [pending, initial, restored, unknown]
+          description: Recovered legacy journals without an initial measurement remain unknown
+        storageFailures:
+          type: integer
+          description: Journal and compression failures since this boot, available even with logging disabled
+        compressionFailures:
+          type: integer
+          description: Compression failures since this boot
+        lastStorageFailure:
+          type: object
+          nullable: true
+          description: Most recent storage error; null until a failure occurs
+          properties:
+            operation:
+              type: string
+            reason:
+              type: string
+            path:
+              type: string
+            expected:
+              type: integer
+            written:
+              type: integer
+            bytesIn:
+              type: integer
+            bytesOut:
+              type: integer
+            freeBytes:
+              type: integer
+            uptimeMs:
+              type: integer
     LidarScan:
       type: object
       properties:

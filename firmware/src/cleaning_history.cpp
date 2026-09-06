@@ -1,6 +1,7 @@
 #include "cleaning_history.h"
 #include "fs_lock.h"
 #include "history_recovery.h"
+#include "history_frame.h"
 #include "json_fields.h"
 #include "neato_serial.h"
 #include "system_manager.h"
@@ -146,6 +147,13 @@ void CleaningHistory::publishScanStatus() {
     // first half-minute, so the placement has somewhere to start.
     o += ",\"frameOffsetKnown\":" + String(frameOffsetKnown ? 1 : 0);
     o += ",\"frameOffset\":" + String(frameOffsetDeg, 2);
+    o += ",\"frameOffsetTime\":" + String(frameOffsetTime, 3);
+    o += R"(,"frameOffsetStatus":")";
+    o += frameOffsetKnown ? (frameRecovered ? "restored" : "initial") : (frameProbeDone ? "unknown" : "pending");
+    o += "\"";
+    o += ",\"storageFailures\":" + String(storageFailures);
+    o += ",\"compressionFailures\":" + String(compressionFailures);
+    o += ",\"lastStorageFailure\":" + lastStorageFailure;
     o += "}";
     BatchLock lock;
     scanStatusCache = o;
@@ -537,7 +545,9 @@ String CleaningHistory::cleanModeFromState(const String& uiState) {
 
 void CleaningHistory::resetSession() {
     frameOffsetDeg = 0.0f;
+    frameOffsetTime = 0.0f;
     frameOffsetKnown = false;
+    frameRecovered = false;
     frameProbeDone = false;
     frameProbeTries = 0;
     frameSteady = false;
@@ -683,6 +693,8 @@ void CleaningHistory::stopCollection() {
             if (compressDst)
                 compressDst.close();
             LOG("HIST", "Compression setup failed, keeping raw file");
+            SPIFFS.remove(compressDstPath);
+            recordStorageFailure("compression", "open failed", compressSrcPath, 0, 0);
         }
     });
 }
@@ -695,7 +707,7 @@ void CleaningHistory::stopCollection() {
 // intact copy of the run at this point, and the caller must not delete it. It
 // costs four times the flash of the compressed one, which is a cheap price for
 // a cleaning that can still be replayed.
-bool CleaningHistory::abortCompression(const char *why) {
+bool CleaningHistory::abortCompression(const char *why, size_t expected, size_t written) {
     LOG("HIST", "Compression failed (%s) after %u in / %u out -- keeping %s", why,
         static_cast<unsigned>(compressBytesIn), static_cast<unsigned>(compressBytesOut), compressSrcPath.c_str());
     compressSrc.close();
@@ -703,7 +715,30 @@ bool CleaningHistory::abortCompression(const char *why) {
     SPIFFS.remove(compressDstPath);
     compressing = false;
     compressFailed = true;
+    recordStorageFailure("compression", why, compressSrcPath, expected ? expected : compressSrcSize,
+                         expected ? written : compressBytesIn);
     return true;
+}
+
+void CleaningHistory::recordStorageFailure(const char *operation, const char *reason, const String& path,
+                                           size_t expected, size_t written) {
+    storageFailures++;
+    if (strcmp(operation, "compression") == 0)
+        compressionFailures++;
+    size_t total = SPIFFS.totalBytes();
+    size_t used = SPIFFS.usedBytes();
+    std::vector<Field> fields = {
+            {"operation", operation, FIELD_STRING},
+            {"reason", reason, FIELD_STRING},
+            {"path", path, FIELD_STRING},
+            {"expected", String(static_cast<unsigned>(expected)), FIELD_INT},
+            {"written", String(static_cast<unsigned>(written)), FIELD_INT},
+            {"bytesIn", String(static_cast<unsigned>(compressBytesIn)), FIELD_INT},
+            {"bytesOut", String(static_cast<unsigned>(compressBytesOut)), FIELD_INT},
+            {"freeBytes", String(static_cast<unsigned>(total > used ? total - used : 0)), FIELD_INT},
+            {"uptimeMs", String(millis()), FIELD_INT}};
+    lastStorageFailure = fieldsToJson(fields);
+    dataLogger.logGenericEvent("history_storage_failed", fields);
 }
 
 bool CleaningHistory::compressStep() {
@@ -741,9 +776,10 @@ bool CleaningHistory::compressStep() {
                         // snapshots and then dissolved into fragments of its
                         // own earlier text, which is exactly what that looks
                         // like from the far end.
-                        if (compressDst.write(outBuf, outSz) != outSz)
-                            return abortCompression("short write");
-                        compressBytesOut += outSz;
+                        size_t written = compressDst.write(outBuf, outSz);
+                        compressBytesOut += written;
+                        if (written != outSz)
+                            return abortCompression("short write", outSz, written);
                     }
                 } while (pres == HSER_POLL_MORE);
             }
@@ -763,9 +799,10 @@ bool CleaningHistory::compressStep() {
         if (pres < 0)
             return abortCompression("poll during finish");
         if (outSz > 0) {
-            if (compressDst.write(outBuf, outSz) != outSz)
-                return abortCompression("short write during finish");
-            compressBytesOut += outSz;
+            size_t written = compressDst.write(outBuf, outSz);
+            compressBytesOut += written;
+            if (written != outSz)
+                return abortCompression("short write during finish", outSz, written);
         }
     } while (pres == HSER_POLL_MORE);
 
@@ -847,7 +884,10 @@ void CleaningHistory::writeSessionSummary(int batteryEnd) {
 void CleaningHistory::writeLine(const String& line) {
     if (!activeFile)
         return;
-    activeFile.println(line);
+    String record = line + '\n';
+    size_t written = activeFile.write(reinterpret_cast<const uint8_t *>(record.c_str()), record.length());
+    if (written != record.length())
+        recordStorageFailure("journal", "short write", activeFilePath, record.length(), written);
     activeFile.flush();
 }
 
@@ -878,9 +918,11 @@ void CleaningHistory::flushWriteBuffer() {
     // how a 2 s tick turns into a stall), but a gap in a replay should never
     // be the first anyone hears of it.
     size_t written = activeFile.write(reinterpret_cast<const uint8_t *>(batch.c_str()), batch.length());
-    if (written != batch.length())
+    if (written != batch.length()) {
         LOG("HIST", "Short write: %u of %u bytes, %u lines lost", static_cast<unsigned>(written),
             static_cast<unsigned>(batch.length()), static_cast<unsigned>(writeBuffer.size()));
+        recordStorageFailure("journal", "short batch write", activeFilePath, batch.length(), written);
+    }
     activeFile.flush();
     writeBuffer.clear();
     lastFlushMs = millis();
@@ -920,6 +962,19 @@ bool CleaningHistory::replayLine(const String& line) {
         return false;
 
     const Field *typeField = findField(fields, "type");
+    if (typeField && typeField->value == "frame_offset") {
+        const Field *status = findField(fields, "status");
+        const Field *angle = findField(fields, "deg");
+        const Field *at = findField(fields, "ts");
+        // Only the first validated initial measurement belongs to this run.
+        // A later orphan's measurement reflects drift, not its initial frame.
+        if (restoreInitialFrame(status ? status->value.c_str() : nullptr, angle ? angle->value.c_str() : nullptr,
+                                at ? at->value.c_str() : nullptr, frameOffsetKnown, frameOffsetDeg, frameOffsetTime)) {
+            frameOffsetKnown = true;
+            frameRecovered = true;
+        }
+        return false;
+    }
     if (typeField && typeField->value == "session") {
         const Field *modeField = findField(fields, "mode");
         if (modeField && !modeField->value.isEmpty())
@@ -1044,6 +1099,9 @@ bool CleaningHistory::recoverCollection(const String& uiState) {
     resetSession();
     cleanMode = cleanModeFromState(uiState);
     activeFilePath = targetPath;
+    // Old journals have no trustworthy initial measurement. Do not re-probe
+    // halfway through an interrupted cleaning when the frames have drifted.
+    frameProbeDone = true;
 
     File recoveryFile = SPIFFS.open(targetPath, FILE_READ);
     if (!recoveryFile)
@@ -1321,7 +1379,8 @@ void CleaningHistory::collectSnapshot() {
                                 neato.getRobotPos(true, [this, th1, tm1, rtheta, rtime](bool ok2,
                                                                                         const RobotPosData& pos2) {
                                     float x2, y2, th2, tm2;
-                                    if (!ok2 || !parsePose(pos2.raw, x2, y2, th2, tm2)) {
+                                    if (!collecting || frameOffsetKnown || !ok2 ||
+                                        !parsePose(pos2.raw, x2, y2, th2, tm2)) {
                                         sampleScan();
                                         return;
                                     }
@@ -1342,8 +1401,13 @@ void CleaningHistory::collectSnapshot() {
                                         frac = 0.5f;
                                     float d = normaliseDeg(th1 + turn * frac - rtheta);
                                     frameOffsetDeg = d;
+                                    frameOffsetTime = rtime;
                                     frameOffsetKnown = true;
                                     frameProbeDone = true;
+                                    writeLine(fieldsToJson({{"type", "frame_offset", FIELD_STRING},
+                                                            {"status", "initial", FIELD_STRING},
+                                                            {"deg", String(d, 2), FIELD_FLOAT},
+                                                            {"ts", String(rtime, 3), FIELD_FLOAT}}));
                                     LOG("HIST", "Frame offset (Smooth - Raw): %.2f deg (turn %.2f over %.0f ms)", d,
                                         turn, span * 1000.0f);
                                     dataLogger.logGenericEvent("frame_offset",

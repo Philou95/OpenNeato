@@ -1,0 +1,57 @@
+name: Home Assistant
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'custom_components/**'
+      - 'tests/**'
+      - 'firmware/src/history_*.h'
+      - '.github/workflows/home-assistant.yml'
+  pull_request:
+    paths:
+      - 'custom_components/**'
+      - 'tests/**'
+      - 'firmware/src/history_*.h'
+      - '.github/workflows/home-assistant.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Integration and replay card
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install validation dependencies
+        run: pip install homeassistant==2026.8.3 ruff==0.15.9
+      - name: Python syntax and correctness lint
+        run: |
+          python -m compileall -q custom_components/openneato tests
+          ruff check --select E9,F63,F7,F82 custom_components/openneato tests
+      - name: Offline delivery and lifecycle regressions
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Load integration with real Home Assistant APIs
+        run: python tests/ha_smoke.py
+      - name: Replay card syntax and behavior
+        run: |
+          node --check custom_components/openneato/www/openneato-replay-card.js
+          node --test tests/replay_card.test.cjs
+  recovery:
+    name: Firmware recovery fault injection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the actual recovery algorithm on the host
+        run: |
+          g++ -std=c++17 -Wall -Wextra -I tests/firmware/stubs -I firmware/src tests/firmware/test_history_recovery.cpp -o /tmp/test_history_recovery
+          /tmp/test_history_recovery
+          g++ -std=c++17 -Wall -Wextra -I firmware/src tests/firmware/test_frame_recovery.cpp -o /tmp/test_frame_recovery
+          /tmp/test_frame_recovery

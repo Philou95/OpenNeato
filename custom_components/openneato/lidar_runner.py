@@ -14,6 +14,7 @@ of its normal rate.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -279,6 +280,8 @@ class LidarMapRunner:
         self._unsub_coordinator = None
         self._interval = POLL_INTERVAL
         self._busy = False
+        self._run_lock = asyncio.Lock()
+        self._unloaded = False
         self._last_health = 0.0
         # Collection start, kept apart from the health window anchor: the grace
         # period is about how long the run has been going, not how long since
@@ -324,6 +327,7 @@ class LidarMapRunner:
 
     @callback
     def async_unload(self) -> None:
+        self._unloaded = True
         self._stop_timer()
         if self._unsub_coordinator:
             self._unsub_coordinator()
@@ -333,6 +337,8 @@ class LidarMapRunner:
 
     @callback
     def _handle_update(self) -> None:
+        if self.merging or self._unloaded:
+            return
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
         cleaning = _mappable(state)
         if cleaning and not self._collecting:
@@ -623,13 +629,14 @@ class LidarMapRunner:
         return True
 
     async def _async_tick(self, _now=None) -> None:
-        if self._busy:
+        if self._busy or self.merging or self._unloaded:
             return
         # Tracking can await an executor for longer than the timer interval.
         # Reserve the whole tick before that await, including cursor updates.
         self._busy = True
         try:
-            await self._sample_tick()
+            async with self._run_lock:
+                await self._sample_tick()
         finally:
             self._busy = False
 
@@ -887,16 +894,50 @@ class LidarMapRunner:
         of eight `return`s and can raise on any of them, and a merge that fails
         must not leave every card announcing one for ever.
         """
+        if self.merging or not self._collecting:
+            return
         self.merging = True
+        self._collecting = False
+        self._stop_timer()
         try:
-            await self._merge_run()
+            # Wait for the current sample/tracker executor before taking its
+            # final captures. Coordinator updates cannot start a new run here.
+            async with self._run_lock:
+                await self._drain_final_buffer()
+                await self._track_new()
+                await self._merge_run()
         finally:
             self.merging = False
+            self._handle_update()
+
+    async def _drain_final_buffer(self) -> None:
+        if self._buffer_ok is False:
+            return
+        try:
+            # Idle firmware services its queue every 30 s. An empty HTTP body
+            # can mean an acknowledged batch is awaiting that service, not an
+            # empty ring. Allow several passes and also wait for a pending scan.
+            async with asyncio.timeout(180):
+                while True:
+                    if await self._drain_buffer() is None:
+                        return
+                    status = await self.api.get_lidar_status()
+                    if not any(status.get(k) for k in ("ring", "spilling", "pending", "collecting")):
+                        return
+                    await asyncio.sleep(1)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("LIDAR mapping: final buffer drain incomplete (%s); merging received scans", err)
 
     async def _merge_run(self) -> None:
         self._collecting = False
         self._stop_timer()
         captures, self._captures = self._captures, []
+        tracker, self._tracker = self._tracker, None
+        session_name, contributes = self._session_name, self._contributes
+        if self._tracked != len(captures):
+            # Never pass a partially consumed tracker to a builder that will
+            # then ignore captures absent from that tracker.
+            tracker = None
         if len(captures) < MIN_CAPTURES:
             _LOGGER.info(
                 "LIDAR mapping: only %d captures, too thin to merge", len(captures)
@@ -920,7 +961,6 @@ class LidarMapRunner:
         # dropping a scan would change the pose of every scan after it, since
         # match_pose accumulates. Rare -- once in nine runs, two scans out of
         # 501 -- and we say so rather than keep quiet about it.
-        tracker, self._tracker = self._tracker, None
         if tracker is not None and tracker.refused:
             # A handful is normal; a large share says the cleaning happened
             # where the matching can see nothing -- a corridor, where position
@@ -958,8 +998,8 @@ class LidarMapRunner:
         # being erased on an automatic judgement.
         before = self._map.as_dict()
         report = await self.hass.async_add_executor_job(
-            self._map.merge_session, walls, floor, self._session_name, free,
-            correction, self._contributes,
+            self._map.merge_session, walls, floor, session_name, free,
+            correction, contributes,
         )
         self.last_report = report
         if report.get("rejected"):

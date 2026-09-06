@@ -9,6 +9,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -225,6 +226,75 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await first
         self.assertFalse(r._busy)
+
+    async def test_finish_waits_for_sample_and_tracks_the_final_drain_once(self):
+        r = self.make_runner(None)
+        r._collecting = True
+        r.coordinator.data["state"]["uiState"] = "IDLE"
+        entered, release = asyncio.Event(), asyncio.Event()
+        consumed, merged = [], []
+        r._tracker = types.SimpleNamespace(add_many=consumed.extend)
+
+        async def sample():
+            entered.set()
+            await release.wait()
+            r._captures.append(("in-flight",))
+
+        async def drain():
+            r._captures.append(("last-buffered",))
+
+        async def merge():
+            merged.append((list(r._captures), r._tracked, list(consumed)))
+
+        r._sample_tick, r._drain_final_buffer, r._merge_run = sample, drain, merge
+        tick = asyncio.create_task(r._async_tick())
+        await entered.wait()
+        finish = asyncio.create_task(r._finish())
+        await asyncio.sleep(0)
+        await r._finish()  # Duplicate coordinator notification must do nothing.
+        await r._async_tick()  # No new work while completion waits for the lock.
+        self.assertEqual(merged, [])
+        self.assertTrue(r.merging)
+        release.set()
+        await asyncio.gather(tick, finish)
+        captures = [("in-flight",), ("last-buffered",)]
+        self.assertEqual(merged, [(captures, 2, captures)])
+        self.assertFalse(r.merging)
+
+    async def test_final_drain_waits_for_acknowledged_ring_and_pending_scan(self):
+        statuses = iter([{"ring": 2}, {"pending": 1}, {"ring": 0, "pending": 0}])
+
+        async def status():
+            return next(statuses)
+
+        r = self.make_runner(types.SimpleNamespace(get_lidar_status=status))
+        drains = []
+
+        async def drain():
+            drains.append(True)
+            return 0
+
+        r._drain_buffer = drain
+        with patch.object(runner.asyncio, "sleep", new=unittest.mock.AsyncMock()):
+            await r._drain_final_buffer()
+        self.assertEqual(len(drains), 3)
+
+    async def test_merge_recomputes_if_tracker_has_not_consumed_every_capture(self):
+        r = self.make_runner(None)
+        r._captures = [(0.5, 0.5, 0, [(0, 1000)], 5, 0, 0)] * 61
+        r._tracked = 60
+        r._tracker = types.SimpleNamespace(refused=0, usable=lambda dropped: True)
+        r._map = types.SimpleNamespace(as_dict=lambda: {}, merge_session=lambda *args: {"rejected": True})
+        r._dump_captures = lambda captures: None
+        seen = []
+
+        def build(captures, *, refine, tracker):
+            seen.append((len(captures), tracker))
+            return {}, {}, {}, None
+
+        with patch.object(runner, "build_session_grids", new=build):
+            await r._merge_run()
+        self.assertEqual(seen, [(61, None)])
 
 
 if __name__ == "__main__":

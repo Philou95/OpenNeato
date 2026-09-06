@@ -247,7 +247,9 @@ private:
     // the walls -- but it starts from a known angle instead of searching for
     // one, and a merge that disagrees with it is a merge worth doubting.
     float frameOffsetDeg = 0.0f;
+    float frameOffsetTime = 0.0f;
     bool frameOffsetKnown = false;
+    bool frameRecovered = false;
     bool frameProbeDone = false; // stop trying: measured, or out of attempts
     uint8_t frameProbeTries = 0;
     bool frameSteady = false; // heading quiet enough for the two to be compared
@@ -277,7 +279,12 @@ private:
     size_t compressSrcSize = 0;
 
     bool compressStep(); // Returns true when done or on failure; see compressFailed
-    bool abortCompression(const char *why);
+    bool abortCompression(const char *why, size_t expected = 0, size_t written = 0);
+    void recordStorageFailure(const char *operation, const char *reason, const String& path, size_t expected,
+                              size_t written);
+    uint32_t storageFailures = 0;
+    uint32_t compressionFailures = 0;
+    String lastStorageFailure = "null";
 
     // -- Collection lifecycle ------------------------------------------------
     void checkState();
