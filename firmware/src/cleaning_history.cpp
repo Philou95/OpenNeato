@@ -1309,10 +1309,14 @@ void CleaningHistory::collectSnapshot() {
 
         neato.getErr([this](bool errOk, const ErrorData& err) {
             if (errOk) {
-                if (err.hasError && !prevHadError) {
+                // GetErr also carries informational alerts such as 201,
+                // "Returning to base". Use the parser's classification so
+                // blocking alerts (including persistent-map failures) count.
+                bool hasFault = err.hasError && err.kind != "warning";
+                if (hasFault && !prevHadError) {
                     errorsDuringClean++;
                 }
-                prevHadError = err.hasError;
+                prevHadError = hasFault;
             }
 
             if (recharging) {

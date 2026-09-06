@@ -24,6 +24,9 @@
   An incomplete tracker triggers a full reconstruction instead of losing its tail.
 * Journal and compression failures produce structured diagnostic events and
   remain visible in RAM through `/api/lidar/status`, including when logging is off.
+* Cleaning summaries count faults using the firmware's error classification.
+  Informational alerts such as "Returning to base" no longer add a false error
+  to every completed cleaning; blocking persistent-map alerts still count.
 
 ### Validation
 
