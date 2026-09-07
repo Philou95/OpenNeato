@@ -352,6 +352,7 @@ class LidarMapRunner:
         # it was cleaning in is no longer readable anywhere.
         self._contributes = not any(m in state for m in NO_CONTRIBUTION)
         self._collecting = True
+        self._empty_drains = 0
         self._captures = []
         self._last_persist = time.monotonic()
         self._interval = POLL_INTERVAL
@@ -729,8 +730,9 @@ class LidarMapRunner:
             # quiet for several ticks is treated as one that has stopped
             # buffering, so a whole run can never be lost to a silent peer.
             if self._buffer_ok is not False:
+                before_cursor = (self._scan_boot_id, self._last_seq)
                 got = await self._drain_buffer()
-                if got:
+                if got or before_cursor != (self._scan_boot_id, self._last_seq):
                     self._empty_drains = 0
                     return
                 if got == 0 and self._buffer_ok:
@@ -1004,6 +1006,11 @@ class LidarMapRunner:
                 "search was clipped at the edge of its window",
                 tracker.refused, tracker.placed,
             )
+        if tracker is not None and tracker.stopped_at is not None:
+            _LOGGER.warning(
+                "LIDAR mapping: scan matching stopped at scan %d; %d of %d scans received no further pose adjustment",
+                tracker.stopped_at, tracker.placed - tracker.stopped_at + 1, tracker.placed,
+            )
         if tracker is not None and not tracker.usable(dropped):
             _LOGGER.info(
                 "SLAM: le filtre de rotation a retire %d scans, le suivi au fil "
@@ -1132,6 +1139,7 @@ class LidarMapRunner:
         catching up over several ticks is fine.
         """
         total = 0
+        before_cursor = (self._scan_boot_id, self._last_seq)
         for _ in range(DRAIN_MAX_BATCHES):
             try:
                 text = await self.api.get_lidar_buffer(self._last_seq, self._scan_boot_id)
@@ -1169,17 +1177,17 @@ class LidarMapRunner:
                 _LOGGER.info("LIDAR mapping: new bridge boot, restarting the scan cursor")
             self._scan_boot_id = boot_id
             self._last_seq = high
+            # A new sequence proves delivery even if every scan was discarded
+            # for motion smear. Quality rejection is not a stalled transport.
+            if before_cursor != (self._scan_boot_id, self._last_seq) and self._buffer_ok is None:
+                self._buffer_ok = True
+                _LOGGER.info("LIDAR mapping: collecting from the bridge's own buffer")
             for x, y, t, points, rpm, moved, turned in scans:
                 self._captures.append(
                     (x, y, t, points, rpm, moved, turned, self._rssi(), self._heap())
                 )
                 total += 1
-                if self._buffer_ok is None:
-                    self._buffer_ok = True
-                    _LOGGER.info(
-                        "LIDAR mapping: collecting from the bridge's own buffer"
-                    )
-        if total:
+        if total or before_cursor != (self._scan_boot_id, self._last_seq):
             await self._persist_captures()
         return total
 

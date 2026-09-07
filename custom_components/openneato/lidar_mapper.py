@@ -1474,6 +1474,10 @@ def match_pose(
         # whether the optimum was reachable at all.
         if not pass_no:
             railed = abs(ci) == span or abs(cj) == span
+            if railed:
+                # Both callers reject this pose regardless of the fine pass.
+                # Do not spend a second search refining a rejected boundary.
+                return cx, cy, ct, True
         bx, by, bt = cx, cy, ct
     return bx, by, bt, railed
 
@@ -1575,7 +1579,10 @@ def _session_poses(captures, match, refine):
                 )
                 if math.hypot(dx, dy) > MATCH_MAX_DRIFT_M:
                     # Runaway: stop correcting rather than invent a pose.
-                    _LOGGER.debug("scan matching gave up after %.2f m of drift", math.hypot(dx, dy))
+                    _LOGGER.warning(
+                        "Scan matching stopped at scan %d after %.2f m of proposed drift; "
+                        "subsequent scans use odometry", placed + 1, math.hypot(dx, dy),
+                    )
                     dx = dy = dtheta = 0.0
                     matching = False
                 else:
@@ -1792,7 +1799,7 @@ class SessionTracker:
 
     __slots__ = ("_clouds", "_dth", "_dx", "_dy", "_edges", "_matching",
                  "_placed", "_points", "_poses", "_raw", "_scratch",
-                 "_weights", "candidates", "matched", "refused")
+                 "_weights", "candidates", "matched", "refused", "stopped_at")
 
     def __init__(self) -> None:
         self._scratch: dict[tuple[int, int], float] = {}
@@ -1815,6 +1822,7 @@ class SessionTracker:
         # the run is somewhere the matcher cannot see -- which is worth knowing
         # from the log rather than by replaying the captures. See match_pose().
         self.refused = 0
+        self.stopped_at: int | None = None
 
     # ── during the cleaning ─────────────────────────────────────────
 
@@ -1842,9 +1850,10 @@ class SessionTracker:
                 self._dth += mtheta - theta
                 if math.hypot(self._dx, self._dy) > MATCH_MAX_DRIFT_M:
                     # Runaway: stop correcting rather than invent a pose.
-                    _LOGGER.debug(
-                        "scan matching gave up after %.2f m of drift",
-                        math.hypot(self._dx, self._dy),
+                    self.stopped_at = self._placed + 1
+                    _LOGGER.warning(
+                        "Scan matching stopped at scan %d after %.2f m of proposed drift; subsequent scans use odometry",
+                        self.stopped_at, math.hypot(self._dx, self._dy),
                     )
                     self._dx = self._dy = self._dth = 0.0
                     self._matching = False

@@ -174,6 +174,34 @@ class GeometryTests(unittest.TestCase):
 
 
 class IcpTests(unittest.TestCase):
+    def test_rejected_coarse_boundary_skips_unused_fine_search(self):
+        def score(walls, x, y, theta, points):
+            return -((x - .3)**2 + y*y + theta*theta)
+        with patch.object(mapper, "_match_score", side_effect=score) as scoring:
+            result = mapper.match_pose({}, 0., 0., 0., [(0, 1000)])
+        self.assertTrue(result[3])
+        self.assertEqual(scoring.call_count, 125)
+
+    def test_interior_match_still_receives_fine_refinement(self):
+        def score(walls, x, y, theta, points):
+            return -((x - .025)**2 + y*y + theta*theta)
+        with patch.object(mapper, "_match_score", side_effect=score) as scoring:
+            result = mapper.match_pose({}, 0., 0., 0., [(0, 1000)])
+        self.assertEqual(result, (.025, 0., 0., False))
+        self.assertEqual(scoring.call_count, 250)
+
+    def test_drift_stop_is_counted_without_changing_existing_fallback(self):
+        tracker = mapper.SessionTracker()
+        capture = (0., 0., 0., [(0, 1000)], 5., 0., 0.)
+        with patch.object(mapper.SessionTracker, "_close_loops"):
+            for _ in range(mapper.MATCH_SEED):
+                tracker.add(capture)
+            with patch.object(mapper, "match_pose", return_value=(1.,0.,0.,False)):
+                tracker.add(capture)
+        self.assertEqual(tracker.stopped_at, mapper.MATCH_SEED + 1)
+        self.assertFalse(tracker._matching)
+        self.assertEqual((tracker._dx, tracker._dy, tracker._dth), (0.,0.,0.))
+
     def test_quality_is_measured_at_returned_pose_when_iteration_limit_is_hit(self):
         src = [(x*.4,y*.4) for x in range(8) for y in range(5)]
         dst = [(x+.06,y) for x,y in src]

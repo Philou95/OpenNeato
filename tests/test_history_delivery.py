@@ -9,7 +9,7 @@ import json
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 
@@ -175,6 +175,46 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             async_add_listener=lambda fn: lambda: None,
         )
         return runner.LidarMapRunner(hass or Hass(), "offline", bridge, coordinator)
+
+    async def test_filtered_batches_are_live_transport_and_do_not_trigger_serial_fallback(self):
+        counter = 0
+        async def batch(after, boot):
+            nonlocal counter
+            counter += 1
+            return scan((counter + 1) // 2, mv=10.) if counter % 2 else ""
+        bridge = types.SimpleNamespace(get_lidar_buffer=batch, send_serial_command=AsyncMock())
+        r = self.make_runner(bridge)
+        r._track_new = AsyncMock()
+        r._orient_live_from_frame = AsyncMock()
+        r._align_live = AsyncMock(return_value=False)
+        r._persist_captures = AsyncMock()
+        r._last_health = runner.time.monotonic()
+        for _ in range(runner.DRAIN_QUIET_TICKS + 2):
+            await r._sample_tick()
+        self.assertTrue(r._buffer_ok)
+        self.assertEqual(r._empty_drains, 0)
+        self.assertEqual(r._last_seq, runner.DRAIN_QUIET_TICKS + 2)
+        self.assertEqual(r._captures, [])
+        r._persist_captures.assert_awaited()
+        bridge.send_serial_command.assert_not_awaited()
+
+    async def test_repeated_old_batch_does_not_hide_a_real_stall(self):
+        bridge = types.SimpleNamespace(
+            get_lidar_buffer=AsyncMock(return_value=scan(7)),
+            send_serial_command=AsyncMock(return_value=""), get_lidar=AsyncMock(return_value={}),
+        )
+        r = self.make_runner(bridge)
+        r._buffer_ok = True
+        r._scan_boot_id, r._last_seq = BOOT_A, 7
+        r._track_new = AsyncMock()
+        r._orient_live_from_frame = AsyncMock()
+        r._align_live = AsyncMock(return_value=False)
+        r._last_health = runner.time.monotonic()
+        for _ in range(runner.DRAIN_QUIET_TICKS - 1):
+            await r._sample_tick()
+        bridge.send_serial_command.assert_not_awaited()
+        await r._sample_tick()
+        bridge.send_serial_command.assert_awaited()
 
     async def test_bridge_restart_recovers_all_new_scans(self):
         class Bridge:
