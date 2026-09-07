@@ -136,6 +136,19 @@ class HistoryCacheTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScanParserTests(unittest.TestCase):
+    def test_motion_diagnostics_exclude_duplicates_and_count_both_causes(self):
+        stats = {}
+        batch = "\n".join((scan(1, tn=6), scan(1, tn=6), scan(2, mv=100),
+                            scan(3, tn=6, mv=100), scan(4, tn=5), scan(5)))
+        captures, high, boot = runner._parse_scans(batch, 0, BOOT_A, stats)
+        self.assertEqual(stats, {"received": 5, "motion": 3, "turn": 2, "move": 2})
+        self.assertEqual(len(captures), 2)
+        repeated = {}
+        runner._parse_scans(batch, high, boot, repeated)
+        self.assertEqual(repeated, {})
+        # Exactly five degrees passes reception but receives zero mapping weight.
+        self.assertEqual(runner.scan_weight(captures[0][5], captures[0][6]), 0)
+
     def test_new_boot_resets_sequence_and_retains_new_scans(self):
         captures, high, boot = runner._parse_scans(scan(1, BOOT_B), 360, BOOT_A)
         self.assertEqual((len(captures), high, boot), (1, 1, BOOT_B))

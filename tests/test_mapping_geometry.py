@@ -321,6 +321,36 @@ class LivePlacementTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await r._align_live())
         r.api.get_lidar_status.assert_not_awaited()
 
+    async def test_unplaced_failures_back_off_and_allow_late_success(self):
+        undecided = (0, 0, 0, .4, 0., (.4,.39,.1,.1), False)
+        decided = (1, 0, 0, .6, -1.74, (.1,.6,.1,.1), False)
+        for failure in (undecided, None, RuntimeError("fit failed")):
+            with self.subTest(failure=failure):
+                r = self.make_runner()
+                with patch.object(r, "_fit_live", side_effect=[failure] * 5 + [decided]) as fit:
+                    for instant in (100., 130., 190., 310., 550., 850.):
+                        with patch.object(runner.time, "monotonic", return_value=instant - 1):
+                            if instant != 100.:
+                                self.assertFalse(await r._align_live())
+                        with patch.object(runner.time, "monotonic", return_value=instant):
+                            self.assertTrue(await r._align_live())
+                    self.assertEqual(fit.call_count, 6)
+                self.assertEqual(r._live_align[0], 1)
+                self.assertEqual(r._live_attempts, 0)
+                with patch.object(runner.time, "monotonic", return_value=1149.):
+                    self.assertFalse(await r._align_live())
+
+    async def test_hour_of_ambiguity_limits_ticks_spent_fitting(self):
+        r = self.make_runner()
+        undecided = (0, 0, 0, .4, 0., (.4,.39,.1,.1), False)
+        with patch.object(r, "_fit_live", return_value=undecided) as fit:
+            for instant in range(100, 3700):
+                with patch.object(runner.time, "monotonic", return_value=float(instant)):
+                    await r._align_live()
+            self.assertEqual(fit.call_count, 15)
+        self.assertIsNone(r._live_align)
+        self.assertEqual(r._live_stable, 0)
+
     async def test_initial_frame_is_cached_instead_of_following_raw_drift(self):
         r = self.make_runner()
         r.api.get_lidar_status.side_effect = [
