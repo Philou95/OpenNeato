@@ -70,11 +70,11 @@ de regroupement et d'interpolation est insuffisante sur ces données.
 
 1. Exploiter les diagnostics sur plusieurs vrais cycles : répétition des grandes
    erreurs angulaires, contraintes incompatibles, impact des virages et passages étroits.
-2. Pour réduire le graphe, préserver les contraintes et leurs corrélations par une
-   marginalisation adaptée, et sélectionner les poses selon la géométrie plutôt
-   qu'un simple intervalle. Garder le graphe complet comme référence de validation.
-3. Évaluer des sous-cartes conservées entre cycles pour rendre les contributions
-   réversibles. Dimensionner le stockage avant toute activation.
+2. Conserver les optimisations à résultat identique. L'essai de poses clés reste
+   rejeté ; la dérive de Raw documentée dans `frameOffset-brief.md` ne justifie
+   aucune déformation supplémentaire de la session Smooth.
+3. Étudier l'archivage des contributions de sessions entières avec leur transformation
+   rigide enregistrée, pour rendre les fusions réversibles sans découper les sessions.
 4. Tester la pondération des traversées d'espace libre et l'horodatage précis des
    rayons séparément, avec des mesures de murs et les alignements enregistrés.
 

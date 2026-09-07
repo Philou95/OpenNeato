@@ -1,4 +1,5 @@
 """Mapping regressions: independent geometry and set-overlap oracles, offline."""
+import asyncio
 import importlib
 import math
 import random
@@ -95,6 +96,27 @@ class OverlapTests(unittest.TestCase):
             blind = mapper.align_to_reference(walls, walls, 1, None, True)
             aimed = mapper.align_to_reference(walls, walls, 1, 10, True)
         self.assertEqual(actual, aimed if aimed[3] > blind[3] else blind)
+
+    def test_hinted_sweep_keeps_absolute_angle_grid(self):
+        walls = {(x, x // 3): 10 for x in range(20)}
+        hint = 2.13
+        with patch.object(mapper, "_measured_turn", return_value=None), \
+             patch.object(mapper, "_rotate_cells_fine", wraps=mapper._rotate_cells_fine) as rotate:
+            mapper.align_to_reference(walls, walls, 1, hint, True)
+        angles = [call.args[1] for call in rotate.call_args_list]
+        expected = [step * mapper.FINE_STEP_DEG for step in range(
+            math.ceil((hint-mapper.FINE_HINT_SPAN_DEG)/mapper.FINE_STEP_DEG),
+            math.floor((hint+mapper.FINE_HINT_SPAN_DEG)/mapper.FINE_STEP_DEG)+1,
+        ) if step != 0]
+        self.assertEqual(angles[:4], [hint] * 4)
+        self.assertEqual(angles[4:4+len(expected)], expected)
+
+    def test_wrong_hint_cannot_lower_blind_score_on_thin_map(self):
+        walls = {(x, x // 3): 10 for x in range(20)}
+        with patch.object(mapper, "_measured_turn", return_value=None):
+            blind = mapper.align_to_reference(walls, walls, 1)
+            hinted = mapper.align_to_reference(walls, walls, 1, 45.)
+        self.assertGreaterEqual(hinted[3], blind[3])
 
 
 class GeometryTests(unittest.TestCase):
@@ -218,6 +240,49 @@ class LivePlacementTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(runner.time, "monotonic", return_value=130.):
             self.assertFalse(await r._align_live())
         r.api.get_lidar_status.assert_not_awaited()
+
+    async def test_initial_frame_is_cached_instead_of_following_raw_drift(self):
+        r = self.make_runner()
+        r.api.get_lidar_status.side_effect = [
+            {"frameOffsetKnown": 1, "frameOffset": -3.39, "frameOffsetStatus": "initial"},
+            {"frameOffsetKnown": 1, "frameOffset": -53.84, "frameOffsetStatus": "initial"},
+        ]
+        self.assertAlmostEqual(await r._frame_angle_hint(), 3.39)
+        self.assertAlmostEqual(await r._frame_angle_hint(), 3.39)
+        self.assertEqual(r.api.get_lidar_status.await_count, 1)
+
+    async def test_pending_frame_can_later_use_restored_initial_measurement(self):
+        r = self.make_runner()
+        r.api.get_lidar_status.side_effect = [
+            {"frameOffsetKnown": 0, "frameOffsetStatus": "pending"},
+            {"frameOffsetKnown": 1, "frameOffset": -88.26, "frameOffsetStatus": "restored"},
+        ]
+        self.assertIsNone(await r._frame_angle_hint())
+        self.assertFalse(r._frame_hint_done)
+        self.assertAlmostEqual(await r._frame_angle_hint(), -1.74)
+        self.assertTrue(r._frame_hint_done)
+
+    async def test_invalid_frames_do_not_become_zero_or_poison_cache(self):
+        for value in (None, "invalid", float("nan"), float("inf"), -181., 181.):
+            r = self.make_runner()
+            r.api.get_lidar_status.return_value = {"frameOffsetKnown": 1, "frameOffset": value}
+            self.assertIsNone(await r._frame_angle_hint())
+            self.assertFalse(r._frame_hint_done)
+        for status in ({"frameOffsetKnown": 1},
+                       {"frameOffsetKnown": 1, "frameOffset": 0., "frameOffsetStatus": "unknown"}):
+            r = self.make_runner()
+            r.api.get_lidar_status.return_value = status
+            self.assertIsNone(await r._frame_angle_hint())
+        r.api.get_lidar_status.return_value = {"frameOffsetKnown": 1, "frameOffset": 0., "frameOffsetStatus": "initial"}
+        self.assertEqual(await r._frame_angle_hint(), 0.)
+        self.assertTrue(r._frame_hint_done)
+
+    async def test_cancelling_hint_read_releases_alignment_flag(self):
+        r = self.make_runner()
+        r.api.get_lidar_status.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await r._align_live()
+        self.assertFalse(r._aligning)
 
 
 class PoseGraphTests(unittest.TestCase):

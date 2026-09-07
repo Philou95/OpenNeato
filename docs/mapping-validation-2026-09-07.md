@@ -75,17 +75,13 @@ localement dans `C:\IA\audit-map-fusion-20260906`, hors du dépôt.
    Évaluer la rotation dans une échelle cohérente avec la translation, plutôt que
    d'ajouter directement radians et mètres. Un mauvais rapprochement peut sinon
    déformer plusieurs pièces. Aucun nouveau seuil n'est choisi sans données.
-2. **Réduire le graphe avec des poses clés.** Conserver les scans complets pour la
-   projection finale, mais optimiser un ensemble de poses sélectionnées par mouvement
-   et changement de géométrie. Le code limite déjà le nombre de boucles par scan ;
-   cette proposition réduit le nombre de nœuds, un coût distinct. Comparer ensuite
-   les poses interpolées au graphe complet, notamment dans les virages et passages étroits.
-3. **Conserver des sous-cartes et leurs contraintes entre cycles.** Aujourd'hui, la
-   fusion renforce une grille accumulée après un alignement global de chaque session.
-   Garder des sous-cartes permettrait de corriger une ancienne contribution mal placée
-   sans reconstruire tout l'historique. Il faut prévoir stockage borné, versions et
-   retour arrière. Cartographer décrit cette séparation entre sous-cartes locales et
-   optimisation globale dans sa [documentation](https://google-cartographer-ros.readthedocs.io/en/latest/algo_walkthrough.html).
+2. **Privilégier les accélérations à résultat identique.** L'essai de poses clés a
+   été rejeté. Les mesures Smooth/Raw ne justifient pas de déformer ou de découper
+   une session : c'est Raw qui dérive. Conserver les scans et le traitement actuel.
+3. **Conserver les contributions de sessions entières.** Pour rendre une fusion
+   réversible, archiver chaque contribution avec sa transformation rigide enregistrée,
+   sans réaligner séparément des morceaux du trajet. Prévoir stockage borné, versions
+   et retour arrière avant d'activer cette fonction.
 4. **Pondérer l'effacement comme l'observation.** Les impacts sont pondérés par le
    mouvement du robot, mais les traversées d'espace libre comptent chacune pour un.
    Tester une confiance cohérente avec mesures d'épaisseur des murs, trous et vitesse

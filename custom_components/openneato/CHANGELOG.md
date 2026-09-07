@@ -4,6 +4,11 @@
 
 ### Fixed
 
+* Live frame hints cache only valid initial measurements (including restored ones),
+  never substitute zero for a missing offset, and release the alignment flag if
+  reading the hint is cancelled. The modulo-quarter hint, absolute sweep grid and
+  blind fallback are retained; late Raw odometry drift must not replace the initial frame.
+
 * Live placement starts at 25 tracked scans and retries every 30 seconds until
   accepted, instead of waiting five minutes after an undecided first attempt.
   An existing placement retains its five-minute translation-refresh cadence.
