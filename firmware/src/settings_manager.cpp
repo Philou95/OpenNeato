@@ -1,4 +1,5 @@
 #include "settings_manager.h"
+#include "checked_json.h"
 
 // Day-name labels for JSON responses (Mon=0 .. Sun=6)
 static const char *DAY_NAMES[SCHEDULE_DAYS] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
@@ -404,51 +405,56 @@ ApplyResult SettingsManager::apply(const String& json) {
 
 // -- JSON serialization / deserialization ------------------------------------
 
-std::vector<Field> Settings::toFields() const {
-    std::vector<Field> f = {
-            {"hostname", hostname, FIELD_STRING},
-            {"tz", tz, FIELD_STRING},
-            {"logLevel", String(logLevel), FIELD_INT},
-            {"wifiTxPower", String(wifiTxPower), FIELD_INT},
-            {"uartTxPin", String(uartTxPin), FIELD_INT},
-            {"uartRxPin", String(uartRxPin), FIELD_INT},
-            {"maxGpioPin", String(MAX_GPIO_PIN), FIELD_INT},
-            {"navMode", navMode, FIELD_STRING},
-            {"stallThreshold", String(stallThreshold), FIELD_INT},
-            {"brushRpm", String(brushRpm), FIELD_INT},
-            {"vacuumSpeed", String(vacuumSpeed), FIELD_INT},
-            {"sideBrushPower", String(sideBrushPower), FIELD_INT},
-            {"apFallbackOnDisconnect", apFallbackOnDisconnect ? "true" : "false", FIELD_BOOL},
-            {"syslogEnabled", syslogEnabled ? "true" : "false", FIELD_BOOL},
-            {"syslogIp", syslogIp, FIELD_STRING},
-            {"ntfyTopic", ntfyTopic, FIELD_STRING},
-            {"ntfyServer", ntfyServer, FIELD_STRING},
-            {"ntfyToken", ntfyToken, FIELD_STRING},
-            {"ntfyEnabled", ntfyEnabled ? "true" : "false", FIELD_BOOL},
-            {"ntfyOnStart", ntfyOnStart ? "true" : "false", FIELD_BOOL},
-            {"ntfyOnDone", ntfyOnDone ? "true" : "false", FIELD_BOOL},
-            {"ntfyOnError", ntfyOnError ? "true" : "false", FIELD_BOOL},
-            {"ntfyOnAlert", ntfyOnAlert ? "true" : "false", FIELD_BOOL},
-            {"ntfyOnDocking", ntfyOnDocking ? "true" : "false", FIELD_BOOL},
-            {"scheduleEnabled", scheduleEnabled ? "true" : "false", FIELD_BOOL},
-            {"autoRestartEnabled", autoRestartEnabled ? "true" : "false", FIELD_BOOL},
-            {"autoRestartHour", String(autoRestartHour), FIELD_INT},
-            {"autoRestartMinute", String(autoRestartMinute), FIELD_INT},
-            {"restartBeforeClean", restartBeforeClean ? "true" : "false", FIELD_BOOL},
-    };
+String Settings::toJson() const {
+    String json;
+    CheckedJson writer(json);
+    writer.field("hostname", hostname, true);
+    writer.field("tz", tz, true);
+    writer.field("logLevel", String(logLevel), false);
+    writer.field("wifiTxPower", String(wifiTxPower), false);
+    writer.field("uartTxPin", String(uartTxPin), false);
+    writer.field("uartRxPin", String(uartRxPin), false);
+    writer.field("maxGpioPin", String(MAX_GPIO_PIN), false);
+    writer.field("navMode", navMode, true);
+    writer.field("stallThreshold", String(stallThreshold), false);
+    writer.field("brushRpm", String(brushRpm), false);
+    writer.field("vacuumSpeed", String(vacuumSpeed), false);
+    writer.field("sideBrushPower", String(sideBrushPower), false);
+    writer.field("apFallbackOnDisconnect", apFallbackOnDisconnect ? "true" : "false", false);
+    writer.field("syslogEnabled", syslogEnabled ? "true" : "false", false);
+    writer.field("syslogIp", syslogIp, true);
+    writer.field("ntfyTopic", ntfyTopic, true);
+    writer.field("ntfyServer", ntfyServer, true);
+    writer.field("ntfyToken", ntfyToken, true);
+    writer.field("ntfyEnabled", ntfyEnabled ? "true" : "false", false);
+    writer.field("ntfyOnStart", ntfyOnStart ? "true" : "false", false);
+    writer.field("ntfyOnDone", ntfyOnDone ? "true" : "false", false);
+    writer.field("ntfyOnError", ntfyOnError ? "true" : "false", false);
+    writer.field("ntfyOnAlert", ntfyOnAlert ? "true" : "false", false);
+    writer.field("ntfyOnDocking", ntfyOnDocking ? "true" : "false", false);
+    writer.field("scheduleEnabled", scheduleEnabled ? "true" : "false", false);
+    writer.field("autoRestartEnabled", autoRestartEnabled ? "true" : "false", false);
+    writer.field("autoRestartHour", String(autoRestartHour), false);
+    writer.field("autoRestartMinute", String(autoRestartMinute), false);
+    writer.field("restartBeforeClean", restartBeforeClean ? "true" : "false", false);
     for (int d = 0; d < SCHEDULE_DAYS; d++) {
         for (int s = 0; s < SCHEDULE_SLOTS_PER_DAY; s++) {
-            // Slot 0: "sched0Hour", "sched0Min", "sched0On" (backwards compatible)
-            // Slot 1: "sched0Slot1Hour", "sched0Slot1Min", "sched0Slot1On"
-            String prefix = "sched" + String(d);
-            if (s > 0)
-                prefix += "Slot" + String(s);
-            f.push_back({prefix + "Hour", String(sched[d].slots[s].hour), FIELD_INT});
-            f.push_back({prefix + "Min", String(sched[d].slots[s].minute), FIELD_INT});
-            f.push_back({prefix + "On", sched[d].slots[s].on ? "true" : "false", FIELD_BOOL});
+            char prefix[24];
+            if (s == 0)
+                snprintf(prefix, sizeof(prefix), "sched%d", d);
+            else
+                snprintf(prefix, sizeof(prefix), "sched%dSlot%d", d, s);
+            char key[32];
+            snprintf(key, sizeof(key), "%sHour", prefix);
+            writer.field(key, String(sched[d].slots[s].hour), false);
+            snprintf(key, sizeof(key), "%sMin", prefix);
+            writer.field(key, String(sched[d].slots[s].minute), false);
+            snprintf(key, sizeof(key), "%sOn", prefix);
+            writer.field(key, sched[d].slots[s].on ? "true" : "false", false);
         }
     }
-    return f;
+    writer.finish();
+    return json;
 }
 
 bool Settings::fromFields(const std::vector<Field>& fields) {

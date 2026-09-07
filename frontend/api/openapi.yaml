@@ -800,6 +800,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SettingsData"
+        "503":
+          description: Insufficient memory to serialize settings; a PUT may already have applied its changes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
     put:
       tags:
         - Settings
@@ -817,6 +823,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SettingsData"
+        "503":
+          description: Insufficient memory to serialize settings; a PUT may already have applied its changes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "400":
           description: invalid settings
           content:

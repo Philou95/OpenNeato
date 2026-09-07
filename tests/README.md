@@ -42,6 +42,10 @@ c++ -std=c++17 -Wall -Wextra -I tests/firmware/stubs -I firmware/src tests/firmw
 ./test_history_recovery
 c++ -std=c++17 -Wall -Wextra -I firmware/src tests/firmware/test_frame_recovery.cpp -o test_frame_recovery
 ./test_frame_recovery
+c++ -std=c++17 -Wall -Wextra -I tests/firmware/stubs -I firmware/src tests/firmware/test_checked_json.cpp -o test_checked_json
+./test_checked_json
+c++ -std=c++17 -Wall -Wextra -I firmware/src tests/firmware/test_compression_output.cpp -o test_compression_output
+./test_compression_output
 ```
 
 On Windows, use `zig c++` in place of `c++`, output `test_history_recovery.exe`,

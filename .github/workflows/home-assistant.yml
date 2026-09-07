@@ -55,3 +55,7 @@ jobs:
           /tmp/test_history_recovery
           g++ -std=c++17 -Wall -Wextra -I firmware/src tests/firmware/test_frame_recovery.cpp -o /tmp/test_frame_recovery
           /tmp/test_frame_recovery
+          g++ -std=c++17 -Wall -Wextra -I tests/firmware/stubs -I firmware/src tests/firmware/test_checked_json.cpp -o /tmp/test_checked_json
+          /tmp/test_checked_json
+          g++ -std=c++17 -Wall -Wextra -I firmware/src tests/firmware/test_compression_output.cpp -o /tmp/test_compression_output
+          /tmp/test_compression_output

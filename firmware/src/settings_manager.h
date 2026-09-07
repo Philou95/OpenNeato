@@ -20,7 +20,7 @@ struct SchedDay {
 };
 
 // All user-configurable settings — flat struct, serializable to/from JSON
-struct Settings : public JsonSerializable {
+struct Settings {
     String hostname = DEFAULT_HOSTNAME;
     String tz = NTP_DEFAULT_TZ;
     int logLevel = LOG_LEVEL_OFF; // 0=off, 1=info, 2=debug (auto-expires back to off)
@@ -68,8 +68,10 @@ struct Settings : public JsonSerializable {
     int autoRestartMinute = 0;
     bool restartBeforeClean = false;
 
-    std::vector<Field> toFields() const override;
-    bool fromFields(const std::vector<Field>& fields) override;
+    // Empty on allocation failure; HTTP handlers return 503 instead of partial JSON.
+    String toJson() const;
+    bool fromFields(const std::vector<Field>& fields);
+    bool fromJson(const String& json) { return fromFields(fieldsFromJson(json)); }
 };
 
 enum ApplyResult { APPLY_UNCHANGED, APPLY_CHANGED, APPLY_INVALID };

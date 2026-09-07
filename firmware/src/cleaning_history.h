@@ -8,6 +8,7 @@
 #include <memory>
 #include <set>
 #include "config.h"
+#include "compression_output.h"
 #include "data_logger.h"
 #include "neato_commands.h"
 
@@ -263,6 +264,9 @@ private:
     File compressDst;
     heatshrink_encoder compressEncoder;
     bool compressInputDone = false;
+    bool compressVerifying = false;
+    bool compressRetried = false;
+    CompressionOutput compressOutput;
     String compressSrcPath;
     String compressDstPath;
     // compressStep() returns true both when it finishes and when it gives up,
@@ -278,6 +282,7 @@ private:
     size_t compressBytesOut = 0;
     size_t compressSrcSize = 0;
 
+    bool startCompression(const String& source, bool retry = false);
     bool compressStep(); // Returns true when done or on failure; see compressFailed
     bool abortCompression(const char *why, size_t expected = 0, size_t written = 0);
     void recordStorageFailure(const char *operation, const char *reason, const String& path, size_t expected,

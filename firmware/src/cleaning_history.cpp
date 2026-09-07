@@ -426,7 +426,11 @@ void CleaningHistory::tick() {
             // Compression done - remove raw source and cache metadata
             compressSrc.close();
             compressDst.close();
-            SPIFFS.remove(compressSrcPath);
+            if (!SPIFFS.remove(compressSrcPath))
+                recordStorageFailure("compression", "raw cleanup failed", compressSrcPath, 0, 0);
+            dataLogger.logGenericEvent("history_compress_done",
+                                       {{"path", compressDstPath, FIELD_STRING},
+                                        {"retried", compressRetried ? "true" : "false", FIELD_BOOL}});
             LOG("HIST", "Compression done: %s (%u -> %u bytes)", compressDstPath.c_str(),
                 static_cast<unsigned>(compressBytesIn), static_cast<unsigned>(compressBytesOut));
 
@@ -668,38 +672,42 @@ void CleaningHistory::stopCollection() {
                                                     {"recharges", String(rechargeCount), FIELD_INT},
                                                     {"battery_end", String(batteryEnd), FIELD_INT}});
 
-        // Start non-blocking compression: raw .jsonl -> .jsonl.hs
-        compressSrcPath = activeFilePath;
-        compressDstPath = activeFilePath + ".hs";
-        compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
-        compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
-        if (compressSrc && compressDst) {
-            heatshrink_encoder_reset(&compressEncoder);
-            compressInputDone = false;
-            compressing = true;
-            compressFailed = false;
-            compressBytesIn = 0;
-            compressBytesOut = 0;
-            // Read once, here: compressSrc is consumed by the time the tally
-            // is checked, and size() on a spent handle is not worth trusting.
-            compressSrcSize = compressSrc.size();
-            setInterval(HISTORY_COMPRESS_INTERVAL_MS);
-            LOG("HIST", "Starting compression: %s -> %s (%u bytes)", compressSrcPath.c_str(), compressDstPath.c_str(),
-                static_cast<unsigned>(compressSrcSize));
-        } else {
-            // Compression failed - keep raw file
-            if (compressSrc)
-                compressSrc.close();
-            if (compressDst)
-                compressDst.close();
-            LOG("HIST", "Compression setup failed, keeping raw file");
-            SPIFFS.remove(compressDstPath);
-            recordStorageFailure("compression", "open failed", compressSrcPath, 0, 0);
-        }
+        startCompression(activeFilePath);
     });
 }
 
 // -- Incremental compression (called from tick) ------------------------------
+
+bool CleaningHistory::startCompression(const String& source, bool retry) {
+    compressSrcPath = source;
+    // Only a closed, verified stream may acquire the public .hs name.
+    compressDstPath = source + ".hs.tmp";
+    compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
+    compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
+    compressRetried = retry;
+    compressFailed = false;
+    compressVerifying = false;
+    compressInputDone = false;
+    compressBytesIn = compressBytesOut = 0;
+    compressSrcSize = compressSrc ? compressSrc.size() : 0;
+    compressOutput.reset();
+    if (!compressSrc || !compressDst) {
+        compressSrc.close();
+        compressDst.close();
+        SPIFFS.remove(compressDstPath);
+        compressFailed = true;
+        compressing = false;
+        listJsonDirty = true;
+        recordStorageFailure("compression", "open failed", compressSrcPath, 0, 0);
+        return false;
+    }
+    heatshrink_encoder_reset(&compressEncoder);
+    compressing = true;
+    setInterval(HISTORY_COMPRESS_INTERVAL_MS);
+    dataLogger.logGenericEvent("history_compress_start", {{"path", compressSrcPath, FIELD_STRING},
+                                                          {"retry", retry ? "true" : "false", FIELD_BOOL}});
+    return true;
+}
 
 // Give up on the compressed copy and say so, loudly enough to find later.
 //
@@ -717,6 +725,10 @@ bool CleaningHistory::abortCompression(const char *why, size_t expected, size_t 
     compressFailed = true;
     recordStorageFailure("compression", why, compressSrcPath, expected ? expected : compressSrcSize,
                          expected ? written : compressBytesIn);
+    // Retry the entire stream once with fresh handles/encoder. Never append
+    // after a short write: stdio buffering makes the committed offset uncertain.
+    if (!compressRetried && startCompression(compressSrcPath, true))
+        return false;
     return true;
 }
 
@@ -742,6 +754,19 @@ void CleaningHistory::recordStorageFailure(const char *operation, const char *re
 }
 
 bool CleaningHistory::compressStep() {
+    if (compressVerifying) {
+        auto result = compressOutput.verifyStep(compressDst);
+        if (result == CompressionOutput::INVALID)
+            return abortCompression("read-back mismatch");
+        if (result == CompressionOutput::MORE)
+            return false;
+        compressDst.close();
+        String finalPath = compressSrcPath + ".hs";
+        if (SPIFFS.exists(finalPath) || !SPIFFS.rename(compressDstPath, finalPath))
+            return abortCompression("publish failed");
+        compressDstPath = finalPath;
+        return true;
+    }
     static const size_t CHUNK_SIZE = 512;
     uint8_t inBuf[CHUNK_SIZE];
     uint8_t outBuf[CHUNK_SIZE];
@@ -768,18 +793,11 @@ bool CleaningHistory::compressStep() {
                     if (pres < 0)
                         return abortCompression("poll");
                     if (outSz > 0) {
-                        // The write that was never checked. SPIFFS can write
-                        // short, and heatshrink output is a stream: lose a few
-                        // bytes here and every byte after them decodes against
-                        // the wrong back-references. The 21:30 run of
-                        // 2026-09-03 came out readable for 1022 of its 1776
-                        // snapshots and then dissolved into fragments of its
-                        // own earlier text, which is exactly what that looks
-                        // like from the far end.
-                        size_t written = compressDst.write(outBuf, outSz);
-                        compressBytesOut += written;
-                        if (written != outSz)
-                            return abortCompression("short write", outSz, written);
+                        bool ok = compressOutput.append(compressDst, outBuf, outSz);
+                        compressBytesOut = compressOutput.size;
+                        if (!ok)
+                            return abortCompression("short buffered write", compressOutput.lastExpected,
+                                                    compressOutput.lastWritten);
                     }
                 } while (pres == HSER_POLL_MORE);
             }
@@ -799,10 +817,11 @@ bool CleaningHistory::compressStep() {
         if (pres < 0)
             return abortCompression("poll during finish");
         if (outSz > 0) {
-            size_t written = compressDst.write(outBuf, outSz);
-            compressBytesOut += written;
-            if (written != outSz)
-                return abortCompression("short write during finish", outSz, written);
+            bool ok = compressOutput.append(compressDst, outBuf, outSz);
+            compressBytesOut = compressOutput.size;
+            if (!ok)
+                return abortCompression("short buffered write during finish", compressOutput.lastExpected,
+                                        compressOutput.lastWritten);
         }
     } while (pres == HSER_POLL_MORE);
 
@@ -816,11 +835,22 @@ bool CleaningHistory::compressStep() {
     if (compressBytesIn != compressSrcSize)
         return abortCompression("input short of source");
 
-    // An empty output for a non-empty input is not a compression, it is a loss.
+    bool flushed = compressOutput.flush(compressDst);
+    compressBytesOut = compressOutput.size;
+    if (!flushed)
+        return abortCompression("short final write", compressOutput.lastExpected, compressOutput.lastWritten);
     if (compressBytesOut == 0 && compressBytesIn > 0)
         return abortCompression("no output");
 
-    return true;
+    // fclose can reveal a buffered write error. Reopen and verify the bytes
+    // from flash over successive ticks, before publishing or deleting anything.
+    compressDst.close();
+    compressSrc.close();
+    compressDst = SPIFFS.open(compressDstPath, FILE_READ);
+    if (!compressDst)
+        return abortCompression("verification open failed");
+    compressVerifying = true;
+    return false;
 }
 
 // -- Session header/summary --------------------------------------------------
@@ -1170,6 +1200,7 @@ void CleaningHistory::finalizeOrphanSessions() {
     std::sort(allFiles.begin(), allFiles.end(), [](const String& a, const String& b) { return a > b; });
 
     std::vector<String> orphans;
+    String completedRaw;
     for (const auto& path: allFiles) {
         if (path.endsWith(".jsonl.hs"))
             break; // Completed session boundary
@@ -1179,15 +1210,26 @@ void CleaningHistory::finalizeOrphanSessions() {
         }
         String firstLine, lastLine;
         readFirstLastLines(path, false, firstLine, lastLine);
-        if (lastLine.indexOf("\"type\":\"summary\"") >= 0)
+        if (lastLine.indexOf("\"type\":\"summary\"") >= 0) {
+            if (completedRaw.isEmpty())
+                completedRaw = path;
             continue;
+        }
         orphans.push_back(path);
     }
 
-    if (orphans.empty())
+    if (orphans.empty()) {
+        // A failed/interrupted compression leaves a complete raw journal.
+        // Retry the newest one at idle boot, with the same verified publication.
+        if (!completedRaw.isEmpty() && !compressing) {
+            readFirstLastLines(completedRaw, false, pendingSessionJson, pendingSummaryJson);
+            startCompression(completedRaw);
+        }
         return;
+    }
 
-    // Finalize each orphan: replay to rebuild stats, write summary, compress
+    // Finalize all orphans before capturing metadata for the compression job.
+    String compressionCandidate;
     for (const auto& orphanPath: orphans) {
         resetSession();
 
@@ -1228,29 +1270,16 @@ void CleaningHistory::finalizeOrphanSessions() {
         dataLogger.logGenericEvent("history_finalize", {{"path", orphanPath, FIELD_STRING},
                                                         {"snapshots", String(snapshotCount), FIELD_INT}});
 
-        // Queue compression (only one at a time — first orphan wins, rest will
-        // be picked up on next boot or left as uncompressed)
-        if (!compressing) {
-            compressSrcPath = orphanPath;
-            compressDstPath = orphanPath + ".hs";
-            compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
-            compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
-            if (compressSrc && compressDst) {
-                heatshrink_encoder_reset(&compressEncoder);
-                compressInputDone = false;
-                compressing = true;
-                setInterval(HISTORY_COMPRESS_INTERVAL_MS);
-            } else {
-                if (compressSrc)
-                    compressSrc.close();
-                if (compressDst)
-                    compressDst.close();
-            }
-        }
+        if (compressionCandidate.isEmpty())
+            compressionCandidate = orphanPath;
     }
 
     activeFilePath = "";
     activeFile = File();
+    if (!compressionCandidate.isEmpty() && !compressing) {
+        readFirstLastLines(compressionCandidate, false, pendingSessionJson, pendingSummaryJson);
+        startCompression(compressionCandidate);
+    }
 }
 
 void CleaningHistory::collectSnapshot() {
