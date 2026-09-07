@@ -1087,6 +1087,7 @@ class AccumulatedMap:
         free: set[tuple[int, int]] | None = None,
         correction: tuple[float, ...] = (0.0, 0.0, 0.0),
         contribute: bool = True,
+        angle_hint: float | None = None,
     ) -> dict[str, Any]:
         """Fold one cleaning into the accumulated map, re-aligning it first.
 
@@ -1104,7 +1105,7 @@ class AccumulatedMap:
 
         if self.walls:
             quarter, dx, dy, overlap, fine, scores, clipped = align_to_reference(
-                walls, self.walls
+                walls, self.walls, angle_hint=angle_hint
             )
             # The overlap says whether the session looks like the map, the
             # margin whether it is that quarter turn and not another. A merge

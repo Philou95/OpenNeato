@@ -34,3 +34,29 @@ raison de mesurer à nouveau ni de découper la session en morceaux à recaler.
 
 Le cycle actif n'a pas été interrompu : aucun redémarrage ou déploiement pendant
 le nettoyage pour ce correctif.
+
+### Orientation avant les 25 scans
+
+Le frameOffset initial est désormais lu dès les premiers scans, sans attendre le
+seuil du recalage. Tant que le pont collecte et que la mesure initiale est valide,
+le trajet brut est affiché avec la rotation complète `-frameOffset`, quart compris,
+autour de son origine. Aucune translation ni correction SLAM n'est inventée à ce
+stade. Le fond de carte et ses alignements historiques restent inchangés.
+
+Cette orientation reste séparée du placement géométrique : elle ne décale pas la
+première tentative à 25 scans, ne ralentit pas ses réessais et ne devient pas une
+fusion acceptée. Le premier recalage accepté la remplace, puis l'alignement final
+sauvegardé prend la priorité. La clé de cache du replay inclut déjà l'alignement.
+
+L'indication est également transmise explicitement à la fusion finale. Avant de
+chercher l'angle sur la grille corrigée, on retire la rotation SLAM de l'indication
+du trajet brut, puis on réduit modulo 90°. Les murs restent prioritaires lorsqu'ils
+donnent un angle fiable ; sinon les recherches orientée et aveugle sont comparées.
+Il n'y a donc pas de promesse d'accélération systématique du calcul final.
+
+Régressions : orientation avant 25 scans, quart de tour complet, rejet du statut
+d'un ancien cycle inactif, priorité du recalage et de la fusion, correction du
+repère de l'indication et transmission au calcul final. Sur une reconstruction
+hors ligne des 518 captures du cycle 1788769075, les recherches finale avec et sans
+indication rendent exactement le même résultat. Cette reconstruction ne remplace
+pas la transformation effectivement sauvegardée pendant le cycle.

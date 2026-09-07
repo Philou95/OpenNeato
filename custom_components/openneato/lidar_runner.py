@@ -273,6 +273,7 @@ class LidarMapRunner:
         # walls. None until the bridge has measured it. See _frame_angle_hint().
         self._frame_hint: float | None = None
         self._frame_hint_done = False
+        self._frame_rotation: float | None = None
         self._aligning = False
         self._collecting = False
         self._unsub_timer = None
@@ -394,6 +395,7 @@ class LidarMapRunner:
         self._live_stable = 0
         self._frame_hint = None
         self._frame_hint_done = False
+        self._frame_rotation: float | None = None
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -461,7 +463,7 @@ class LidarMapRunner:
             return None
         return align_to_reference(walls, ref_walls, angle_hint=angle_hint)
 
-    async def _frame_angle_hint(self) -> float | None:
+    async def _frame_angle_hint(self, require_active: bool = False) -> float | None:
         """Roughly which way this run is recorded, as the robot itself reports it.
 
         The firmware measures the angle between the frame it records (the
@@ -495,6 +497,8 @@ class LidarMapRunner:
         except Exception as err:  # noqa: BLE001 -- un affichage ne coute pas un run
             _LOGGER.debug("LIDAR mapping: etat du pont illisible (%s)", err)
             return None
+        if require_active and not status.get("collecting"):
+            return None
         if not status.get("frameOffsetKnown") or status.get("frameOffsetStatus") in ("pending", "unknown"):
             # Not taken yet: the firmware waits for the heading to be quiet, so
             # a run that starts on a turn takes a few more snapshots.
@@ -507,6 +511,7 @@ class LidarMapRunner:
             return None
         self._frame_hint_done = True
         total = -offset
+        self._frame_rotation = total
         self._frame_hint = total - 90.0 * round(total / 90.0)
         _LOGGER.info(
             "LIDAR mapping: le pont donne le repere du run — %+.2f deg, soit "
@@ -515,6 +520,23 @@ class LidarMapRunner:
             -total, self._frame_hint,
         )
         return self._frame_hint
+
+    async def _orient_live_from_frame(self) -> None:
+        """Orient the raw replay before enough scans exist for a geometric fit."""
+        if (self._live_align is not None or self._frame_hint_done
+                or not self._captures or not self._session_name
+                or self._map is None or not self._map.walls):
+            return
+        # The previous run's cached frame can still exist before collection
+        # starts. Require an active bridge and scans belonging to this run.
+        await self._frame_angle_hint(require_active=True)
+
+    def _corrected_frame_hint(self, correction: tuple[float, ...]) -> float | None:
+        """Convert the raw-path hint to the frame of the corrected scan grid."""
+        if self._frame_hint is None:
+            return None
+        hint = self._frame_hint - correction[2]
+        return hint - 90.0 * round(hint / 90.0)
 
     async def _align_live(self) -> bool:
         """Place the run in progress on the map, without waiting for the merge.
@@ -562,7 +584,8 @@ class LidarMapRunner:
         self._aligning = True
         scans = self._tracker.placed
         try:
-            hint = await self._frame_angle_hint()
+            await self._frame_angle_hint()
+            hint = self._corrected_frame_hint(self._tracker.correction)
             fit = await self.hass.async_add_executor_job(
                 self._fit_live, self._tracker, self._map.walls, hint
             )
@@ -688,6 +711,7 @@ class LidarMapRunner:
             # Before sampling, and under the same flag: the fit holds the
             # executor for one to five seconds, and a tick that sampled during
             # that would put two serial reads in parallel.
+            await self._orient_live_from_frame()
             if await self._align_live():
                 return
             # Prefer what the bridge kept for us. It samples on its own loop
@@ -1006,9 +1030,10 @@ class LidarMapRunner:
         # written. Five cleanings of accumulated walls deserve a copy before
         # being erased on an automatic judgement.
         before = self._map.as_dict()
+        await self._frame_angle_hint()
         report = await self.hass.async_add_executor_job(
             self._map.merge_session, walls, floor, session_name, free,
-            correction, contributes,
+            correction, contributes, self._corrected_frame_hint(correction),
         )
         self.last_report = report
         if report.get("rejected"):
@@ -1305,7 +1330,7 @@ class LidarMapRunner:
             return None
         return plan_calibration(self._map.walls, self._map.floor)
 
-    def alignment(self, session_name: str) -> tuple[int, int, int] | None:
+    def alignment(self, session_name: str) -> tuple[float, ...] | None:
         """How this session was corrected onto the map, if it was merged.
 
         The card needs it to draw the run in the same frame as the walls;
@@ -1323,12 +1348,15 @@ class LidarMapRunner:
         merged = self._map.alignments.get(key)
         if merged is not None:
             return merged
-        if (
-            self._live_align is not None
-            and self._session_name
-            and alignment_key(self._session_name) == key
-        ):
-            return self._live_align
+        if self._session_name and alignment_key(self._session_name) == key:
+            if self._live_align is not None:
+                return self._live_align
+            if self._frame_rotation is not None and self._map.walls:
+                quarter = round(self._frame_rotation / 90.0)
+                fine = self._frame_rotation - quarter * 90.0
+                # Pure raw-path rotation about the dock; no estimated
+                # translation or SLAM correction before the geometric fit.
+                return (quarter % 4, 0, 0, fine, 0.0, 0.0, 0.0)
         return None
 
     def view_rotation(self, user_offset: float = 0.0) -> float:

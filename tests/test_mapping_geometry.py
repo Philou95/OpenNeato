@@ -206,9 +206,61 @@ class LivePlacementTests(unittest.IsolatedAsyncioTestCase):
         coordinator = types.SimpleNamespace(data={}, async_add_listener=lambda fn: lambda: None)
         result = runner.LidarMapRunner(Hass(), "offline", bridge, coordinator)
         result._tracker = types.SimpleNamespace(placed=25, correction=(0., 0., 0.))
-        result._map = types.SimpleNamespace(walls={(0,0): 10})
+        result._map = types.SimpleNamespace(walls={(0,0): 10}, alignments={})
         result._session_name = "100.jsonl"
         return result
+
+    async def test_frame_preview_rotates_raw_replay_before_25_scans(self):
+        r = self.make_runner()
+        r._tracker.placed = 1
+        r._captures = [object()]
+        r.api.get_lidar_status.return_value.update(collecting=1, frameOffsetStatus="initial")
+        await r._orient_live_from_frame()
+        self.assertIsNone(r._live_align)
+        self.assertEqual(r._live_align_at, 0.)
+        placement = r.alignment("100.jsonl.hs")
+        self.assertEqual(placement[0], 1)
+        self.assertAlmostEqual(placement[3], -1.74)
+        point = replay._apply_alignment([(1., 0., 0., 0.)], placement)[0]
+        self.assertAlmostEqual(point[0], math.cos(math.radians(88.26)))
+        self.assertAlmostEqual(point[1], math.sin(math.radians(88.26)))
+        self.assertIsNone(r.alignment("99.jsonl"))
+
+    async def test_preview_ignores_inactive_previous_frame_then_retries(self):
+        r = self.make_runner()
+        r._captures = [object()]
+        r.api.get_lidar_status.return_value.update(collecting=0)
+        await r._orient_live_from_frame()
+        self.assertIsNone(r.alignment("100.jsonl"))
+        self.assertFalse(r._frame_hint_done)
+        r.api.get_lidar_status.return_value.update(collecting=1, frameOffset=-1.15)
+        await r._orient_live_from_frame()
+        self.assertAlmostEqual(r.alignment("100.jsonl")[3], 1.15)
+
+    async def test_geometric_then_saved_alignment_take_precedence(self):
+        r = self.make_runner()
+        await r._frame_angle_hint()
+        fit = (0, -4, -4, .6, -.5, (.6,.1,.1,.1), False)
+        with patch.object(r, "_fit_live", return_value=fit):
+            await r._align_live()
+        self.assertEqual(r.alignment("100.jsonl")[:4], (0,-4,-4,-.5))
+        saved = (0,-11,-3,-.3,1.,2.,-.17)
+        r._map.alignments["100.jsonl"] = saved
+        self.assertEqual(r.alignment("100.jsonl.hs"), saved)
+
+    async def test_hint_is_adjusted_for_the_corrected_grid(self):
+        r = self.make_runner()
+        await r._frame_angle_hint()
+        self.assertAlmostEqual(r._corrected_frame_hint((0.,0.,2.)), -3.74)
+        self.assertAlmostEqual(r._corrected_frame_hint((0.,0.,92.)), -3.74)
+
+    def test_merge_passes_hint_to_geometric_search(self):
+        store = mapper.AccumulatedMap()
+        store.walls = {(0,0):10}
+        fit = (0,0,0,.9,1.,(.9,.1,.1,.1),False)
+        with patch.object(mapper, "align_to_reference", return_value=fit) as search:
+            store.merge_session({(0,0):10}, set(), "new.jsonl", angle_hint=1.3)
+        self.assertEqual(search.call_args.kwargs["angle_hint"], 1.3)
 
     async def test_first_attempt_does_not_wait_for_five_minutes_of_uptime(self):
         r = self.make_runner()
