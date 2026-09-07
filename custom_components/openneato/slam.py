@@ -189,35 +189,50 @@ def icp(src, dst, x0, y0, th0, iters=ICP_ITERS, max_pair=MAX_PAIR_M):
         fit = m / n
         if abs(dth) < 1e-4 and res < 0.02:
             break
+    # Acceptance and edge weights must describe the returned pose, including
+    # the last update (also when the iteration limit stopped convergence).
+    c, s = math.cos(th), math.sin(th)
+    ds = []
+    for px0, py0 in src:
+        d, k = g.nearest(px0 * c - py0 * s + x, px0 * s + py0 * c + y, max_pair)
+        if k >= 0:
+            ds.append(d)
+    if len(ds) < ICP_MIN_PTS:
+        return x, y, th, 9.9, 0.0
+    res, fit = _median(ds), len(ds) / n
     return x, y, th, res, fit
 
 
-def _residual(pose_list, i, j, z):
+def _residual(pose_list, i, j, z, rotations=None, z_rotation=None):
     xi, yi, ti = pose_list[i]
     xj, yj, tj = pose_list[j]
-    ci, si = math.cos(ti), math.sin(ti)
+    ci, si = (math.cos(ti), math.sin(ti)) if rotations is None else rotations[i]
     dx, dy = xj - xi, yj - yi
     px = ci * dx + si * dy
     py = -si * dx + ci * dy
     zx, zy, zt = z
     qx, qy = px - zx, py - zy
-    cz, sz = math.cos(zt), math.sin(zt)
+    cz, sz = (math.cos(zt), math.sin(zt)) if z_rotation is None else z_rotation
     return (cz * qx + sz * qy, -sz * qx + cz * qy,
             wrap(tj - ti - zt), ci, si, cz, sz, dx, dy)
 
 
-def _blocks(ci, si, cz, sz, dx, dy):
+def _blocks(ci, si, cz, sz, dx, dy, is_i=None):
     a00, a01 = -ci, -si
     a10, a11 = si, -ci
-    c0 = -si * dx + ci * dy
-    c1 = -ci * dx - si * dy
     a_00 = cz * a00 + sz * a10
     a_01 = cz * a01 + sz * a11
-    a_02 = cz * c0 + sz * c1
     a_10 = -sz * a00 + cz * a10
     a_11 = -sz * a01 + cz * a11
+    if is_i is False:
+        return (-a_00, -a_01, 0.0, -a_10, -a_11, 0.0, 0.0, 0.0, 1.0)
+    c0 = -si * dx + ci * dy
+    c1 = -ci * dx - si * dy
+    a_02 = cz * c0 + sz * c1
     a_12 = -sz * c0 + cz * c1
     mat_a = (a_00, a_01, a_02, a_10, a_11, a_12, 0.0, 0.0, -1.0)
+    if is_i is True:
+        return mat_a
     mat_b = (-a_00, -a_01, 0.0, -a_10, -a_11, 0.0, 0.0, 0.0, 1.0)
     return mat_a, mat_b
 
@@ -250,32 +265,35 @@ def _solve3(h00, h01, h02, h11, h12, h22, b0, b1, b2, damp):
     return x0, x1, x2
 
 
-def optimise(poses, edges, sweeps=SWEEPS, fixed=0, huber=HUBER_M, omega=OMEGA):
+def optimise(poses, edges, sweeps=SWEEPS, fixed=0, huber=HUBER_M, omega=OMEGA, stats=None):
     """Block Gauss-Seidel relaxation. Returns the list of corrected poses."""
     grid = [[float(p[0]), float(p[1]), float(p[2])] for p in poses]
     n_nodes = len(grid)
+    rotations = [(math.cos(p[2]), math.sin(p[2])) for p in grid]
     inc = [[] for _ in range(n_nodes)]
     for edge in edges:
-        inc[edge[0]].append((edge, True))
-        inc[edge[1]].append((edge, False))
+        z_rotation = (math.cos(edge[2][2]), math.sin(edge[2][2]))
+        inc[edge[0]].append((edge, True, z_rotation))
+        inc[edge[1]].append((edge, False, z_rotation))
 
-    for _ in range(sweeps):
+    completed = 0
+    converged = False
+    max_translation_step = max_rotation_step = 0.0
+    for sweep in range(sweeps):
         biggest = 0.0
+        max_translation_step = max_rotation_step = 0.0
         for node in range(n_nodes):
             if node == fixed or not inc[node]:
                 continue
             h00 = h01 = h02 = h11 = h12 = h22 = 0.0
             b0 = b1 = b2 = 0.0
-            for edge, is_i in inc[node]:
+            for edge, is_i, z_rotation in inc[node]:
                 i, j, z, w = edge
-                ex, ey, eth, ci, si, cz, sz, dx, dy = _residual(grid, i, j, z)
+                ex, ey, eth, ci, si, cz, sz, dx, dy = _residual(grid, i, j, z, rotations, z_rotation)
                 nrm = math.hypot(ex, ey)
                 k = 1.0 if nrm <= huber else huber / nrm
                 ww = w * k
-                mat_a, mat_b = _blocks(ci, si, cz, sz, dx, dy)
-                j00, j01, j02, j10, j11, j12, j20, j21, j22 = (
-                    mat_a if is_i else mat_b
-                )
+                j00, j01, j02, j10, j11, j12, j20, j21, j22 = _blocks(ci, si, cz, sz, dx, dy, is_i)
                 h00 += ww * (j00 * j00 + j10 * j10 + j20 * j20)
                 h01 += ww * (j00 * j01 + j10 * j11 + j20 * j21)
                 h02 += ww * (j00 * j02 + j10 * j12 + j20 * j22)
@@ -291,10 +309,47 @@ def optimise(poses, edges, sweeps=SWEEPS, fixed=0, huber=HUBER_M, omega=OMEGA):
             grid[node][0] += omega * step[0]
             grid[node][1] += omega * step[1]
             grid[node][2] = wrap(grid[node][2] + omega * step[2])
+            # Gauss-Seidel uses freshly updated neighbours within this sweep.
+            # Refresh immediately, not once per sweep, to preserve that order.
+            rotations[node] = (math.cos(grid[node][2]), math.sin(grid[node][2]))
             biggest = max(biggest, abs(step[0]), abs(step[1]), abs(step[2]))
+            if stats is not None:
+                max_translation_step = max(max_translation_step, abs(omega) * math.hypot(step[0], step[1]))
+                max_rotation_step = max(max_rotation_step, abs(omega * step[2]))
+        completed = sweep + 1
         if biggest < TOL_M:
+            converged = True
             break
+    if stats is not None:
+        stats.update(
+            sweeps=completed, converged=converged,
+            last_translation_step_m=max_translation_step,
+            last_rotation_step_deg=math.degrees(max_rotation_step),
+            before=graph_residuals(poses, edges), after=graph_residuals(grid, edges),
+        )
     return grid
+
+
+def graph_residuals(poses, edges):
+    """Report graph consistency in separate physical units, not map accuracy.
+
+    These unweighted summaries expose conflicting constraints without changing
+    their acceptance or the solver's existing robust weighting.
+    """
+    translations, angles = [], []
+    for i, j, z, _ in edges:
+        ex, ey, eth, *_ = _residual(poses, i, j, z)
+        translations.append(math.hypot(ex, ey))
+        angles.append(abs(math.degrees(eth)))
+
+    def summary(values):
+        if not values:
+            return {"rms": 0.0, "p95": 0.0, "max": 0.0}
+        ordered = sorted(values)
+        return {"rms": math.sqrt(math.fsum(v*v for v in values) / len(values)),
+                "p95": ordered[math.ceil(.95 * len(ordered)) - 1], "max": ordered[-1]}
+
+    return {"edges": len(edges), "translation_m": summary(translations), "rotation_deg": summary(angles)}
 
 
 def clouds(scans, max_range_m, lidar_behind_m):

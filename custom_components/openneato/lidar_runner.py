@@ -14,9 +14,11 @@ of its normal rate.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
+import re
 import time
 from functools import partial
 from pathlib import Path
@@ -47,6 +49,7 @@ from .lidar_mapper import (
     alignment_key,
     render_plan,
     scan_points,
+    scan_weight,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -110,13 +113,13 @@ HEALTH_EVERY = 300.0
 HEALTH_GRACE = 600.0
 # Placing the run in progress on the map. See _align_live().
 #
-# 25 scans are enough to name the right quarter turn on both replayed runs; 40
-# leaves margin at no cost, putting the first attempt around the third minute
-# of the cleaning. It then repeats at the same rate as the health check: a fit
-# costs one to five seconds of executor time and makes a tick skip its
-# sampling, so twelve times an hour is generous for a display.
+# Start from the 25 scans already sufficient on the recorded reference runs.
+# An undecided first fit must not hide the frame hint behind a five-minute
+# retry delay. Once placed, retain the slower cadence for translation updates.
+# Repeated failures back off to that same cadence, without abandoning placement.
 LIVE_ALIGN_EVERY = 300.0
-LIVE_ALIGN_MIN_SCANS = 40
+LIVE_ALIGN_RETRY_EVERY = 30.0
+LIVE_ALIGN_MIN_SCANS = 25
 # ...and we stop as soon as the answer repeats, because it no longer moves.
 # Replayed on runs 8 and 9: the quarter turn is right from the first attempt,
 # the translation settles on the second (run 9) or the third (run 8), and the
@@ -183,15 +186,17 @@ def _mappable(state: str) -> bool:
     )
 
 
-def _parse_scans(text: str) -> tuple[list[tuple], int]:
+def _parse_scans(
+    text: str, after: int = 0, boot_id: str | None = None,
+    stats: dict[str, int] | None = None,
+) -> tuple[list[tuple], int, str | None]:
     """NDJSON from the bridge -> capture tuples. CPU-bound; run in the executor.
 
     Returns the scans worth keeping and the highest sequence number seen --
     including the ones dropped for smear, or the bridge would resend them for
     ever.
     """
-    out: list[tuple] = []
-    high = 0
+    records = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -200,10 +205,33 @@ def _parse_scans(text: str) -> tuple[list[tuple], int]:
             rec = json.loads(line)
         except ValueError:
             continue
-        high = max(high, int(rec.get("seq", 0)))
+        if isinstance(rec, dict) and isinstance(rec.get("seq"), int) and rec["seq"] > 0:
+            records.append(rec)
+    if not records:
+        return [], after, boot_id
+    generation = records[0].get("boot")
+    if generation is not None and (
+        not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{16}", generation)
+    ):
+        raise ValueError("Invalid scan buffer boot identifier")
+    if any(rec.get("boot") != generation for rec in records):
+        raise ValueError("Scan batch contains multiple boot identifiers")
+    out: list[tuple] = []
+    high = after if generation == boot_id else 0
+    for rec in records:
+        if rec["seq"] <= high:
+            continue  # A repeated or partially acknowledged batch is normal.
+        high = rec["seq"]
+        if stats is not None:
+            stats["received"] = stats.get("received", 0) + 1
         moved = float(rec.get("mv", 0.0))
         turned = float(rec.get("tn", 0.0))
         if moved > MAX_MOVE_DURING_SCAN_M or turned > MAX_TURN_DURING_SCAN_DEG:
+            if stats is not None:
+                stats["motion"] = stats.get("motion", 0) + 1
+                for key, rejected in (("turn", turned > MAX_TURN_DURING_SCAN_DEG),
+                                      ("move", moved > MAX_MOVE_DURING_SCAN_M)):
+                    stats[key] = stats.get(key, 0) + int(rejected)
             # Smeared across two positions: worse than no scan at all, because
             # it lays walls that were never there.
             continue
@@ -215,7 +243,7 @@ def _parse_scans(text: str) -> tuple[list[tuple], int]:
             float(rec.get("t", 0.0)), points, float(rec.get("rpm", 0.0)),
             moved, turned,
         ))
-    return out, high
+    return out, high, generation
 
 
 class LidarMapRunner:
@@ -234,6 +262,7 @@ class LidarMapRunner:
         self._bak_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_lidar_map_backup")
         self._pending_captures: list | None = None
         self._pending_session: str | None = None
+        self._pending_cursor: tuple[str | None, int] = (None, 0)
         self._last_persist = 0.0
         self._map: AccumulatedMap | None = None
         self._captures: list[tuple[float, float, float, list[tuple[int, int]]]] = []
@@ -249,17 +278,22 @@ class LidarMapRunner:
         # See _align_live().
         self._live_align: tuple[int, int, int, float, float, float, float] | None = None
         self._live_align_at = 0.0
+        self._live_attempts = 0
         self._live_stable = 0
+        self._scan_stats: dict[str, int] = {}
         # Which way round this run is recorded, from the robot rather than the
         # walls. None until the bridge has measured it. See _frame_angle_hint().
         self._frame_hint: float | None = None
         self._frame_hint_done = False
+        self._frame_rotation: float | None = None
         self._aligning = False
         self._collecting = False
         self._unsub_timer = None
         self._unsub_coordinator = None
         self._interval = POLL_INTERVAL
         self._busy = False
+        self._run_lock = asyncio.Lock()
+        self._unloaded = False
         self._last_health = 0.0
         # Collection start, kept apart from the health window anchor: the grace
         # period is about how long the run has been going, not how long since
@@ -273,6 +307,7 @@ class LidarMapRunner:
         # False on a bridge too old to have one.
         self._buffer_ok: bool | None = None
         self._last_seq = 0
+        self._scan_boot_id: str | None = None
         self._empty_drains = 0
         self.last_report: dict[str, Any] = {}
         # True from the moment a run ends until the map has been rebuilt around
@@ -295,6 +330,7 @@ class LidarMapRunner:
         if saved and saved.get("captures"):
             self._pending_captures = saved["captures"]
             self._pending_session = saved.get("session")
+            self._pending_cursor = (saved.get("scan_boot_id"), int(saved.get("last_seq", 0)))
             _LOGGER.info(
                 "LIDAR mapping: %d scans recovered from an interrupted run (%s)",
                 len(self._pending_captures), self._pending_session,
@@ -303,6 +339,7 @@ class LidarMapRunner:
 
     @callback
     def async_unload(self) -> None:
+        self._unloaded = True
         self._stop_timer()
         if self._unsub_coordinator:
             self._unsub_coordinator()
@@ -312,6 +349,8 @@ class LidarMapRunner:
 
     @callback
     def _handle_update(self) -> None:
+        if self.merging or self._unloaded:
+            return
         state = ((self.coordinator.data or {}).get("state") or {}).get("uiState", "")
         cleaning = _mappable(state)
         if cleaning and not self._collecting:
@@ -325,6 +364,8 @@ class LidarMapRunner:
         # it was cleaning in is no longer readable anywhere.
         self._contributes = not any(m in state for m in NO_CONTRIBUTION)
         self._collecting = True
+        self._empty_drains = 0
+        self._scan_stats = {}
         self._captures = []
         self._last_persist = time.monotonic()
         self._interval = POLL_INTERVAL
@@ -340,6 +381,7 @@ class LidarMapRunner:
         # cleaning and not the next one.
         if self._pending_captures and self._pending_session == self._session_name:
             self._captures = [tuple(c) for c in self._pending_captures]
+            self._scan_boot_id, self._last_seq = self._pending_cursor
             _LOGGER.info(
                 "LIDAR mapping: resuming %s with %d scans already collected",
                 self._session_name, len(self._captures),
@@ -351,6 +393,7 @@ class LidarMapRunner:
             )
         self._pending_captures = None
         self._pending_session = None
+        self._pending_cursor = (None, 0)
         # Created after any resume: the tracker will take in the restored
         # captures as one batch on the first drain, which is exactly what it
         # would have done had they arrived one by one.
@@ -363,9 +406,11 @@ class LidarMapRunner:
         # frame.
         self._live_align = None
         self._live_align_at = 0.0
+        self._live_attempts = 0
         self._live_stable = 0
         self._frame_hint = None
         self._frame_hint_done = False
+        self._frame_rotation: float | None = None
         self._start_timer()
         _LOGGER.info("LIDAR mapping: collection started")
 
@@ -433,13 +478,13 @@ class LidarMapRunner:
             return None
         return align_to_reference(walls, ref_walls, angle_hint=angle_hint)
 
-    async def _frame_angle_hint(self) -> float | None:
+    async def _frame_angle_hint(self, require_active: bool = False) -> float | None:
         """Roughly which way this run is recorded, as the robot itself reports it.
 
         The firmware measures the angle between the frame it records (the
         robot's own localisation) and the odometric one, once per run, about
         thirty seconds in. It needs no walls -- which is exactly what the live
-        placement lacks, forty scans being far short of the grid
+        placement lacks, the first scans being far short of the grid
         manhattan_angle() wants.
 
         ⚠ **A direction, not an answer.** Measured against what the merge then
@@ -454,8 +499,11 @@ class LidarMapRunner:
         turn, the form align_to_reference() works in; the quarter search settles
         the rest.
 
-        Asked at most once per run -- the value does not change afterwards, and
-        the endpoint answers from RAM in a tenth of a millisecond.
+        Cache the first valid initial measurement, including one restored from
+        the journal. Raw drifts during cleaning: never replace this with a new
+        Smooth/Raw measurement later in the run. This endpoint only reads the
+        firmware's cached snapshot and does not trigger a serial probe.
+        While it is pending, a later placement attempt may read it again.
         """
         if self._frame_hint is not None or self._frame_hint_done:
             return self._frame_hint
@@ -464,12 +512,21 @@ class LidarMapRunner:
         except Exception as err:  # noqa: BLE001 -- un affichage ne coute pas un run
             _LOGGER.debug("LIDAR mapping: etat du pont illisible (%s)", err)
             return None
-        if not status.get("frameOffsetKnown"):
+        if require_active and not status.get("collecting"):
+            return None
+        if not status.get("frameOffsetKnown") or status.get("frameOffsetStatus") in ("pending", "unknown"):
             # Not taken yet: the firmware waits for the heading to be quiet, so
             # a run that starts on a turn takes a few more snapshots.
             return None
+        try:
+            offset = float(status["frameOffset"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(offset) or abs(offset) > 180.0:
+            return None
         self._frame_hint_done = True
-        total = -float(status.get("frameOffset", 0.0))
+        total = -offset
+        self._frame_rotation = total
         self._frame_hint = total - 90.0 * round(total / 90.0)
         _LOGGER.info(
             "LIDAR mapping: le pont donne le repere du run — %+.2f deg, soit "
@@ -478,6 +535,23 @@ class LidarMapRunner:
             -total, self._frame_hint,
         )
         return self._frame_hint
+
+    async def _orient_live_from_frame(self) -> None:
+        """Orient the raw replay before enough scans exist for a geometric fit."""
+        if (self._live_align is not None or self._frame_hint_done
+                or not self._captures or not self._session_name
+                or self._map is None or not self._map.walls):
+            return
+        # The previous run's cached frame can still exist before collection
+        # starts. Require an active bridge and scans belonging to this run.
+        await self._frame_angle_hint(require_active=True)
+
+    def _corrected_frame_hint(self, correction: tuple[float, ...]) -> float | None:
+        """Convert the raw-path hint to the frame of the corrected scan grid."""
+        if self._frame_hint is None:
+            return None
+        hint = self._frame_hint - correction[2]
+        return hint - 90.0 * round(hint / 90.0)
 
     async def _align_live(self) -> bool:
         """Place the run in progress on the map, without waiting for the merge.
@@ -518,13 +592,22 @@ class LidarMapRunner:
         ):
             return False
         now = time.monotonic()
-        if now - self._live_align_at < LIVE_ALIGN_EVERY:
+        interval = LIVE_ALIGN_EVERY
+        if self._live_align is None:
+            interval = min(
+                LIVE_ALIGN_EVERY,
+                LIVE_ALIGN_RETRY_EVERY * 2 ** max(0, self._live_attempts - 1),
+            )
+        if self._live_align_at and now - self._live_align_at < interval:
             return False
         self._live_align_at = now
+        # Count every attempt, including missing fits and executor errors.
+        self._live_attempts = min(self._live_attempts + 1, 5)
         self._aligning = True
         scans = self._tracker.placed
-        hint = await self._frame_angle_hint()
         try:
+            await self._frame_angle_hint()
+            hint = self._corrected_frame_hint(self._tracker.correction)
             fit = await self.hass.async_add_executor_job(
                 self._fit_live, self._tracker, self._map.walls, hint
             )
@@ -584,6 +667,7 @@ class LidarMapRunner:
         else:
             self._live_stable = 1
         self._live_align = placement
+        self._live_attempts = 0
         if first or turned:
             _LOGGER.info(
                 "LIDAR mapping: session en cours placee sur la carte apres %d "
@@ -600,8 +684,18 @@ class LidarMapRunner:
         return True
 
     async def _async_tick(self, _now=None) -> None:
-        if self._busy:
+        if self._busy or self.merging or self._unloaded:
             return
+        # Tracking can await an executor for longer than the timer interval.
+        # Reserve the whole tick before that await, including cursor updates.
+        self._busy = True
+        try:
+            async with self._run_lock:
+                await self._sample_tick()
+        finally:
+            self._busy = False
+
+    async def _sample_tick(self) -> None:
         # Before any path that can return early: this is work that has to
         # happen on every tick, whatever the robot's state.
         await self._track_new()
@@ -636,11 +730,11 @@ class LidarMapRunner:
         if time.monotonic() - self._last_health >= HEALTH_EVERY:
             self._check_health()
 
-        self._busy = True
         try:
             # Before sampling, and under the same flag: the fit holds the
             # executor for one to five seconds, and a tick that sampled during
             # that would put two serial reads in parallel.
+            await self._orient_live_from_frame()
             if await self._align_live():
                 return
             # Prefer what the bridge kept for us. It samples on its own loop
@@ -658,8 +752,9 @@ class LidarMapRunner:
             # quiet for several ticks is treated as one that has stopped
             # buffering, so a whole run can never be lost to a silent peer.
             if self._buffer_ok is not False:
+                before_cursor = (self._scan_boot_id, self._last_seq)
                 got = await self._drain_buffer()
-                if got:
+                if got or before_cursor != (self._scan_boot_id, self._last_seq):
                     self._empty_drains = 0
                     return
                 if got == 0 and self._buffer_ok:
@@ -686,6 +781,7 @@ class LidarMapRunner:
             raw_after = await self.api.send_serial_command("GetRobotPos Smooth")
             pose_after = parse_pose(str(raw_after))
             if pose and points:
+                self._scan_stats["received"] = self._scan_stats.get("received", 0) + 1
                 x, y, theta, _ts = pose
                 moved = turned = 0.0
                 if pose_after:
@@ -693,6 +789,10 @@ class LidarMapRunner:
                     moved = math.hypot(x2 - x, y2 - y)
                     turned = abs((theta2 - theta + 180.0) % 360.0 - 180.0)
                     if moved > MAX_MOVE_DURING_SCAN_M or turned > MAX_TURN_DURING_SCAN_DEG:
+                        self._scan_stats["motion"] = self._scan_stats.get("motion", 0) + 1
+                        for key, rejected in (("turn", turned > MAX_TURN_DURING_SCAN_DEG),
+                                              ("move", moved > MAX_MOVE_DURING_SCAN_M)):
+                            self._scan_stats[key] = self._scan_stats.get(key, 0) + int(rejected)
                         # The frame shifted under the beam. One scan smeared
                         # across two positions is worse than no scan at all,
                         # because it lays walls that were never there.
@@ -742,8 +842,6 @@ class LidarMapRunner:
                 await self._persist_captures()
         except Exception as err:  # noqa: BLE001 -- one bad read must never end a run
             _LOGGER.debug("LIDAR mapping: sample failed (%s)", err)
-        finally:
-            self._busy = False
 
 
 
@@ -858,16 +956,50 @@ class LidarMapRunner:
         of eight `return`s and can raise on any of them, and a merge that fails
         must not leave every card announcing one for ever.
         """
+        if self.merging or not self._collecting:
+            return
         self.merging = True
+        self._collecting = False
+        self._stop_timer()
         try:
-            await self._merge_run()
+            # Wait for the current sample/tracker executor before taking its
+            # final captures. Coordinator updates cannot start a new run here.
+            async with self._run_lock:
+                await self._drain_final_buffer()
+                await self._track_new()
+                await self._merge_run()
         finally:
             self.merging = False
+            self._handle_update()
+
+    async def _drain_final_buffer(self) -> None:
+        if self._buffer_ok is False:
+            return
+        try:
+            # Idle firmware services its queue every 30 s. An empty HTTP body
+            # can mean an acknowledged batch is awaiting that service, not an
+            # empty ring. Allow several passes and also wait for a pending scan.
+            async with asyncio.timeout(180):
+                while True:
+                    if await self._drain_buffer() is None:
+                        return
+                    status = await self.api.get_lidar_status()
+                    if not any(status.get(k) for k in ("ring", "spilling", "pending", "collecting")):
+                        return
+                    await asyncio.sleep(1)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("LIDAR mapping: final buffer drain incomplete (%s); merging received scans", err)
 
     async def _merge_run(self) -> None:
         self._collecting = False
         self._stop_timer()
         captures, self._captures = self._captures, []
+        tracker, self._tracker = self._tracker, None
+        session_name, contributes = self._session_name, self._contributes
+        if self._tracked != len(captures):
+            # Never pass a partially consumed tracker to a builder that will
+            # then ignore captures absent from that tracker.
+            tracker = None
         if len(captures) < MIN_CAPTURES:
             _LOGGER.info(
                 "LIDAR mapping: only %d captures, too thin to merge", len(captures)
@@ -877,6 +1009,20 @@ class LidarMapRunner:
         before_filter = len(captures)
         captures = self._drop_slow_scans(captures)
         dropped = before_filter - len(captures)
+        # Reception counters cover this collection process only (not restored
+        # captures). Turn/move counts overlap when both thresholds are exceeded.
+        _LOGGER.info(
+            "LIDAR mapping: %s filter diagnostics since collection start: "
+            "received=%d motion_dropped=%d (turn=%d move=%d); "
+            "stored_before_rpm=%d rpm_dropped=%d zero_weight_after_rpm=%d; "
+            "tracker_refused=%s tracker_placed=%s",
+            session_name,
+            *(self._scan_stats.get(k, 0) for k in ("received", "motion", "turn", "move")),
+            before_filter, dropped,
+            sum(len(c) >= 7 and scan_weight(c[5], c[6]) <= 0 for c in captures),
+            tracker.refused if tracker is not None else "unavailable",
+            tracker.placed if tracker is not None else "unavailable",
+        )
         if len(captures) < MIN_CAPTURES:
             _LOGGER.info(
                 "LIDAR mapping: only %d captures left after the rotation filter, "
@@ -891,7 +1037,6 @@ class LidarMapRunner:
         # dropping a scan would change the pose of every scan after it, since
         # match_pose accumulates. Rare -- once in nine runs, two scans out of
         # 501 -- and we say so rather than keep quiet about it.
-        tracker, self._tracker = self._tracker, None
         if tracker is not None and tracker.refused:
             # A handful is normal; a large share says the cleaning happened
             # where the matching can see nothing -- a corridor, where position
@@ -901,6 +1046,11 @@ class LidarMapRunner:
                 "LIDAR mapping: %d of %d scans left on odometry, the match "
                 "search was clipped at the edge of its window",
                 tracker.refused, tracker.placed,
+            )
+        if tracker is not None and tracker.stopped_at is not None:
+            _LOGGER.warning(
+                "LIDAR mapping: scan matching stopped at scan %d; %d of %d scans received no further pose adjustment",
+                tracker.stopped_at, tracker.placed - tracker.stopped_at + 1, tracker.placed,
             )
         if tracker is not None and not tracker.usable(dropped):
             _LOGGER.info(
@@ -928,9 +1078,10 @@ class LidarMapRunner:
         # written. Five cleanings of accumulated walls deserve a copy before
         # being erased on an automatic judgement.
         before = self._map.as_dict()
+        await self._frame_angle_hint()
         report = await self.hass.async_add_executor_job(
-            self._map.merge_session, walls, floor, self._session_name, free,
-            correction, self._contributes,
+            self._map.merge_session, walls, floor, session_name, free,
+            correction, contributes, self._corrected_frame_hint(correction),
         )
         self.last_report = report
         if report.get("rejected"):
@@ -1013,7 +1164,12 @@ class LidarMapRunner:
         if now - self._last_persist < CAPTURE_PERSIST_S:
             return
         self._last_persist = now
-        payload = {"session": self._session_name, "captures": self._captures}
+        payload = {
+            "session": self._session_name,
+            "captures": list(self._captures),
+            "scan_boot_id": self._scan_boot_id,
+            "last_seq": self._last_seq,
+        }
         self._cap_store.async_delay_save(lambda: payload, 1.0)
 
     async def _drain_buffer(self) -> int | None:
@@ -1024,9 +1180,10 @@ class LidarMapRunner:
         catching up over several ticks is fine.
         """
         total = 0
+        before_cursor = (self._scan_boot_id, self._last_seq)
         for _ in range(DRAIN_MAX_BATCHES):
             try:
-                text = await self.api.get_lidar_buffer(self._last_seq)
+                text = await self.api.get_lidar_buffer(self._last_seq, self._scan_boot_id)
             except OpenNeatoApiError as err:
                 if "404" not in str(err):
                     raise
@@ -1054,19 +1211,27 @@ class LidarMapRunner:
             # a catch-up tick can bring two dozen of them: building those lists
             # inline is CPU work in the middle of Home Assistant's loop, which
             # is exactly what makes the rest of the house feel slow.
-            scans, high = await self.hass.async_add_executor_job(_parse_scans, text)
-            self._last_seq = max(self._last_seq, high)
+            batch_stats: dict[str, int] = {}
+            scans, high, boot_id = await self.hass.async_add_executor_job(
+                _parse_scans, text, self._last_seq, self._scan_boot_id, batch_stats
+            )
+            for key, value in batch_stats.items():
+                self._scan_stats[key] = self._scan_stats.get(key, 0) + value
+            if boot_id != self._scan_boot_id:
+                _LOGGER.info("LIDAR mapping: new bridge boot, restarting the scan cursor")
+            self._scan_boot_id = boot_id
+            self._last_seq = high
+            # A new sequence proves delivery even if every scan was discarded
+            # for motion smear. Quality rejection is not a stalled transport.
+            if before_cursor != (self._scan_boot_id, self._last_seq) and self._buffer_ok is None:
+                self._buffer_ok = True
+                _LOGGER.info("LIDAR mapping: collecting from the bridge's own buffer")
             for x, y, t, points, rpm, moved, turned in scans:
                 self._captures.append(
                     (x, y, t, points, rpm, moved, turned, self._rssi(), self._heap())
                 )
                 total += 1
-                if self._buffer_ok is None:
-                    self._buffer_ok = True
-                    _LOGGER.info(
-                        "LIDAR mapping: collecting from the bridge's own buffer"
-                    )
-        if total:
+        if total or before_cursor != (self._scan_boot_id, self._last_seq):
             await self._persist_captures()
         return total
 
@@ -1217,7 +1382,7 @@ class LidarMapRunner:
             return None
         return plan_calibration(self._map.walls, self._map.floor)
 
-    def alignment(self, session_name: str) -> tuple[int, int, int] | None:
+    def alignment(self, session_name: str) -> tuple[float, ...] | None:
         """How this session was corrected onto the map, if it was merged.
 
         The card needs it to draw the run in the same frame as the walls;
@@ -1235,12 +1400,15 @@ class LidarMapRunner:
         merged = self._map.alignments.get(key)
         if merged is not None:
             return merged
-        if (
-            self._live_align is not None
-            and self._session_name
-            and alignment_key(self._session_name) == key
-        ):
-            return self._live_align
+        if self._session_name and alignment_key(self._session_name) == key:
+            if self._live_align is not None:
+                return self._live_align
+            if self._frame_rotation is not None and self._map.walls:
+                quarter = round(self._frame_rotation / 90.0)
+                fine = self._frame_rotation - quarter * 90.0
+                # Pure raw-path rotation about the dock; no estimated
+                # translation or SLAM correction before the geometric fit.
+                return (quarter % 4, 0, 0, fine, 0.0, 0.0, 0.0)
         return None
 
     def view_rotation(self, user_offset: float = 0.0) -> float:

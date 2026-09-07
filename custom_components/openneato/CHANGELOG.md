@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* Live frame hints cache only valid initial measurements (including restored ones),
+  never substitute zero for a missing offset, and release the alignment flag if
+  reading the hint is cancelled. The modulo-quarter hint, absolute sweep grid and
+  blind fallback are retained; late Raw odometry drift must not replace the initial frame.
+
+* Live placement starts at 25 tracked scans and retries every 30 seconds until
+  accepted, instead of waiting five minutes after an undecided first attempt.
+  An existing placement retains its five-minute translation-refresh cadence.
+  This changes scheduling only; geometric confidence and merge guards remain.
+
+* Pose-graph optimisation caches measurement rotations and refreshes pose rotations
+  after each Gauss-Seidel update. It computes only the required Jacobian block,
+  preserving the solver's poses and stopping rule while reducing repeated work.
+* Final graph processing logs sweep count, convergence, translation and angular
+  residuals before/after optimisation, and the last update in physical units.
+  These diagnostics do not change constraint acceptance or map geometry.
+
+* Rotating a session preserves all wall weights when multiple cells land in
+  the same destination. Cell-centre rotation now agrees with continuous replay
+  coordinates; previously saved alignments retain their meaning.
+* Alignment scores count unique cells on both sides and cannot exceed 100%.
+  Ambiguous quarter turns keep a provisional placement without merging walls
+  or counting a rejection towards resetting the accumulated map.
+* ICP acceptance and constraint weights use the residual and matching fraction
+  evaluated at the returned pose, including its final iteration.
+* Final alignment uses bounded integer row masks instead of per-cell searches,
+  with an exact set-based fallback for wide or sparse grids. Only one angle and
+  translation are cached. Measurable wall angles skip redundant hinted searches.
+
+* Concurrent history downloads retain their own session prefix, preventing
+  one session's trajectory from being appended to another session's header.
+* Scan acknowledgements include the bridge boot identifier. A bridge restart
+  resets the integration's scan cursor without discarding the new scans, and
+  repeated batches are deduplicated. Saved captures retain their matching cursor.
+* Mapping ticks reserve their busy flag before awaiting tracking work, preventing
+  overlapping ticks from racing scan delivery.
+* Matching firmware publishes protected copies of LIDAR diagnostics and history
+  listings, avoiding concurrent reads of changing containers and strings.
+* Orphan history merging writes a buffered temporary file, verifies it after
+  closing, and retains originals until the replacement is installed. Recovery
+  markers prevent duplicate appends when cleanup is interrupted.
+* The initial frame measurement is journaled with its timestamp and restored
+  after recovery. Legacy journals without it remain unknown; the probe no longer
+  substitutes a late measurement of odometric drift.
+* Finishing a cleaning waits for an active sampling/tracking tick, drains the
+  remaining buffer and processes every received capture before freezing the merge.
+  An incomplete tracker triggers a full reconstruction instead of losing its tail.
+* Journal and compression failures produce structured diagnostic events and
+  remain visible in RAM through `/api/lidar/status`, including when logging is off.
+* Cleaning summaries count faults using the firmware's error classification.
+  Informational alerts such as "Returning to base" no longer add a false error
+  to every completed cleaning; blocking persistent-map alerts still count.
+
+### Validation
+
+* A dedicated Home Assistant workflow checks Python syntax and correctness,
+  asynchronous regressions, module imports and setup/unload with real HA APIs,
+  replay-card behavior, and native firmware recovery tests.
+
+### Upgrade order
+
+Update and restart the Home Assistant integration **before** installing the
+matching firmware. The new integration can read the older buffer protocol,
+but reboot-safe acknowledgements require both updates. An older integration
+cannot acknowledge batches on the new firmware and will repeatedly receive
+the same batch. Downgrading the integration also requires matching older firmware.
+
 ## 1.23.0
 
 ### Added
@@ -801,4 +872,3 @@ defined in strings.json (dead code). All now properly defined
 ## 1.0.0
 
 * Initial Home Assistant custom integration for OpenNeato
-

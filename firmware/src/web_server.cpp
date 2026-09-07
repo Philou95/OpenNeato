@@ -188,7 +188,8 @@ void WebServer::registerApiRoutes() {
         uint32_t after = 0;
         if (request->hasParam("after"))
             after = strtoul(request->getParam("after")->value().c_str(), nullptr, 10);
-        String body = historyMgr.takeScanBatch(after);
+        String bootId = request->hasParam("boot") ? request->getParam("boot")->value() : String();
+        String body = historyMgr.takeScanBatch(after, bootId);
         logger.logRequest(HTTP_GET, "/api/lidar/buffer", 200, millis() - startMs);
         request->send(200, "application/x-ndjson", body);
     });
@@ -441,7 +442,15 @@ void WebServer::registerSystemRoutes() {
 void WebServer::registerSettingsRoutes() {
 
     // GET /api/settings — all user-configurable settings
-    registerGetRoute("/api/settings", settingsMgr, &SettingsManager::get);
+    loggedRoute("/api/settings", HTTP_GET, [this](AsyncWebServerRequest *request) -> int {
+        String json = settingsMgr.get().toJson();
+        if (json.isEmpty()) {
+            sendError(request, 503, "Insufficient memory for settings");
+            return 503;
+        }
+        request->send(200, "application/json", json);
+        return 200;
+    });
 
     // PUT /api/settings — partial update (only fields present are written)
     loggedBodyRoute("/api/settings", HTTP_PUT,
@@ -460,7 +469,12 @@ void WebServer::registerSettingsRoutes() {
                             manualMgr.setVacuumSpeed(s.vacuumSpeed);
                             manualMgr.setSideBrushPower(s.sideBrushPower);
                         }
-                        request->send(200, "application/json", settingsMgr.get().toJson());
+                        String json = settingsMgr.get().toJson();
+                        if (json.isEmpty()) {
+                            sendError(request, 503, "Insufficient memory for settings");
+                            return 503;
+                        }
+                        request->send(200, "application/json", json);
                         return 200;
                     });
 

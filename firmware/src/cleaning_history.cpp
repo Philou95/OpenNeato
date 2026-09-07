@@ -1,9 +1,12 @@
 #include "cleaning_history.h"
 #include "fs_lock.h"
+#include "history_recovery.h"
+#include "history_frame.h"
 #include "json_fields.h"
 #include "neato_serial.h"
 #include "system_manager.h"
 #include <SPIFFS.h>
+#include <esp_system.h>
 #include <cmath>
 
 // Heatshrink decompression can drop a byte that merges two JSONL lines into
@@ -48,6 +51,9 @@ static bool isValidMetaLine(const String& line, const char *expectedTypePrefix) 
 
 CleaningHistory::CleaningHistory(NeatoSerial& neato, DataLogger& logger, SystemManager& sysMgr) :
     LoopTask(HISTORY_INTERVAL_IDLE_MS), neato(neato), dataLogger(logger), systemManager(sysMgr) {
+    char boot[17];
+    snprintf(boot, sizeof(boot), "%08x%08x", static_cast<unsigned>(esp_random()), static_cast<unsigned>(esp_random()));
+    scanBootId = boot;
     TaskRegistry::add(this);
 }
 
@@ -92,7 +98,7 @@ namespace {
         return mutex;
     }
 
-    // Scoped guard for batchJson and the two sequence numbers that describe it.
+    // Scoped guard for published JSON snapshots and scan delivery cursors.
     // Held for assignments and reads only -- never across serial or flash I/O, so
     // a web handler never waits on a file.
     struct BatchLock {
@@ -106,7 +112,15 @@ namespace {
 } // namespace
 
 String CleaningHistory::scanStatusJson() {
+    BatchLock lock;
+    return scanStatusCache;
+}
+
+void CleaningHistory::publishScanStatus() {
+    // Only the loop task reads the deque and the mutable collection state.
+    // HTTP copies this finished snapshot; it never inspects their internals.
     String o = "{";
+    o += "\"boot\":\"" + scanBootId + "\",";
     o += "\"calls\":" + String(nCalls);
     o += ",\"ok\":" + String(nScanOk);
     o += ",\"scanFail\":" + String(nScanFail);
@@ -120,7 +134,8 @@ String CleaningHistory::scanStatusJson() {
     o += ",\"spilling\":" + String(spilling ? 1 : 0);
     o += ",\"collecting\":" + String(collecting ? 1 : 0);
     o += ",\"pending\":" + String(scanPending ? 1 : 0);
-    o += ",\"drainAgeMs\":" + String(lastDrainMs ? millis() - lastDrainMs : 0);
+    uint32_t drainedAt = lastDrainMs.load();
+    o += ",\"drainAgeMs\":" + String(drainedAt ? millis() - drainedAt : 0);
     uint32_t batchLen;
     {
         BatchLock lock;
@@ -132,8 +147,16 @@ String CleaningHistory::scanStatusJson() {
     // first half-minute, so the placement has somewhere to start.
     o += ",\"frameOffsetKnown\":" + String(frameOffsetKnown ? 1 : 0);
     o += ",\"frameOffset\":" + String(frameOffsetDeg, 2);
+    o += ",\"frameOffsetTime\":" + String(frameOffsetTime, 3);
+    o += R"(,"frameOffsetStatus":")";
+    o += frameOffsetKnown ? (frameRecovered ? "restored" : "initial") : (frameProbeDone ? "unknown" : "pending");
+    o += "\"";
+    o += ",\"storageFailures\":" + String(storageFailures);
+    o += ",\"compressionFailures\":" + String(compressionFailures);
+    o += ",\"lastStorageFailure\":" + lastStorageFailure;
     o += "}";
-    return o;
+    BatchLock lock;
+    scanStatusCache = o;
 }
 
 void CleaningHistory::sampleScan() {
@@ -295,7 +318,7 @@ void CleaningHistory::buildBatch() {
         if (n == 0)
             first = b.seq;
         last = b.seq;
-        out += "{\"seq\":" + String(b.seq) + ",\"ts\":" + String(b.ts);
+        out += "{\"boot\":\"" + scanBootId + "\",\"seq\":" + String(b.seq) + ",\"ts\":" + String(b.ts);
         out += ",\"x\":" + String(b.x, 3) + ",\"y\":" + String(b.y, 3);
         out += ",\"t\":" + String(b.theta, 1) + ",\"rpm\":" + String(b.rpm, 2);
         out += ",\"mv\":" + String(b.moved, 4) + ",\"tn\":" + String(b.turned, 2);
@@ -315,7 +338,11 @@ void CleaningHistory::buildBatch() {
 }
 
 void CleaningHistory::serviceScanBuffer() {
-    uint32_t ack = ackedSeq;
+    uint32_t ack;
+    {
+        BatchLock lock;
+        ack = ackedSeq;
+    }
     while (!scanRing.empty() && scanRing.front().seq <= ack)
         scanRing.pop_front();
     {
@@ -337,18 +364,23 @@ void CleaningHistory::serviceScanBuffer() {
     }
     if (empty && !scanRing.empty())
         buildBatch();
+    publishScanStatus();
 }
 
-String CleaningHistory::takeScanBatch(uint32_t after) {
+String CleaningHistory::takeScanBatch(uint32_t after, const String& bootId) {
     // Runs on the AsyncTCP task, and touches no file. It does read a String the
     // loop task rewrites, so the test and the copy happen under one lock: the
     // return copies length-then-buffer, and an unguarded clear in between freed
     // the buffer mid-copy.
     lastDrainMs = millis();
-    ackedSeq = after;
     BatchLock lock;
-    if (batchJson.isEmpty() || batchFirstSeq <= after)
+    // Reject stale/future acknowledgements before they can reach the deque.
+    // Late HTTP requests must never move the acknowledged cursor backwards.
+    if (bootId == scanBootId && after <= lastOfferedSeq && after > ackedSeq)
+        ackedSeq = after;
+    if (batchJson.isEmpty() || batchLastSeq <= ackedSeq)
         return String();
+    lastOfferedSeq = std::max(lastOfferedSeq, batchLastSeq);
     return batchJson;
 }
 
@@ -358,6 +390,14 @@ void CleaningHistory::tick() {
     // serialised here rather than at each of the 83 call sites.
     FsLock lock;
 
+    // Restore a target whose transaction stopped between the two renames,
+    // before enumerating history or finalizing any orphan sessions.
+    if (!recoveryFilesReady) {
+        recoveryFilesReady = restoreRecoveryFiles();
+        if (!recoveryFilesReady)
+            return;
+    }
+
     // Before any early return: a reader must be able to drain the buffer even
     // while the session is compressing or a serial fetch is latched.
     serviceScanBuffer();
@@ -365,7 +405,7 @@ void CleaningHistory::tick() {
     // Refresh the cached /api/history listing here rather than in the HTTP
     // handler, so all SPIFFS enumeration stays on the loop task. Skipped
     // while compressing: the source and destination files are in flux.
-    if (listJsonDirty && !compressing)
+    if (!compressing && listJsonDirty.exchange(false))
         rebuildListJson();
 
     // Run incremental compression when a session just finished
@@ -386,7 +426,11 @@ void CleaningHistory::tick() {
             // Compression done - remove raw source and cache metadata
             compressSrc.close();
             compressDst.close();
-            SPIFFS.remove(compressSrcPath);
+            if (!SPIFFS.remove(compressSrcPath))
+                recordStorageFailure("compression", "raw cleanup failed", compressSrcPath, 0, 0);
+            dataLogger.logGenericEvent("history_compress_done",
+                                       {{"path", compressDstPath, FIELD_STRING},
+                                        {"retried", compressRetried ? "true" : "false", FIELD_BOOL}});
             LOG("HIST", "Compression done: %s (%u -> %u bytes)", compressDstPath.c_str(),
                 static_cast<unsigned>(compressBytesIn), static_cast<unsigned>(compressBytesOut));
 
@@ -505,7 +549,9 @@ String CleaningHistory::cleanModeFromState(const String& uiState) {
 
 void CleaningHistory::resetSession() {
     frameOffsetDeg = 0.0f;
+    frameOffsetTime = 0.0f;
     frameOffsetKnown = false;
+    frameRecovered = false;
     frameProbeDone = false;
     frameProbeTries = 0;
     frameSteady = false;
@@ -626,36 +672,42 @@ void CleaningHistory::stopCollection() {
                                                     {"recharges", String(rechargeCount), FIELD_INT},
                                                     {"battery_end", String(batteryEnd), FIELD_INT}});
 
-        // Start non-blocking compression: raw .jsonl -> .jsonl.hs
-        compressSrcPath = activeFilePath;
-        compressDstPath = activeFilePath + ".hs";
-        compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
-        compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
-        if (compressSrc && compressDst) {
-            heatshrink_encoder_reset(&compressEncoder);
-            compressInputDone = false;
-            compressing = true;
-            compressFailed = false;
-            compressBytesIn = 0;
-            compressBytesOut = 0;
-            // Read once, here: compressSrc is consumed by the time the tally
-            // is checked, and size() on a spent handle is not worth trusting.
-            compressSrcSize = compressSrc.size();
-            setInterval(HISTORY_COMPRESS_INTERVAL_MS);
-            LOG("HIST", "Starting compression: %s -> %s (%u bytes)", compressSrcPath.c_str(), compressDstPath.c_str(),
-                static_cast<unsigned>(compressSrcSize));
-        } else {
-            // Compression failed - keep raw file
-            if (compressSrc)
-                compressSrc.close();
-            if (compressDst)
-                compressDst.close();
-            LOG("HIST", "Compression setup failed, keeping raw file");
-        }
+        startCompression(activeFilePath);
     });
 }
 
 // -- Incremental compression (called from tick) ------------------------------
+
+bool CleaningHistory::startCompression(const String& source, bool retry) {
+    compressSrcPath = source;
+    // Only a closed, verified stream may acquire the public .hs name.
+    compressDstPath = source + CompressionOutput::TEMP_SUFFIX;
+    compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
+    compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
+    compressRetried = retry;
+    compressFailed = false;
+    compressVerifying = false;
+    compressInputDone = false;
+    compressBytesIn = compressBytesOut = 0;
+    compressSrcSize = compressSrc ? compressSrc.size() : 0;
+    compressOutput.reset();
+    if (!compressSrc || !compressDst) {
+        compressSrc.close();
+        compressDst.close();
+        SPIFFS.remove(compressDstPath);
+        compressFailed = true;
+        compressing = false;
+        listJsonDirty = true;
+        recordStorageFailure("compression", "open failed", compressSrcPath, 0, 0);
+        return false;
+    }
+    heatshrink_encoder_reset(&compressEncoder);
+    compressing = true;
+    setInterval(HISTORY_COMPRESS_INTERVAL_MS);
+    dataLogger.logGenericEvent("history_compress_start", {{"path", compressSrcPath, FIELD_STRING},
+                                                          {"retry", retry ? "true" : "false", FIELD_BOOL}});
+    return true;
+}
 
 // Give up on the compressed copy and say so, loudly enough to find later.
 //
@@ -663,7 +715,7 @@ void CleaningHistory::stopCollection() {
 // intact copy of the run at this point, and the caller must not delete it. It
 // costs four times the flash of the compressed one, which is a cheap price for
 // a cleaning that can still be replayed.
-bool CleaningHistory::abortCompression(const char *why) {
+bool CleaningHistory::abortCompression(const char *why, size_t expected, size_t written) {
     LOG("HIST", "Compression failed (%s) after %u in / %u out -- keeping %s", why,
         static_cast<unsigned>(compressBytesIn), static_cast<unsigned>(compressBytesOut), compressSrcPath.c_str());
     compressSrc.close();
@@ -671,10 +723,50 @@ bool CleaningHistory::abortCompression(const char *why) {
     SPIFFS.remove(compressDstPath);
     compressing = false;
     compressFailed = true;
+    recordStorageFailure("compression", why, compressSrcPath, expected ? expected : compressSrcSize,
+                         expected ? written : compressBytesIn);
+    // Retry the entire stream once with fresh handles/encoder. Never append
+    // after a short write: stdio buffering makes the committed offset uncertain.
+    if (!compressRetried && startCompression(compressSrcPath, true))
+        return false;
     return true;
 }
 
+void CleaningHistory::recordStorageFailure(const char *operation, const char *reason, const String& path,
+                                           size_t expected, size_t written) {
+    storageFailures++;
+    if (strcmp(operation, "compression") == 0)
+        compressionFailures++;
+    size_t total = SPIFFS.totalBytes();
+    size_t used = SPIFFS.usedBytes();
+    std::vector<Field> fields = {
+            {"operation", operation, FIELD_STRING},
+            {"reason", reason, FIELD_STRING},
+            {"path", path, FIELD_STRING},
+            {"expected", String(static_cast<unsigned>(expected)), FIELD_INT},
+            {"written", String(static_cast<unsigned>(written)), FIELD_INT},
+            {"bytesIn", String(static_cast<unsigned>(compressBytesIn)), FIELD_INT},
+            {"bytesOut", String(static_cast<unsigned>(compressBytesOut)), FIELD_INT},
+            {"freeBytes", String(static_cast<unsigned>(total > used ? total - used : 0)), FIELD_INT},
+            {"uptimeMs", String(millis()), FIELD_INT}};
+    lastStorageFailure = fieldsToJson(fields);
+    dataLogger.logGenericEvent("history_storage_failed", fields);
+}
+
 bool CleaningHistory::compressStep() {
+    if (compressVerifying) {
+        auto result = compressOutput.verifyStep(compressDst);
+        if (result == CompressionOutput::INVALID)
+            return abortCompression("read-back mismatch");
+        if (result == CompressionOutput::MORE)
+            return false;
+        compressDst.close();
+        String finalPath = compressSrcPath + ".hs";
+        if (SPIFFS.exists(finalPath) || !SPIFFS.rename(compressDstPath, finalPath))
+            return abortCompression("publish failed");
+        compressDstPath = finalPath;
+        return true;
+    }
     static const size_t CHUNK_SIZE = 512;
     uint8_t inBuf[CHUNK_SIZE];
     uint8_t outBuf[CHUNK_SIZE];
@@ -701,17 +793,11 @@ bool CleaningHistory::compressStep() {
                     if (pres < 0)
                         return abortCompression("poll");
                     if (outSz > 0) {
-                        // The write that was never checked. SPIFFS can write
-                        // short, and heatshrink output is a stream: lose a few
-                        // bytes here and every byte after them decodes against
-                        // the wrong back-references. The 21:30 run of
-                        // 2026-09-03 came out readable for 1022 of its 1776
-                        // snapshots and then dissolved into fragments of its
-                        // own earlier text, which is exactly what that looks
-                        // like from the far end.
-                        if (compressDst.write(outBuf, outSz) != outSz)
-                            return abortCompression("short write");
-                        compressBytesOut += outSz;
+                        bool ok = compressOutput.append(compressDst, outBuf, outSz);
+                        compressBytesOut = compressOutput.size;
+                        if (!ok)
+                            return abortCompression("short buffered write", compressOutput.lastExpected,
+                                                    compressOutput.lastWritten);
                     }
                 } while (pres == HSER_POLL_MORE);
             }
@@ -731,9 +817,11 @@ bool CleaningHistory::compressStep() {
         if (pres < 0)
             return abortCompression("poll during finish");
         if (outSz > 0) {
-            if (compressDst.write(outBuf, outSz) != outSz)
-                return abortCompression("short write during finish");
-            compressBytesOut += outSz;
+            bool ok = compressOutput.append(compressDst, outBuf, outSz);
+            compressBytesOut = compressOutput.size;
+            if (!ok)
+                return abortCompression("short buffered write during finish", compressOutput.lastExpected,
+                                        compressOutput.lastWritten);
         }
     } while (pres == HSER_POLL_MORE);
 
@@ -747,11 +835,22 @@ bool CleaningHistory::compressStep() {
     if (compressBytesIn != compressSrcSize)
         return abortCompression("input short of source");
 
-    // An empty output for a non-empty input is not a compression, it is a loss.
+    bool flushed = compressOutput.flush(compressDst);
+    compressBytesOut = compressOutput.size;
+    if (!flushed)
+        return abortCompression("short final write", compressOutput.lastExpected, compressOutput.lastWritten);
     if (compressBytesOut == 0 && compressBytesIn > 0)
         return abortCompression("no output");
 
-    return true;
+    // fclose can reveal a buffered write error. Reopen and verify the bytes
+    // from flash over successive ticks, before publishing or deleting anything.
+    compressDst.close();
+    compressSrc.close();
+    compressDst = SPIFFS.open(compressDstPath, FILE_READ);
+    if (!compressDst)
+        return abortCompression("verification open failed");
+    compressVerifying = true;
+    return false;
 }
 
 // -- Session header/summary --------------------------------------------------
@@ -815,7 +914,10 @@ void CleaningHistory::writeSessionSummary(int batteryEnd) {
 void CleaningHistory::writeLine(const String& line) {
     if (!activeFile)
         return;
-    activeFile.println(line);
+    String record = line + '\n';
+    size_t written = activeFile.write(reinterpret_cast<const uint8_t *>(record.c_str()), record.length());
+    if (written != record.length())
+        recordStorageFailure("journal", "short write", activeFilePath, record.length(), written);
     activeFile.flush();
 }
 
@@ -846,9 +948,11 @@ void CleaningHistory::flushWriteBuffer() {
     // how a 2 s tick turns into a stall), but a gap in a replay should never
     // be the first anyone hears of it.
     size_t written = activeFile.write(reinterpret_cast<const uint8_t *>(batch.c_str()), batch.length());
-    if (written != batch.length())
+    if (written != batch.length()) {
         LOG("HIST", "Short write: %u of %u bytes, %u lines lost", static_cast<unsigned>(written),
             static_cast<unsigned>(batch.length()), static_cast<unsigned>(writeBuffer.size()));
+        recordStorageFailure("journal", "short batch write", activeFilePath, batch.length(), written);
+    }
     activeFile.flush();
     writeBuffer.clear();
     lastFlushMs = millis();
@@ -888,6 +992,19 @@ bool CleaningHistory::replayLine(const String& line) {
         return false;
 
     const Field *typeField = findField(fields, "type");
+    if (typeField && typeField->value == "frame_offset") {
+        const Field *status = findField(fields, "status");
+        const Field *angle = findField(fields, "deg");
+        const Field *at = findField(fields, "ts");
+        // Only the first validated initial measurement belongs to this run.
+        // A later orphan's measurement reflects drift, not its initial frame.
+        if (restoreInitialFrame(status ? status->value.c_str() : nullptr, angle ? angle->value.c_str() : nullptr,
+                                at ? at->value.c_str() : nullptr, frameOffsetKnown, frameOffsetDeg, frameOffsetTime)) {
+            frameOffsetKnown = true;
+            frameRecovered = true;
+        }
+        return false;
+    }
     if (typeField && typeField->value == "session") {
         const Field *modeField = findField(fields, "mode");
         if (modeField && !modeField->value.isEmpty())
@@ -922,7 +1039,32 @@ bool CleaningHistory::replayLine(const String& line) {
     return false;
 }
 
+bool CleaningHistory::restoreRecoveryFiles() {
+    std::vector<String> targets;
+    File root = SPIFFS.open(HISTORY_DIR);
+    if (!root || !root.isDirectory())
+        return true;
+    File entry = root.openNextFile();
+    while (entry) {
+        String path = entry.path();
+        if (path.endsWith(".jsonl.rcb"))
+            targets.push_back(path.substring(0, path.length() - 4));
+        entry = root.openNextFile();
+    }
+    root.close();
+    for (const auto& target: targets) {
+        if (!HistoryRecovery::restore(SPIFFS, target)) {
+            dataLogger.logGenericEvent("history_recover_failed",
+                                       {{"path", target, FIELD_STRING}, {"phase", "restore", FIELD_STRING}});
+            return false;
+        }
+        dataLogger.logGenericEvent("history_recover_restore", {{"path", target, FIELD_STRING}});
+    }
+    return true;
+}
+
 bool CleaningHistory::recoverCollection(const String& uiState) {
+    FsLock lock;
     // Only attempt recovery once after boot — avoid scanning filesystem on every clean start
     if (recoveryAttempted)
         return false;
@@ -975,39 +1117,21 @@ bool CleaningHistory::recoverCollection(const String& uiState) {
     // orphans are newest-first; reverse to get chronological order (oldest first)
     std::reverse(orphans.begin(), orphans.end());
 
-    // The oldest orphan becomes the target; newer ones are merged into it then deleted
+    // Verify a replacement before committing it or removing any source.
     String targetPath = orphans[0];
-
-    if (orphans.size() > 1) {
-        File target = SPIFFS.open(targetPath, FILE_APPEND);
-        if (target) {
-            for (size_t i = 1; i < orphans.size(); i++) {
-                File src = SPIFFS.open(orphans[i], FILE_READ);
-                if (!src)
-                    continue;
-                while (src.available()) {
-                    String line = src.readStringUntil('\n');
-                    line.trim();
-                    if (line.isEmpty())
-                        continue;
-                    // Skip duplicate session headers from newer orphans
-                    if (line.indexOf("\"type\":\"session\"") >= 0)
-                        continue;
-                    target.println(line);
-                }
-                src.close();
-                SPIFFS.remove(orphans[i]);
-                LOG("HIST", "Merged orphan %s into %s", orphans[i].c_str(), targetPath.c_str());
-            }
-            target.flush();
-            target.close();
-        }
+    if (!HistoryRecovery::merge(SPIFFS, orphans)) {
+        dataLogger.logGenericEvent("history_recover_failed",
+                                   {{"path", targetPath, FIELD_STRING}, {"phase", "merge", FIELD_STRING}});
+        return false;
     }
 
     // Now replay the merged file to rebuild accumulators
     resetSession();
     cleanMode = cleanModeFromState(uiState);
     activeFilePath = targetPath;
+    // Old journals have no trustworthy initial measurement. Do not re-probe
+    // halfway through an interrupted cleaning when the frames have drifted.
+    frameProbeDone = true;
 
     File recoveryFile = SPIFFS.open(targetPath, FILE_READ);
     if (!recoveryFile)
@@ -1076,6 +1200,7 @@ void CleaningHistory::finalizeOrphanSessions() {
     std::sort(allFiles.begin(), allFiles.end(), [](const String& a, const String& b) { return a > b; });
 
     std::vector<String> orphans;
+    String completedRaw;
     for (const auto& path: allFiles) {
         if (path.endsWith(".jsonl.hs"))
             break; // Completed session boundary
@@ -1085,15 +1210,26 @@ void CleaningHistory::finalizeOrphanSessions() {
         }
         String firstLine, lastLine;
         readFirstLastLines(path, false, firstLine, lastLine);
-        if (lastLine.indexOf("\"type\":\"summary\"") >= 0)
+        if (lastLine.indexOf("\"type\":\"summary\"") >= 0) {
+            if (completedRaw.isEmpty())
+                completedRaw = path;
             continue;
+        }
         orphans.push_back(path);
     }
 
-    if (orphans.empty())
+    if (orphans.empty()) {
+        // A failed/interrupted compression leaves a complete raw journal.
+        // Retry the newest one at idle boot, with the same verified publication.
+        if (!completedRaw.isEmpty() && !compressing) {
+            readFirstLastLines(completedRaw, false, pendingSessionJson, pendingSummaryJson);
+            startCompression(completedRaw);
+        }
         return;
+    }
 
-    // Finalize each orphan: replay to rebuild stats, write summary, compress
+    // Finalize all orphans before capturing metadata for the compression job.
+    String compressionCandidate;
     for (const auto& orphanPath: orphans) {
         resetSession();
 
@@ -1134,29 +1270,16 @@ void CleaningHistory::finalizeOrphanSessions() {
         dataLogger.logGenericEvent("history_finalize", {{"path", orphanPath, FIELD_STRING},
                                                         {"snapshots", String(snapshotCount), FIELD_INT}});
 
-        // Queue compression (only one at a time — first orphan wins, rest will
-        // be picked up on next boot or left as uncompressed)
-        if (!compressing) {
-            compressSrcPath = orphanPath;
-            compressDstPath = orphanPath + ".hs";
-            compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
-            compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
-            if (compressSrc && compressDst) {
-                heatshrink_encoder_reset(&compressEncoder);
-                compressInputDone = false;
-                compressing = true;
-                setInterval(HISTORY_COMPRESS_INTERVAL_MS);
-            } else {
-                if (compressSrc)
-                    compressSrc.close();
-                if (compressDst)
-                    compressDst.close();
-            }
-        }
+        if (compressionCandidate.isEmpty())
+            compressionCandidate = orphanPath;
     }
 
     activeFilePath = "";
     activeFile = File();
+    if (!compressionCandidate.isEmpty() && !compressing) {
+        readFirstLastLines(compressionCandidate, false, pendingSessionJson, pendingSummaryJson);
+        startCompression(compressionCandidate);
+    }
 }
 
 void CleaningHistory::collectSnapshot() {
@@ -1215,10 +1338,14 @@ void CleaningHistory::collectSnapshot() {
 
         neato.getErr([this](bool errOk, const ErrorData& err) {
             if (errOk) {
-                if (err.hasError && !prevHadError) {
+                // GetErr also carries informational alerts such as 201,
+                // "Returning to base". Use the parser's classification so
+                // blocking alerts (including persistent-map failures) count.
+                bool hasFault = err.hasError && err.kind != "warning";
+                if (hasFault && !prevHadError) {
                     errorsDuringClean++;
                 }
-                prevHadError = err.hasError;
+                prevHadError = hasFault;
             }
 
             if (recharging) {
@@ -1285,7 +1412,8 @@ void CleaningHistory::collectSnapshot() {
                                 neato.getRobotPos(true, [this, th1, tm1, rtheta, rtime](bool ok2,
                                                                                         const RobotPosData& pos2) {
                                     float x2, y2, th2, tm2;
-                                    if (!ok2 || !parsePose(pos2.raw, x2, y2, th2, tm2)) {
+                                    if (!collecting || frameOffsetKnown || !ok2 ||
+                                        !parsePose(pos2.raw, x2, y2, th2, tm2)) {
                                         sampleScan();
                                         return;
                                     }
@@ -1306,8 +1434,13 @@ void CleaningHistory::collectSnapshot() {
                                         frac = 0.5f;
                                     float d = normaliseDeg(th1 + turn * frac - rtheta);
                                     frameOffsetDeg = d;
+                                    frameOffsetTime = rtime;
                                     frameOffsetKnown = true;
                                     frameProbeDone = true;
+                                    writeLine(fieldsToJson({{"type", "frame_offset", FIELD_STRING},
+                                                            {"status", "initial", FIELD_STRING},
+                                                            {"deg", String(d, 2), FIELD_FLOAT},
+                                                            {"ts", String(rtime, 3), FIELD_FLOAT}}));
                                     LOG("HIST", "Frame offset (Smooth - Raw): %.2f deg (turn %.2f over %.0f ms)", d,
                                         turn, span * 1000.0f);
                                     dataLogger.logGenericEvent("frame_offset",
@@ -1534,11 +1667,10 @@ void CleaningHistory::readFirstLastLines(const String& path, bool compressed, St
     }
 }
 
-const String& CleaningHistory::getListJson() {
-    // Cold path only: a request that lands before the first tick() has run.
-    // Every later request is served from RAM.
-    if (listJsonCache.isEmpty())
-        rebuildListJson();
+String CleaningHistory::getListJson() {
+    // Never let HTTP retain a reference to a String the loop can replace.
+    // Before the first tick the published listing is simply empty.
+    BatchLock lock;
     return listJsonCache;
 }
 
@@ -1559,8 +1691,8 @@ void CleaningHistory::rebuildListJson() {
         json += "}";
     }
     json += "]";
+    BatchLock lock;
     listJsonCache = json;
-    listJsonDirty = false;
 }
 
 std::vector<HistorySessionInfo> CleaningHistory::listSessions() {
