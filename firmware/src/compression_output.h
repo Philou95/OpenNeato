@@ -7,6 +7,8 @@
 // Fixed memory, batched writes, then read-back verification after close.
 // The caller must retain the raw source until verification and rename succeed.
 struct CompressionOutput {
+    // SPIFFS permits 31 characters including /history/ and the timestamp.
+    static constexpr const char *TEMP_SUFFIX = ".hsp";
     uint8_t buffer[2048];
     size_t used = 0;
     size_t size = 0;

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <string>
 #include <vector>
 
 struct File {
@@ -37,6 +38,7 @@ static bool verify(CompressionOutput& output, File file) {
 }
 
 int main() {
+    assert((std::string("/history/1788763156.jsonl") + CompressionOutput::TEMP_SUFFIX).size() <= 31);
     std::vector<uint8_t> input(24379);
     for (size_t i = 0; i < input.size(); ++i)
         input[i] = static_cast<uint8_t>(i * 53);

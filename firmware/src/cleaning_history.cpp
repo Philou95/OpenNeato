@@ -681,7 +681,7 @@ void CleaningHistory::stopCollection() {
 bool CleaningHistory::startCompression(const String& source, bool retry) {
     compressSrcPath = source;
     // Only a closed, verified stream may acquire the public .hs name.
-    compressDstPath = source + ".hs.tmp";
+    compressDstPath = source + CompressionOutput::TEMP_SUFFIX;
     compressSrc = SPIFFS.open(compressSrcPath, FILE_READ);
     compressDst = SPIFFS.open(compressDstPath, FILE_WRITE);
     compressRetried = retry;

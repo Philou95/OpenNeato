@@ -16,7 +16,8 @@ handles and encoder state. It never resumes at an uncertain buffered-file offset
 If the retry fails, the raw journal remains available and diagnostics retain the
 failure. A complete raw journal can be retried at the next idle boot.
 
-Output is private under `.hs.tmp` until the file is closed and reopened. Size and
+Output is private under `.hsp` until the file is closed and reopened. This keeps
+the full path within SPIFFS's 31-character limit. Size and
 an FNV-1a checksum of the stored compressed bytes must match the encoder output,
 checked incrementally. Only then is it renamed `.hs` and the raw journal removed.
 The checksum detects accidental storage corruption; it is not cryptographic and
