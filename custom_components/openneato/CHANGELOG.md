@@ -4,6 +4,11 @@
 
 ### Fixed
 
+* Live placement starts at 25 tracked scans and retries every 30 seconds until
+  accepted, instead of waiting five minutes after an undecided first attempt.
+  An existing placement retains its five-minute translation-refresh cadence.
+  This changes scheduling only; geometric confidence and merge guards remain.
+
 * Pose-graph optimisation caches measurement rotations and refreshes pose rotations
   after each Gauss-Seidel update. It computes only the required Jacobian block,
   preserving the solver's poses and stopping rule while reducing repeated work.

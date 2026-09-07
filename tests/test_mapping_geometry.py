@@ -2,10 +2,11 @@
 import importlib
 import math
 import random
+import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from test_history_delivery import runner  # Reuse the offline HA service stubs.
+from test_history_delivery import Hass, runner  # Reuse the offline HA service stubs.
 
 mapper = importlib.import_module("openneato_under_test.lidar_mapper")
 slam = importlib.import_module("openneato_under_test.slam")
@@ -173,6 +174,50 @@ class IcpTests(unittest.TestCase):
             matched = sorted(d for d in distances if d < slam.MAX_PAIR_M)
             self.assertAlmostEqual(fit, len(matched)/len(src))
             self.assertAlmostEqual(res, slam._median(matched))
+
+
+class LivePlacementTests(unittest.IsolatedAsyncioTestCase):
+    def make_runner(self):
+        bridge = types.SimpleNamespace(get_lidar_status=AsyncMock(return_value={
+            "frameOffsetKnown": 1, "frameOffset": -88.26,
+        }))
+        coordinator = types.SimpleNamespace(data={}, async_add_listener=lambda fn: lambda: None)
+        result = runner.LidarMapRunner(Hass(), "offline", bridge, coordinator)
+        result._tracker = types.SimpleNamespace(placed=25, correction=(0., 0., 0.))
+        result._map = types.SimpleNamespace(walls={(0,0): 10})
+        result._session_name = "100.jsonl"
+        return result
+
+    async def test_first_attempt_does_not_wait_for_five_minutes_of_uptime(self):
+        r = self.make_runner()
+        fit = (1, 0, 0, .6, -1.74, (.1,.6,.1,.1), False)
+        with patch.object(r, "_fit_live", return_value=fit), patch.object(runner.time, "monotonic", return_value=12.):
+            self.assertTrue(await r._align_live())
+        self.assertEqual(r._live_align[0], 1)
+        r.api.get_lidar_status.assert_awaited_once()
+
+    async def test_undecided_placement_retries_after_thirty_seconds(self):
+        r = self.make_runner()
+        undecided = (0, 0, 0, .4, 0., (.4,.39,.1,.1), False)
+        decided = (1, 0, 0, .6, -1.74, (.1,.6,.1,.1), False)
+        with patch.object(r, "_fit_live", side_effect=[undecided, decided]) as fit:
+            with patch.object(runner.time, "monotonic", return_value=100.):
+                self.assertTrue(await r._align_live())
+                self.assertIsNone(r._live_align)
+            with patch.object(runner.time, "monotonic", return_value=129.):
+                self.assertFalse(await r._align_live())
+            with patch.object(runner.time, "monotonic", return_value=130.):
+                self.assertTrue(await r._align_live())
+            self.assertEqual(fit.call_count, 2)
+        self.assertEqual(r._live_align[0], 1)
+
+    async def test_existing_placement_keeps_slower_refresh(self):
+        r = self.make_runner()
+        r._live_align = (1, 0, 0, -1.74, 0., 0., 0.)
+        r._live_align_at = 100.
+        with patch.object(runner.time, "monotonic", return_value=130.):
+            self.assertFalse(await r._align_live())
+        r.api.get_lidar_status.assert_not_awaited()
 
 
 class PoseGraphTests(unittest.TestCase):

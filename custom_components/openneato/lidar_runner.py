@@ -112,13 +112,12 @@ HEALTH_EVERY = 300.0
 HEALTH_GRACE = 600.0
 # Placing the run in progress on the map. See _align_live().
 #
-# 25 scans are enough to name the right quarter turn on both replayed runs; 40
-# leaves margin at no cost, putting the first attempt around the third minute
-# of the cleaning. It then repeats at the same rate as the health check: a fit
-# costs one to five seconds of executor time and makes a tick skip its
-# sampling, so twelve times an hour is generous for a display.
+# Start from the 25 scans already sufficient on the recorded reference runs.
+# An undecided first fit must not hide the frame hint behind a five-minute
+# retry delay. Once placed, retain the slower cadence for translation updates.
 LIVE_ALIGN_EVERY = 300.0
-LIVE_ALIGN_MIN_SCANS = 40
+LIVE_ALIGN_RETRY_EVERY = 30.0
+LIVE_ALIGN_MIN_SCANS = 25
 # ...and we stop as soon as the answer repeats, because it no longer moves.
 # Replayed on runs 8 and 9: the quarter turn is right from the first attempt,
 # the translation settles on the second (run 9) or the third (run 8), and the
@@ -547,7 +546,8 @@ class LidarMapRunner:
         ):
             return False
         now = time.monotonic()
-        if now - self._live_align_at < LIVE_ALIGN_EVERY:
+        interval = LIVE_ALIGN_RETRY_EVERY if self._live_align is None else LIVE_ALIGN_EVERY
+        if self._live_align_at and now - self._live_align_at < interval:
             return False
         self._live_align_at = now
         self._aligning = True
