@@ -4,6 +4,13 @@
 
 ### Fixed
 
+* Pose-graph optimisation caches measurement rotations and refreshes pose rotations
+  after each Gauss-Seidel update. It computes only the required Jacobian block,
+  preserving the solver's poses and stopping rule while reducing repeated work.
+* Final graph processing logs sweep count, convergence, translation and angular
+  residuals before/after optimisation, and the last update in physical units.
+  These diagnostics do not change constraint acceptance or map geometry.
+
 * Rotating a session preserves all wall weights when multiple cells land in
   the same destination. Cell-centre rotation now agrees with continuous replay
   coordinates; previously saved alignments retain their meaning.

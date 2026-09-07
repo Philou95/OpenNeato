@@ -175,5 +175,58 @@ class IcpTests(unittest.TestCase):
             self.assertAlmostEqual(res, slam._median(matched))
 
 
+class PoseGraphTests(unittest.TestCase):
+    def test_jacobian_blocks_agree_with_finite_differences(self):
+        poses = [[.4, -.7, .32], [1.2, .8, -.41]]
+        measurement = (.7, -.1, .2)
+        residual = slam._residual(poses, 0, 1, measurement)
+        for node, is_i in ((0, True), (1, False)):
+            block = slam._blocks(*residual[3:], is_i)
+            for col in range(3):
+                plus, minus = [p[:] for p in poses], [p[:] for p in poses]
+                plus[node][col] += 1e-6
+                minus[node][col] -= 1e-6
+                upper = slam._residual(plus, 0, 1, measurement)
+                lower = slam._residual(minus, 0, 1, measurement)
+                for row in range(3):
+                    self.assertAlmostEqual(block[3*row+col], (upper[row]-lower[row])/2e-6, places=7)
+
+    def test_cached_rotations_follow_each_gauss_seidel_update(self):
+        poses = [[0., 0., 0.], [1.2, .1, .1], [2.1, -.2, -.2]]
+        edges = [(0, 1, (1., 0., 0.), 1.), (1, 2, (1., 0., 0.), 1.),
+                 (0, 2, (2., 0., 0.), .5)]
+        original = slam._residual
+        def checked(grid, i, j, z, rotations=None, z_rotation=None):
+            if rotations is not None:
+                for pose, rotation in zip(grid, rotations):
+                    self.assertEqual(rotation, (math.cos(pose[2]), math.sin(pose[2])))
+                self.assertEqual(z_rotation, (math.cos(z[2]), math.sin(z[2])))
+            actual = original(grid, i, j, z, rotations, z_rotation)
+            self.assertEqual(actual, original(grid, i, j, z))
+            return actual
+        stats = {}
+        with patch.object(slam, "_residual", side_effect=checked):
+            result = slam.optimise(poses, edges, stats=stats)
+        self.assertEqual(result[0], poses[0])
+        self.assertTrue(stats["converged"])
+        self.assertLess(stats["after"]["translation_m"]["rms"], stats["before"]["translation_m"]["rms"])
+        self.assertLess(stats["after"]["rotation_deg"]["rms"], stats["before"]["rotation_deg"]["rms"])
+        self.assertEqual(result, slam.optimise(poses, edges))
+        self.assertEqual(poses[1], [1.2, .1, .1])
+
+    def test_diagnostics_use_separate_units_and_report_iteration_limit(self):
+        poses = [[0., 0., 0.], [1., 0., .2]]
+        edges = [(0, 1, (1., 0., 0.), 1.)]
+        quality = slam.graph_residuals(poses, edges)
+        self.assertEqual(quality["translation_m"]["p95"], 0.)
+        self.assertAlmostEqual(quality["rotation_deg"]["p95"], math.degrees(.2))
+        stats = {}
+        self.assertEqual(slam.optimise(poses, edges, sweeps=0, stats=stats), poses)
+        self.assertEqual(stats["sweeps"], 0)
+        self.assertFalse(stats["converged"])
+        self.assertEqual(stats["before"], stats["after"])
+        self.assertEqual(slam.graph_residuals([], [])["edges"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

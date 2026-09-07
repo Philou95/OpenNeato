@@ -1945,7 +1945,17 @@ class SessionTracker:
             for k in range(n - 1)
         ]
         edges.extend(self._edges)
-        refined = slam.optimise(self._poses, edges)
+        stats: dict[str, Any] = {}
+        refined = slam.optimise(self._poses, edges, stats=stats)
+        _LOGGER.info(
+            "SLAM graph: %d sweeps, converged=%s; residual p95 %.2f -> %.2f cm, "
+            "%.2f -> %.2f deg; last step %.3f cm / %.4f deg",
+            stats["sweeps"], stats["converged"],
+            100 * stats["before"]["translation_m"]["p95"],
+            100 * stats["after"]["translation_m"]["p95"],
+            stats["before"]["rotation_deg"]["p95"], stats["after"]["rotation_deg"]["p95"],
+            100 * stats["last_translation_step_m"], stats["last_rotation_step_deg"],
+        )
         # Success has to be as visible as failure. Without this line a tracker
         # that did its work is indistinguishable from one that was never fed --
         # seen on the run of the evening of 27/08, where the merge translation
