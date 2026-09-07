@@ -189,6 +189,17 @@ def icp(src, dst, x0, y0, th0, iters=ICP_ITERS, max_pair=MAX_PAIR_M):
         fit = m / n
         if abs(dth) < 1e-4 and res < 0.02:
             break
+    # Acceptance and edge weights must describe the returned pose, including
+    # the last update (also when the iteration limit stopped convergence).
+    c, s = math.cos(th), math.sin(th)
+    ds = []
+    for px0, py0 in src:
+        d, k = g.nearest(px0 * c - py0 * s + x, px0 * s + py0 * c + y, max_pair)
+        if k >= 0:
+            ds.append(d)
+    if len(ds) < ICP_MIN_PTS:
+        return x, y, th, 9.9, 0.0
+    res, fit = _median(ds), len(ds) / n
     return x, y, th, res, fit
 
 

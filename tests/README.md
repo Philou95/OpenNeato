@@ -15,6 +15,12 @@ Covers concurrent downloads, partial lines and offset fallback, response size
 limits, reboot and duplicate scan handling, saved cursors, and overlapping ticks.
 This does not replace testing inside a running Home Assistant installation.
 
+`test_mapping_geometry.py` additionally checks unique-cell overlap against an
+independent set oracle, bounded sparse-grid fallback, complete search parity,
+cell rotations against continuous replay, preservation of collision weights and
+stored alignments, ambiguous-merge isolation, and ICP quality at its returned
+pose. These tests use synthetic fixtures and need no private capture files.
+
 The dedicated Home Assistant workflow also installs Home Assistant 2026.8.3 on
 Python 3.14 and runs `python tests/ha_smoke.py` in a separate process. That check
 imports all integration modules and exercises setup/unload against real HA APIs,

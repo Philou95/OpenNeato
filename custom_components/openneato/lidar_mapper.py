@@ -294,6 +294,10 @@ MERGE_MIN_OVERLAP = 0.55
 # where two quarters both fit well.
 LIVE_MIN_MARGIN = 0.15
 LIVE_MIN_RATIO = 1.8
+# Final merges must also resolve the quarter-turn ambiguity before adding
+# geometry. Reuse the established confidence thresholds from live placement.
+MERGE_MIN_MARGIN = LIVE_MIN_MARGIN
+MERGE_MIN_RATIO = LIVE_MIN_RATIO
 # After this many cleanings in a row that will not fit the stored map, it is the
 # map that is wrong, not the house: the dock has been moved somewhere the fine
 # sweep cannot reach, or the furniture has changed beyond recognition. Without a
@@ -484,29 +488,97 @@ def carve_swath(
 
 
 def _rotate_cells(cells: Iterable[tuple[int, int]], quarter: int) -> list[tuple[int, int]]:
-    """Rotate integer cell coordinates by a multiple of 90 degrees."""
+    """Rotate cell centres, consistently with floor-based projection/replay."""
     q = quarter % 4
     if q == 0:
         return list(cells)
     if q == 1:
-        return [(-cy, cx) for cx, cy in cells]
+        return [(-cy - 1, cx) for cx, cy in cells]
     if q == 2:
-        return [(-cx, -cy) for cx, cy in cells]
-    return [(cy, -cx) for cx, cy in cells]
+        return [(-cx - 1, -cy - 1) for cx, cy in cells]
+    return [(cy, -cx - 1) for cx, cy in cells]
 
 
 def _rotate_cells_fine(
     cells: Iterable[tuple[int, int]], degrees: float
 ) -> list[tuple[int, int]]:
-    """Rotate cells by an arbitrary angle about the grid origin."""
+    """Rotate cell centres about the origin, then quantise once with floor.
+
+    A preceding quarter turn maps centres exactly, so composing these helpers
+    agrees with the continuous transform stored for replay. Existing saved
+    transforms retain their meaning; only newly fitted grids use this rule.
+    """
     if not degrees:
         return list(cells)
     rad = math.radians(degrees)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
     return [
-        (round(cx * cos_a - cy * sin_a), round(cx * sin_a + cy * cos_a))
+        (math.floor((cx + 0.5) * cos_a - (cy + 0.5) * sin_a),
+         math.floor((cx + 0.5) * sin_a + (cy + 0.5) * cos_a))
         for cx, cy in cells
     ]
+
+
+def _rotate_wall_counts(walls, quarter, fine, dx, dy):
+    """Keep every contribution when quantisation maps cells onto one another."""
+    turned = _rotate_cells_fine(_rotate_cells(walls, quarter), fine)
+    grouped: dict[tuple[int, int], list[float]] = {}
+    for (cx, cy), weight in zip(turned, walls.values()):
+        grouped.setdefault((cx + dx, cy + dy), []).append(weight)
+    return {cell: math.fsum(weights) for cell, weights in grouped.items()}
+
+
+class _OverlapScorer:
+    """Exact unique-cell overlap using bounded integer row masks.
+
+    Only the current angle and horizontal shift are retained. Wide/sparse
+    grids fall back to set membership; distant translations are rejected
+    before shifting, so malformed coordinates cannot allocate huge integers.
+    """
+
+    _MAX_WIDTH = 8192
+    _MAX_BITS = 8 * 1024 * 1024
+
+    def __init__(self, reference):
+        self.reference = set(reference)
+        self._ref_origin, self._ref_width, self._ref_rows = self._pack(self.reference)
+
+    @classmethod
+    def _pack(cls, cells):
+        if not cells:
+            return 0, 0, {}
+        xmin = min(x for x, _ in cells)
+        width = max(x for x, _ in cells) - xmin + 1
+        if width > cls._MAX_WIDTH or width * len({y for _, y in cells}) > cls._MAX_BITS:
+            return xmin, width, None
+        rows = {}
+        for x, y in cells:
+            rows[y] = rows.get(y, 0) | (1 << (x - xmin))
+        return xmin, width, rows
+
+    def prepare(self, cells):
+        self.cells = set(cells)
+        self._origin, self._width, self._rows = self._pack(self.cells)
+        self._dx = None
+        self._shifted = []
+        return min(len(self.cells), len(self.reference))
+
+    def count(self, dx, dy):
+        if not self.cells or not self.reference:
+            return 0
+        shift = self._origin + dx - self._ref_origin
+        if shift >= self._ref_width or shift + self._width <= 0:
+            return 0
+        if self._rows is None or self._ref_rows is None:
+            return sum((x + dx, y + dy) in self.reference for x, y in self.cells)
+        if dx != self._dx:
+            self._shifted = [
+                (y, bits << shift if shift >= 0 else bits >> -shift)
+                for y, bits in self._rows.items()
+            ]
+            self._dx = dx
+        ref = self._ref_rows
+        return sum((bits & ref.get(y + dy, 0)).bit_count() for y, bits in self._shifted)
 
 
 def _measured_turn(
@@ -554,8 +626,9 @@ def align_to_reference(
     `clipped` says the angle search ran to its limit and stopped there, so the
     fit is the best it could reach rather than the best there is -- see
     FINE_SPAN_MAX_DEG. A clipped fit must be placed, never merged.
-    Overlap is the share of the new session's wall cells that coincide with the
-    reference, so 1.0 is perfect.
+    Overlap is the intersection of unique transformed wall cells divided by
+    the smaller map's unique-cell count. It is bounded by 1.0; full containment
+    can score 1.0 even when the two maps cover different areas.
 
     `quarter_scores` is what each of the four quarters could reach on the
     coarse search, kept because it answers a different question from the
@@ -600,7 +673,8 @@ def align_to_reference(
     if not ref_walls or not new_walls:
         return 0, 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0), False
 
-    if angle_hint is not None and not _aimed:
+    measured = _measured_turn(new_walls, ref_walls)
+    if angle_hint is not None and not _aimed and measured is None:
         # Both searches, and the better one wins on overlap. Aiming the search
         # helps and hurts in different places, measured on a real map with a
         # hint deliberately 5.71 deg out -- the error the bridge actually made:
@@ -615,10 +689,10 @@ def align_to_reference(
         return aimed if aimed[3] > blind[3] else blind
 
     ref = set(ref_walls)
+    scorer = _OverlapScorer(ref)
     fcx = sum(c[0] for c in ref) / len(ref)
     fcy = sum(c[1] for c in ref) / len(ref)
 
-    measured = _measured_turn(new_walls, ref_walls)
     # Deliberately separate: `measured` is an answer, `hint` is a direction.
     # The cells win whenever they can speak.
     hint = angle_hint if measured is None else None
@@ -633,6 +707,7 @@ def align_to_reference(
         rotated = _rotate_cells(new_walls, quarter)
         if base_fine:
             rotated = _rotate_cells_fine(rotated, base_fine)
+        denominator = scorer.prepare(rotated)
         rcx = sum(c[0] for c in rotated) / len(rotated)
         rcy = sum(c[1] for c in rotated) / len(rotated)
         # Two seeds, because either can be the wrong guess:
@@ -644,17 +719,14 @@ def align_to_reference(
         for sx, sy in seeds:
             for dx in range(sx - search_cells, sx + search_cells + 1):
                 for dy in range(sy - search_cells, sy + search_cells + 1):
-                    hit = 0
-                    for cx, cy in rotated:
-                        if (cx + dx, cy + dy) in ref:
-                            hit += 1
+                    hit = scorer.count(dx, dy)
                     # Score against the smaller of the two maps. Dividing by
                     # the new session would punish it for covering ground the
                     # stored map has never seen -- a short run recorded first
                     # would then reject every full clean that followed, and
                     # the map could never grow past what it first happened
                     # to see.
-                    score = hit / min(len(rotated), len(ref))
+                    score = hit / denominator
                     per_quarter[quarter] = max(per_quarter[quarter], score)
                     if score > best[3]:
                         best = (quarter, dx, dy, score)
@@ -680,17 +752,15 @@ def align_to_reference(
             if not fine:
                 continue
             turned = _rotate_cells_fine(base, fine)
+            denominator = scorer.prepare(turned)
             tcx = sum(c[0] for c in turned) / len(turned)
             tcy = sum(c[1] for c in turned) / len(turned)
             seeds = {(dx, dy), (round(fcx - tcx), round(fcy - tcy))}
             for sx, sy in seeds:
                 for ddx in range(sx - FINE_SEARCH_CELLS, sx + FINE_SEARCH_CELLS + 1):
                     for ddy in range(sy - FINE_SEARCH_CELLS, sy + FINE_SEARCH_CELLS + 1):
-                        hit = 0
-                        for cx, cy in turned:
-                            if (cx + ddx, cy + ddy) in ref:
-                                hit += 1
-                        value = hit / min(len(turned), len(ref))
+                        hit = scorer.count(ddx, ddy)
+                        value = hit / denominator
                         if value > max(score, floor_score):
                             score, dx, dy, best_fine = value, ddx, ddy, fine
 
@@ -1040,11 +1110,22 @@ class AccumulatedMap:
             # margin whether it is that quarter turn and not another. A merge
             # refused with a clear margin reads differently from one refused
             # with the four quarters level, and without this the two look alike.
-            margin, _ratio = quarter_margin(scores, quarter)
+            margin, ratio = quarter_margin(scores, quarter)
             report.update(
                 quarter=quarter, dx=dx, dy=dy, fine=fine, overlap=round(overlap, 3),
                 margin=round(margin, 3),
             )
+            if contribute and (margin < MERGE_MIN_MARGIN or ratio < MERGE_MIN_RATIO):
+                # Overlap alone cannot distinguish symmetric orientations.
+                # Keep the provisional placement without changing geometry or
+                # counting a rejection towards discarding the existing map.
+                report["ambiguous"] = True
+                report["contributed"] = False
+                contribute = False
+                _LOGGER.warning(
+                    "LIDAR map: ambiguous orientation (margin %.3f, ratio %.2f); "
+                    "placing the session without merging its geometry", margin, ratio,
+                )
             if clipped and contribute:
                 # The angle search ran to its limit, so this is the best fit the
                 # sweep could reach and not the best there is -- and what it
@@ -1119,10 +1200,7 @@ class AccumulatedMap:
                     "before merging (%.0f%% overlap)",
                     quarter * 90 + fine, dx, dy, 100 * overlap,
                 )
-            turned = _rotate_cells_fine(_rotate_cells(walls, quarter), fine)
-            walls = {
-                (cx + dx, cy + dy): n for (cx, cy), n in zip(turned, walls.values())
-            }
+            walls = _rotate_wall_counts(walls, quarter, fine, dx, dy)
             floor = {
                 (cx + dx, cy + dy)
                 for cx, cy in _rotate_cells_fine(_rotate_cells(floor, quarter), fine)

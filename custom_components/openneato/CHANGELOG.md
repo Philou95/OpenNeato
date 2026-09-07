@@ -4,6 +4,18 @@
 
 ### Fixed
 
+* Rotating a session preserves all wall weights when multiple cells land in
+  the same destination. Cell-centre rotation now agrees with continuous replay
+  coordinates; previously saved alignments retain their meaning.
+* Alignment scores count unique cells on both sides and cannot exceed 100%.
+  Ambiguous quarter turns keep a provisional placement without merging walls
+  or counting a rejection towards resetting the accumulated map.
+* ICP acceptance and constraint weights use the residual and matching fraction
+  evaluated at the returned pose, including its final iteration.
+* Final alignment uses bounded integer row masks instead of per-cell searches,
+  with an exact set-based fallback for wide or sparse grids. Only one angle and
+  translation are cached. Measurable wall angles skip redundant hinted searches.
+
 * Concurrent history downloads retain their own session prefix, preventing
   one session's trajectory from being appended to another session's header.
 * Scan acknowledgements include the bridge boot identifier. A bridge restart
