@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <atomic>
 #include <esp_task_wdt.h>
 #include <functional>
 #include "config.h"
@@ -53,6 +54,7 @@ public:
     explicit SystemManager(Preferences& prefs);
 
     void begin();
+    void refreshStorage(); // setup after SPIFFS mount, then loop task only
 
     // Task Watchdog Timer — must be called from setup() after all slow init,
     // and feedTaskWdt() from every loop() iteration to prevent TWDT reset.
@@ -95,6 +97,9 @@ public:
     void onNtpSync(NtpSyncCallback cb) { ntpSyncCallback = cb; }
 
 private:
+    std::atomic<size_t> cachedFsUsed{0};
+    std::atomic<size_t> cachedFsTotal{0};
+    unsigned long storageSampleAt = 0;
     void tick() override; // Runs every 5000ms — NTP sync detection + heap watchdog
 
     Preferences& prefs;
