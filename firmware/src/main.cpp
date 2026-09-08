@@ -175,6 +175,7 @@ void setup() {
         return sc;
     });
     dataLogger.begin();
+    systemManager.refreshStorage();
 
     // Fetch robot time as fallback clock (parsed from "Time UTC" in GetVersion)
     neatoSerial.getVersion([](bool ok, const VersionData& v) {

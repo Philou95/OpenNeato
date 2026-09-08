@@ -1,4 +1,5 @@
 #include "system_manager.h"
+#include "fs_lock.h"
 #include "web_server.h"
 #include <SPIFFS.h>
 #include <WiFi.h>
@@ -81,6 +82,9 @@ void SystemManager::feedTaskWdt() {
 }
 
 void SystemManager::tick() {
+    if (millis() - storageSampleAt >= 30000UL) {
+        refreshStorage();
+    }
     // On loopTask, so nullptr means loopTask -- see the note in the header.
     loopStackHwm = uxTaskGetStackHighWaterMark(nullptr);
 
@@ -213,6 +217,15 @@ std::vector<Field> SystemHealth::toFields() const {
     };
 }
 
+void SystemManager::refreshStorage() {
+    // Never call from AsyncTCP: querying SPIFFS can wait on flash activity.
+    // Only loopTask performs I/O; HTTP reads atomics without acquiring FsLock.
+    FsLock lock;
+    cachedFsUsed.store(SPIFFS.usedBytes());
+    cachedFsTotal.store(SPIFFS.totalBytes());
+    storageSampleAt = millis();
+}
+
 SystemHealth SystemManager::getSystemHealth(const String& tz) const {
     SystemHealth h;
     h.heap = ESP.getFreeHeap();
@@ -222,8 +235,8 @@ SystemHealth SystemManager::getSystemHealth(const String& tz) const {
     h.httpServedSlow = WebServer::servedSlow();
     h.uptime = millis();
     h.rssi = WiFi.RSSI();
-    h.fsUsed = SPIFFS.usedBytes();
-    h.fsTotal = SPIFFS.totalBytes();
+    h.fsUsed = cachedFsUsed.load();
+    h.fsTotal = cachedFsTotal.load();
     h.ntpSynced = ntpSynced;
     h.time = now();
     h.timeSource = ntpSynced ? "ntp" : (fallbackSet ? "fallback" : "millis");
